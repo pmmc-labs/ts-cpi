@@ -29,31 +29,31 @@ export type Pair  = { readonly t: 'pair';  readonly car: Value; readonly cdr: Va
 export type GroupMember = { readonly name: Sym; readonly params: readonly Sym[]; readonly body: readonly Value[] };
 
 export type Closure = {
-  readonly t: 'closure';
-  readonly name: Sym | null;                   // null for lambda
-  readonly params: readonly Sym[];
-  readonly body: readonly Value[];             // expanded expressions
-  readonly scope: Scope;                       // captured local scope
-  readonly group: readonly GroupMember[] | null; // non-null only for local defuns
+    readonly t: 'closure';
+    readonly name: Sym | null;                   // null for lambda
+    readonly params: readonly Sym[];
+    readonly body: readonly Value[];             // expanded expressions
+    readonly scope: Scope;                       // captured local scope
+    readonly group: readonly GroupMember[] | null; // non-null only for local defuns
 };
 
 // The context recorded when an error is first thrown (SPEC-CPI sections 2.3, 7.5).
 export type ErrorContext = {
-  readonly site: Site;    // the throwing expression
-  readonly scope: Scope;  // its local scope
-  readonly K: Kont;       // the continuation at the throw
-  readonly R: Env;        // the thrower's env ref
+    readonly site: Site;    // the throwing expression
+    readonly scope: Scope;  // its local scope
+    readonly K: Kont;       // the continuation at the throw
+    readonly R: Env;        // the thrower's env ref
 };
 
 export type ErrorValue = {
-  readonly t: 'error';
-  readonly tag: Sym;
-  readonly message: string;
-  readonly payload: Value;
-  readonly cause: ErrorValue | null;
-  // Write-once: null until the error is first thrown, then set by the machine
-  // and never changed. This is the one mutable field on any value.
-  readonly box: { ctx: ErrorContext | null };
+    readonly t: 'error';
+    readonly tag: Sym;
+    readonly message: string;
+    readonly payload: Value;
+    readonly cause: ErrorValue | null;
+    // Write-once: null until the error is first thrown, then set by the machine
+    // and never changed. This is the one mutable field on any value.
+    readonly box: { ctx: ErrorContext | null };
 };
 
 export type Addr   = { readonly t: 'addr'; readonly id: string };
@@ -73,9 +73,9 @@ export type Scope = { readonly name: Sym; readonly value: Value; readonly next: 
 // ---------------------------------------------------------------------------
 
 export type Slot =
-  | { readonly s: 'required';   readonly name: string }
-  | { readonly s: 'defined';    readonly name: string; readonly value: Value }
-  | { readonly s: 'conflicted'; readonly name: string; readonly left: Slot; readonly right: Slot };
+    | { readonly s: 'required';   readonly name: string }
+    | { readonly s: 'defined';    readonly name: string; readonly value: Value }
+    | { readonly s: 'conflicted'; readonly name: string; readonly left: Slot; readonly right: Slot };
 
 // Insertion-ordered; one slot per name.
 export type Env = { readonly slots: ReadonlyMap<string, Slot> };
@@ -86,24 +86,24 @@ export type Env = { readonly slots: ReadonlyMap<string, Slot> };
 
 // What an Args frame is collecting arguments for.
 export type Head =
-  | { readonly h: 'core'; readonly op: string }                      // core operation
-  | { readonly h: 'host'; readonly ns: string; readonly action: string } // ns::action
-  | { readonly h: 'call' };                                          // done[0] is the procedure
+    | { readonly h: 'core'; readonly op: string }                      // core operation
+    | { readonly h: 'host'; readonly ns: string; readonly action: string } // ns::action
+    | { readonly h: 'call' };                                          // done[0] is the procedure
 
 export type Frame =
-  | { readonly k: 'args';  readonly head: Head; readonly done: readonly Value[]; readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
-  | { readonly k: 'let';   readonly name: Sym; readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
-  | { readonly k: 'seq';   readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
-  | { readonly k: 'cond';  readonly body: readonly Value[]; readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
-  | { readonly k: 'and';   readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
-  | { readonly k: 'or';    readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
-  | { readonly k: 'catch'; readonly name: Sym; readonly handler: Value; readonly scope: Scope; readonly site: Site }
-  // Resumption frames (SPEC-CPI section 8): each discards the value it receives.
-  | { readonly k: 'val';   readonly v: Value }
-  // ThrowK also records the site and scope of the host request it answers, so
-  // an error thrown by a handler has a trace and a pad (SPEC-CPI 7.1, 7.5).
-  | { readonly k: 'throw'; readonly e: ErrorValue; readonly site: Site; readonly scope: Scope }
-  | { readonly k: 'eval';  readonly x: Value; readonly scope: Scope; readonly site: Site };
+    | { readonly k: 'args';  readonly head: Head; readonly done: readonly Value[]; readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
+    | { readonly k: 'let';   readonly name: Sym; readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
+    | { readonly k: 'seq';   readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
+    | { readonly k: 'cond';  readonly body: readonly Value[]; readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
+    | { readonly k: 'and';   readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
+    | { readonly k: 'or';    readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
+    | { readonly k: 'catch'; readonly name: Sym; readonly handler: Value; readonly scope: Scope; readonly site: Site }
+    // Resumption frames (SPEC-CPI section 8): each discards the value it receives.
+    | { readonly k: 'val';   readonly v: Value }
+    // ThrowK also records the site and scope of the host request it answers, so
+    // an error thrown by a handler has a trace and a pad (SPEC-CPI 7.1, 7.5).
+    | { readonly k: 'throw'; readonly e: ErrorValue; readonly site: Site; readonly scope: Scope }
+    | { readonly k: 'eval';  readonly x: Value; readonly scope: Scope; readonly site: Site };
 
 // Persistent list of frames, top first. Pushing makes a new node; nothing is mutated.
 export type Kont = { readonly top: Frame; readonly next: Kont } | null;
@@ -113,12 +113,12 @@ export type Kont = { readonly top: Frame; readonly next: Kont } | null;
 // ---------------------------------------------------------------------------
 
 export type Mode =
-  | { readonly m: 'eval';   readonly x: Value; readonly scope: Scope; readonly site: Site }
-  | { readonly m: 'ret';    readonly v: Value }
-  | { readonly m: 'throw';  readonly e: ErrorValue } // e.box.ctx is already set
-  | { readonly m: 'host';   readonly ns: string; readonly action: string; readonly args: readonly Value[]; readonly scope: Scope; readonly site: Site }
-  | { readonly m: 'done';   readonly v: Value }
-  | { readonly m: 'failed'; readonly e: ErrorValue };
+    | { readonly m: 'eval';   readonly x: Value; readonly scope: Scope; readonly site: Site }
+    | { readonly m: 'ret';    readonly v: Value }
+    | { readonly m: 'throw';  readonly e: ErrorValue } // e.box.ctx is already set
+    | { readonly m: 'host';   readonly ns: string; readonly action: string; readonly args: readonly Value[]; readonly scope: Scope; readonly site: Site }
+    | { readonly m: 'done';   readonly v: Value }
+    | { readonly m: 'failed'; readonly e: ErrorValue };
 
 // The checkpoint slot: the name of the procedure the process was spawned
 // with, and the arguments of the most recent call to it.

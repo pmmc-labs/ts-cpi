@@ -13,46 +13,46 @@ import { listToArray } from '../src/values.ts';
 import { Runtime } from '../src/runtime.ts';
 
 function main(): number {
-  const paths = process.argv.slice(2);
-  if (paths.length === 0) {
-    console.error('usage: cpi file.slight ...');
-    return 2;
-  }
+    const paths = process.argv.slice(2);
+    if (paths.length === 0) {
+        console.error('usage: cpi file.slight ...');
+        return 2;
+    }
 
-  let env;
-  try {
-    env = loadFiles(paths);
-  } catch (e) {
-    if (!(e instanceof LoadError)) throw e;
-    printError(e.e);
-    return 2;
-  }
+    let env;
+    try {
+        env = loadFiles(paths);
+    } catch (e) {
+        if (!(e instanceof LoadError)) throw e;
+        printError(e.e);
+        return 2;
+    }
 
-  const runtime = new Runtime({ out: (line) => process.stdout.write(line + '\n') });
-  const result = runtime.boot(env);
-  if (!result.ok) {
-    printError(result.e);
-    return 1;
-  }
-  return 0;
+    const runtime = new Runtime({ out: (line) => process.stdout.write(line + '\n') });
+    const result = runtime.boot(env);
+    if (!result.ok) {
+        printError(result.e);
+        return 1;
+    }
+    return 0;
 }
 
 // Prints an error, its trace, and each error in its cause chain, to stderr.
 function printError(e: ErrorValue): void {
-  let cur: ErrorValue | null = e;
-  let first = true;
-  while (cur !== null) {
-    if (!first) console.error('caused by:');
-    console.error(print(cur));
-    for (const entry of listToArray(traceEntries(cur)) ?? []) {
-      const [name, file, line, col] = listToArray(entry) ?? [];
-      const nameStr = name?.t === 'sym' ? name.name : '<anonymous>';
-      const fileStr = file?.t === 'str' ? file.v : '';
-      console.error(`  at ${nameStr} (${fileStr}:${line?.t === 'int' ? line.v : 0}:${col?.t === 'int' ? col.v : 0})`);
+    let cur: ErrorValue | null = e;
+    let first = true;
+    while (cur !== null) {
+        if (!first) console.error('caused by:');
+        console.error(print(cur));
+        for (const entry of listToArray(traceEntries(cur)) ?? []) {
+            const [name, file, line, col] = listToArray(entry) ?? [];
+            const nameStr = name?.t === 'sym' ? name.name : '<anonymous>';
+            const fileStr = file?.t === 'str' ? file.v : '';
+            console.error(`  at ${nameStr} (${fileStr}:${line?.t === 'int' ? line.v : 0}:${col?.t === 'int' ? col.v : 0})`);
+        }
+        cur = cur.cause;
+        first = false;
     }
-    cur = cur.cause;
-    first = false;
-  }
 }
 
 process.exitCode = main();

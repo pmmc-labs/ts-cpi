@@ -1,15 +1,15 @@
 (defun parse-age (s)
-  (if (string? s)
-      (throw (make-error :bad-age "not a number" s))
-      s))
+    (if (string? s)
+        (throw (make-error :bad-age "not a number" s))
+        s))
 
 (defun load-user (name age)
-  (catch (parse-age age)
-         e
-         (throw (wrap-error e :bad-user "could not load user" name))))
+    (catch (parse-age age)
+        e
+        (throw (wrap-error e :bad-user "could not load user" name))))
 
 (defun main ()
-  (let e (catch (load-user "ada" "forty") err err))
-  (IO::print :tag (error-tag e) :cause (error-tag (error-cause e)))
-  (IO::print :trace (stack-trace-for (error-cause e)))
-  (load-user "bob" "fifty"))
+    (let e (catch (load-user "ada" "forty") err err))
+    (IO::print :tag (error-tag e) :cause (error-tag (error-cause e)))
+    (IO::print :trace (stack-trace-for (error-cause e)))
+    (load-user "bob" "fifty"))

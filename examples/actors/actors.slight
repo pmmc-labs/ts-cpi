@@ -14,10 +14,10 @@
 ; ---------------------------------------------------------------------------
 
 (defun send (to tag body)
-  (actor::send to (cons tag (cons (actor::self) (cons body ())))))
+    (actor::send to (cons tag (cons (actor::self) (cons body ())))))
 
 (defun receive ()
-  (actor::recv))
+    (actor::recv))
 
 (defun msg-tag (m) (car m))
 (defun msg-from (m) (car (cdr m)))
@@ -39,57 +39,57 @@
 ; Actors see the same global definitions as the CPI, so they can call the
 ; helpers above.
 (defun spawn-actor (name behavior args)
-  (let pid (process::spawn behavior args (environment::self) '(actor IO) #false))
-  (IO::print "[system] spawned" name)
-  (cons name (cons pid (cons (process::address pid) ()))))
+    (let pid (process::spawn behavior args (environment::self) '(actor IO) #false))
+    (IO::print "[system] spawned" name)
+    (cons name (cons pid (cons (process::address pid) ()))))
 
 (defun ready? (a)
-  (eq? (car (process::state (actor-pid a))) :ready))
+    (eq? (car (process::state (actor-pid a))) :ready))
 
 (defun any-ready? (actors)
-  (and (not (nil? actors))
-       (or (ready? (car actors))
-           (any-ready? (cdr actors)))))
+    (and (not (nil? actors))
+        (or (ready? (car actors))
+            (any-ready? (cdr actors)))))
 
 (defun ended? (reason)
-  (or (eq? (car reason) :exited)
-      (eq? (car reason) :failed)))
+    (or (eq? (car reason) :exited)
+        (eq? (car reason) :failed)))
 
 ; Gives one actor a turn if it is ready, and reports anything other than
 ; preemption. Returns #false once the actor has ended.
 (defun run-one (a)
-  (if (ready? a)
-      (do
-        (let reason (process::run (actor-pid a) quota))
-        (when (not (eq? (car reason) :quota))
-          (IO::print "[system]" (actor-name a) reason))
-        (not (ended? reason)))
-      #true))
+    (if (ready? a)
+        (do
+            (let reason (process::run (actor-pid a) quota))
+            (when (not (eq? (car reason) :quota))
+                (IO::print "[system]" (actor-name a) reason))
+            (not (ended? reason)))
+        #true))
 
 ; One round robin pass. Returns the actors that are still alive, in order.
 (defun run-round (actors)
-  (if (nil? actors)
-      ()
-      (do
-        (let a (car actors))
-        (let alive (run-one a))
-        (let others (run-round (cdr actors)))
-        (if alive (cons a others) others))))
+    (if (nil? actors)
+        ()
+        (do
+            (let a (car actors))
+            (let alive (run-one a))
+            (let others (run-round (cdr actors)))
+            (if alive (cons a others) others))))
 
 ; Stops every actor in the list. Used when nothing can make progress.
 (defun shutdown (actors)
-  (when (not (nil? actors))
-    (IO::print "[system] stopping idle" (actor-name (car actors)))
-    (process::kill (actor-pid (car actors)) :idle)
-    (shutdown (cdr actors))))
+    (when (not (nil? actors))
+        (IO::print "[system] stopping idle" (actor-name (car actors)))
+        (process::kill (actor-pid (car actors)) :idle)
+        (shutdown (cdr actors))))
 
 ; The scheduler loop. It is tail recursive, so it runs in constant space no
 ; matter how many rounds it takes. When no actor is ready it waits for the
 ; host; if nothing is pending either, the remaining actors are idle forever
 ; (all blocked in receive), so it shuts them down.
 (defun run-system (actors)
-  (cond
-    ((nil? actors) (IO::print "[system] all actors ended"))
-    ((any-ready? actors) (run-system (run-round actors)))
-    ((nil? (host::wait #false)) (shutdown actors))
-    (#true (run-system actors))))
+    (cond
+        ((nil? actors) (IO::print "[system] all actors ended"))
+        ((any-ready? actors) (run-system (run-round actors)))
+        ((nil? (host::wait #false)) (shutdown actors))
+        (#true (run-system actors))))

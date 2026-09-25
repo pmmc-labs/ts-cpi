@@ -2,39 +2,39 @@
 ; already-thrown, and environment::error-pad.
 
 (defun compute (x)
-  (let y (* x 2))
-  (throw (make-error :fail "bad y" y)))
+    (let y (* x 2))
+    (throw (make-error :fail "bad y" y)))
 
 (defun middle (x)
-  (catch (compute x)
-         e
-         (throw (wrap-error e :wrapped "middle wrapped it" x))))
+    (catch (compute x)
+        e
+        (throw (wrap-error e :wrapped "middle wrapped it" x))))
 
 (defun main ()
-  ; catch, wrap-error, and error-cause chain
-  (let result (catch (middle 21) e e))
-  (IO::print :tag (error-tag result))
-  (IO::print :message (error-message result))
-  (let cause (error-cause result))
-  (IO::print :cause-tag (error-tag cause))
-  (IO::print :cause-message (error-message cause))
-  (IO::print :cause-of-cause (error-cause cause))
+    ; catch, wrap-error, and error-cause chain
+    (let result (catch (middle 21) e e))
+    (IO::print :tag (error-tag result))
+    (IO::print :message (error-message result))
+    (let cause (error-cause result))
+    (IO::print :cause-tag (error-tag cause))
+    (IO::print :cause-message (error-message cause))
+    (IO::print :cause-of-cause (error-cause cause))
 
-  ; stack-trace-for: procedure names for the trace of the outer error
-  (let trace (stack-trace-for result))
-  (IO::print :trace-outer trace)
-  (let cause-trace (stack-trace-for cause))
-  (IO::print :trace-cause cause-trace)
+    ; stack-trace-for: procedure names for the trace of the outer error
+    (let trace (stack-trace-for result))
+    (IO::print :trace-outer trace)
+    (let cause-trace (stack-trace-for cause))
+    (IO::print :trace-cause cause-trace)
 
-  ; environment::error-pad: the local variable visible at the throw site
-  (let pad (environment::error-pad cause 0))
-  (IO::print :pad pad)
+    ; environment::error-pad: the local variable visible at the throw site
+    (let pad (environment::error-pad cause 0))
+    (IO::print :pad pad)
 
-  ; already-thrown: throwing the same error value twice
-  (let boom (make-error :boom "first throw" ()))
-  (let r1 (catch (throw boom) e1 (error-tag e1)))
-  (let r2 (catch (throw boom) e2 (error-tag e2)))
-  (IO::print :r1 r1)
-  (IO::print :r2 r2)
-  (IO::print :r2-payload-tag (error-tag (error-payload (catch (throw boom) e3 e3))))
-  :done)
+    ; already-thrown: throwing the same error value twice
+    (let boom (make-error :boom "first throw" ()))
+    (let r1 (catch (throw boom) e1 (error-tag e1)))
+    (let r2 (catch (throw boom) e2 (error-tag e2)))
+    (IO::print :r1 r1)
+    (IO::print :r2 r2)
+    (IO::print :r2-payload-tag (error-tag (error-payload (catch (throw boom) e3 e3))))
+    :done)

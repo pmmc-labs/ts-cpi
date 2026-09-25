@@ -34,7 +34,7 @@ A minimal program:
 
 ```lisp
 (defun main ()
-  (IO::print "hello" (* 6 7)))
+    (IO::print "hello" (* 6 7)))
 ```
 
 [`TUTORIAL.md`](TUTORIAL.md) walks through the language, errors, processes and

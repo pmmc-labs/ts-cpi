@@ -3,50 +3,50 @@
 ; five rounds each, then exits.
 
 (defun player (name other n)
-  (if (eq? n 0)
-      (do (IO::print name :done) :done)
-      (do
-        (actor::send other n)
-        (let msg (actor::recv))
-        (IO::print name :recv msg)
-        (player name other (- n 1)))))
+    (if (eq? n 0)
+        (do (IO::print name :done) :done)
+        (do
+            (actor::send other n)
+            (let msg (actor::recv))
+            (IO::print name :recv msg)
+            (player name other (- n 1)))))
 
 (defun any-ready? (pids)
-  (if (nil? pids)
-      #false
-      (if (eq? (car (process::state (car pids))) :ready)
-          #true
-          (any-ready? (cdr pids)))))
+    (if (nil? pids)
+        #false
+        (if (eq? (car (process::state (car pids))) :ready)
+            #true
+            (any-ready? (cdr pids)))))
 
 (defun all-ended? (pids)
-  (if (nil? pids)
-      #true
-      (and (eq? (car (process::state (car pids))) :ended)
-           (all-ended? (cdr pids)))))
+    (if (nil? pids)
+        #true
+        (and (eq? (car (process::state (car pids))) :ended)
+            (all-ended? (cdr pids)))))
 
 (defun run-round (pids)
-  (if (nil? pids)
-      ()
-      (do
-        (let p (car pids))
-        (when (eq? (car (process::state p)) :ready)
-          (do
-            (let r (process::run p 20))
-            (IO::print :stop r)))
-        (run-round (cdr pids)))))
+    (if (nil? pids)
+        ()
+        (do
+            (let p (car pids))
+            (when (eq? (car (process::state p)) :ready)
+                (do
+                    (let r (process::run p 20))
+                    (IO::print :stop r)))
+            (run-round (cdr pids)))))
 
 (defun scheduler (pids)
-  (when (not (all-ended? pids))
-    (do
-      (run-round pids)
-      (when (and (not (all-ended? pids)) (not (any-ready? pids)))
-        (host::wait #false))
-      (scheduler pids))))
+    (when (not (all-ended? pids))
+        (do
+            (run-round pids)
+            (when (and (not (all-ended? pids)) (not (any-ready? pids)))
+                (host::wait #false))
+            (scheduler pids))))
 
 (defun main ()
-  (let addr-a (mailbox::create #false 100))
-  (let addr-b (mailbox::create #false 100))
-  (let pa (process::spawn player (cons :a (cons addr-b (cons 5 ()))) (environment::self) '(actor IO) addr-a))
-  (let pb (process::spawn player (cons :b (cons addr-a (cons 5 ()))) (environment::self) '(actor IO) addr-b))
-  (scheduler (cons pa (cons pb ())))
-  :done)
+    (let addr-a (mailbox::create #false 100))
+    (let addr-b (mailbox::create #false 100))
+    (let pa (process::spawn player (cons :a (cons addr-b (cons 5 ()))) (environment::self) '(actor IO) addr-a))
+    (let pb (process::spawn player (cons :b (cons addr-a (cons 5 ()))) (environment::self) '(actor IO) addr-b))
+    (scheduler (cons pa (cons pb ())))
+    :done)

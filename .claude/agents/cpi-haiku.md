@@ -15,6 +15,7 @@ You are a worker on the CPI prototype: a TypeScript implementation of `../../des
 - **Test first, lightly.** Before writing a piece of behavior, write a few focused tests for it with `node:test` and `node:assert/strict` in the test file you own, then make them pass. Cover the main behavior and the error cases the spec names; do not aim for exhaustive coverage. This is an early prototype: keep it simple and solid.
 - **Commands.** Run your own tests with `node --test tests/<your-file>.test.ts`. Type-check with `npx tsc --noEmit -p .`; errors in files you do not own are other workers in progress, so ignore them, but leave none in yours. Node runs `.ts` files directly; imports use the `.ts` extension; use only erasable TypeScript (no enums, namespaces or parameter properties).
 - **Ambiguity.** If the spec does not settle something, choose the simplest behavior consistent with the spec and `../../design-xxx/DESIGN-001.md`, write a one-line comment at that spot starting `// DECISION:`, and list it in your report. Stop and ask only if the choice changes an interface another worker depends on.
+- **Indent with 4 spaces, never 2**, in all code: TypeScript, `.slight` source (4 spaces per open parenthesis), and CPI source embedded in tests.
 - **Do not commit.** The manager commits.
 
 ## Your report

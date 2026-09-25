@@ -20,7 +20,7 @@ forms. The CLI loads them in order and evaluates `(main)`:
 ```lisp
 ; examples/hello.slight
 (defun main ()
-  (IO::print "hello," "world" 42))
+    (IO::print "hello," "world" 42))
 ```
 
 ```
@@ -44,24 +44,24 @@ are restricted.
 (const greeting "counting down")
 
 (defun sum-to (n acc)
-  (if (= n 0)
-      acc
-      (sum-to (- n 1) (+ acc n))))
+    (if (= n 0)
+        acc
+        (sum-to (- n 1) (+ acc n))))
 
 (defun describe (x)
-  (case x
-    (:red   "warm")
-    (:blue  "cool")
-    (else   "unknown")))
+    (case x
+        (:red   "warm")
+        (:blue  "cool")
+        (else   "unknown")))
 
 (defun main ()
-  (IO::print greeting)
-  (let total (sum-to 100 0))
-  (IO::print :sum total)
-  (IO::print :red (describe :red) :green (describe :green))
-  (let twice (lambda (f x) (f (f x))))
-  (IO::print :twice (twice (lambda (n) (* n 3)) 5))
-  (IO::print :list (cons 1 (cons "two" (cons :three ())))))
+    (IO::print greeting)
+    (let total (sum-to 100 0))
+    (IO::print :sum total)
+    (IO::print :red (describe :red) :green (describe :green))
+    (let twice (lambda (f x) (f (f x))))
+    (IO::print :twice (twice (lambda (n) (* n 3)) 5))
+    (IO::print :list (cons 1 (cons "two" (cons :three ())))))
 ```
 
 ```
@@ -107,20 +107,20 @@ once**: to pass one on, wrap it in a new error with `wrap-error`.
 ```lisp
 ; examples/errors.slight
 (defun parse-age (s)
-  (if (string? s)
-      (throw (make-error :bad-age "not a number" s))
-      s))
+    (if (string? s)
+        (throw (make-error :bad-age "not a number" s))
+        s))
 
 (defun load-user (name age)
-  (catch (parse-age age)
-         e
-         (throw (wrap-error e :bad-user "could not load user" name))))
+    (catch (parse-age age)
+        e
+        (throw (wrap-error e :bad-user "could not load user" name))))
 
 (defun main ()
-  (let e (catch (load-user "ada" "forty") err err))
-  (IO::print :tag (error-tag e) :cause (error-tag (error-cause e)))
-  (IO::print :trace (stack-trace-for (error-cause e)))
-  (load-user "bob" "fifty"))
+    (let e (catch (load-user "ada" "forty") err err))
+    (IO::print :tag (error-tag e) :cause (error-tag (error-cause e)))
+    (IO::print :trace (stack-trace-for (error-cause e)))
+    (load-user "bob" "fifty"))
 ```
 
 `(catch body name handler)` evaluates `body`; if it throws, it binds the error
@@ -130,13 +130,13 @@ inspected; the second is not, so `main` fails:
 ```
 $ node bin/cpi.ts examples/errors.slight
 tag bad-user cause bad-age
-trace ((parse-age errors.slight 3 7) (load-user errors.slight 7 3) (main errors.slight 12 10) (main errors.slight 12 10))
+trace ((parse-age errors.slight 3 9) (load-user errors.slight 7 5) (main errors.slight 12 12) (main errors.slight 12 12))
 #<error bad-user "could not load user">
-  at load-user (errors.slight:9:10)
+  at load-user (errors.slight:9:9)
 caused by:
 #<error bad-age "not a number">
-  at parse-age (errors.slight:3:7)
-  at load-user (errors.slight:7:3)
+  at parse-age (errors.slight:3:9)
+  at load-user (errors.slight:7:5)
 ```
 
 The last five lines go to stderr, and the exit code is 1.
@@ -163,26 +163,26 @@ decides what to do with what they report. Nothing runs unless the CPI runs it.
 ```lisp
 ; examples/processes.slight
 (defun greeter (name)
-  (let msg (actor::recv))
-  (IO::print name :got msg)
-  (greeter name))
+    (let msg (actor::recv))
+    (IO::print name :got msg)
+    (greeter name))
 
 (defun sneaky ()
-  (host::now))
+    (host::now))
 
 (defun main ()
-  (let p (process::spawn greeter (cons :g ()) (environment::self) '(actor IO) #false))
-  (IO::print :state (process::state p))
-  (IO::print :run1 (process::run p 50))
-  (IO::print :state (process::state p))
-  (mailbox::send (process::address p) :hello)
-  (IO::print :state (process::state p))
-  (IO::print :run2 (process::run p 3))
-  (IO::print :run3 (process::run p 50))
-  (IO::print :checkpoint (process::checkpoint p))
-  (let q (process::spawn sneaky () (environment::self) '(actor) #false))
-  (let r (process::run q 50))
-  (IO::print :sneaky (car r) (error-tag (car (cdr r)))))
+    (let p (process::spawn greeter (cons :g ()) (environment::self) '(actor IO) #false))
+    (IO::print :state (process::state p))
+    (IO::print :run1 (process::run p 50))
+    (IO::print :state (process::state p))
+    (mailbox::send (process::address p) :hello)
+    (IO::print :state (process::state p))
+    (IO::print :run2 (process::run p 3))
+    (IO::print :run3 (process::run p 50))
+    (IO::print :checkpoint (process::checkpoint p))
+    (let q (process::spawn sneaky () (environment::self) '(actor) #false))
+    (let r (process::run q 50))
+    (IO::print :sneaky (car r) (error-tag (car (cdr r)))))
 ```
 
 ```
@@ -230,34 +230,34 @@ batch reaches the receiver when that batch ends.
 
 ```lisp
 (defun counter (n)
-  (let msg (actor::recv))
-  (case msg
-    (:boom (throw (make-error :boom "boom!" n)))
-    (:inc  (do (IO::print :count (+ n 1)) (counter (+ n 1))))
-    (else  (counter n))))
+    (let msg (actor::recv))
+    (case msg
+        (:boom (throw (make-error :boom "boom!" n)))
+        (:inc  (do (IO::print :count (+ n 1)) (counter (+ n 1))))
+        (else  (counter n))))
 
 (defun main ()
-  (let mbox (mailbox::create #true 100))
-  (let p1 (process::spawn counter (cons 0 ()) (environment::self) '(actor IO) mbox))
+    (let mbox (mailbox::create #true 100))
+    (let p1 (process::spawn counter (cons 0 ()) (environment::self) '(actor IO) mbox))
 
-  (mailbox::send mbox :inc)
-  (process::run p1 100)
-  (mailbox::send mbox :inc)
-  (process::run p1 100)
+    (mailbox::send mbox :inc)
+    (process::run p1 100)
+    (mailbox::send mbox :inc)
+    (process::run p1 100)
 
-  (mailbox::send mbox :boom)
-  (let r3 (process::run p1 100))
-  (IO::print :stop (car r3))
-  (IO::print :error-tag (error-tag (car (cdr r3))))
+    (mailbox::send mbox :boom)
+    (let r3 (process::run p1 100))
+    (IO::print :stop (car r3))
+    (IO::print :error-tag (error-tag (car (cdr r3))))
 
-  (let checkpoint (process::checkpoint p1))
-  (IO::print :checkpoint checkpoint)
+    (let checkpoint (process::checkpoint p1))
+    (IO::print :checkpoint checkpoint)
 
-  (let p2 (process::spawn counter checkpoint (environment::self) '(actor IO) mbox))
-  (mailbox::send mbox :inc)
-  (let r4 (process::run p2 100))
-  (IO::print :restarted-stop (car r4))
-  :done)
+    (let p2 (process::spawn counter checkpoint (environment::self) '(actor IO) mbox))
+    (mailbox::send mbox :inc)
+    (let r4 (process::run p2 100))
+    (IO::print :restarted-stop (car r4))
+    :done)
 ```
 
 ```
@@ -285,23 +285,23 @@ Scheduling is control plane code: a loop over stop reasons.
 
 ```lisp
 (defun run-round (pids)
-  (if (nil? pids)
-      ()
-      (do
-        (let p (car pids))
-        (when (eq? (car (process::state p)) :ready)
-          (do
-            (let r (process::run p 20))
-            (IO::print :stop r)))
-        (run-round (cdr pids)))))
+    (if (nil? pids)
+        ()
+        (do
+            (let p (car pids))
+            (when (eq? (car (process::state p)) :ready)
+                (do
+                    (let r (process::run p 20))
+                    (IO::print :stop r)))
+            (run-round (cdr pids)))))
 
 (defun scheduler (pids)
-  (when (not (all-ended? pids))
-    (do
-      (run-round pids)
-      (when (and (not (all-ended? pids)) (not (any-ready? pids)))
-        (host::wait #false))
-      (scheduler pids))))
+    (when (not (all-ended? pids))
+        (do
+            (run-round pids)
+            (when (and (not (all-ended? pids)) (not (any-ready? pids)))
+                (host::wait #false))
+            (scheduler pids))))
 ```
 
 Each round gives every `ready` process 20 ticks. When nothing is ready,

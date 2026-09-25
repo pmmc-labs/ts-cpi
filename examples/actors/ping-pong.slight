@@ -3,24 +3,24 @@
 
 ; Pong is a server: it answers every ping, forever.
 (defun pong ()
-  (let m (receive))
-  (case (msg-tag m)
-    (:ping (IO::print "pong: got ping" (msg-body m))
-           (send (msg-from m) :pong (msg-body m)))
-    (else  (IO::print "pong: ignoring" (msg-tag m))))
-  (pong))
+    (let m (receive))
+    (case (msg-tag m)
+        (:ping (IO::print "pong: got ping" (msg-body m))
+            (send (msg-from m) :pong (msg-body m)))
+        (else  (IO::print "pong: ignoring" (msg-tag m))))
+    (pong))
 
 ; Ping sends `n` pings to `server`, waiting for each reply, then exits.
 (defun ping (server n)
-  (if (= n 0)
-      :done
-      (do
-        (send server :ping n)
-        (let reply (receive))
-        (IO::print "ping: got" (msg-tag reply) (msg-body reply))
-        (ping server (- n 1)))))
+    (if (= n 0)
+        :done
+        (do
+            (send server :ping n)
+            (let reply (receive))
+            (IO::print "ping: got" (msg-tag reply) (msg-body reply))
+            (ping server (- n 1)))))
 
 (defun main ()
-  (let pong-actor (spawn-actor :pong pong ()))
-  (let ping-actor (spawn-actor :ping ping (cons (actor-address pong-actor) (cons 3 ()))))
-  (run-system (cons pong-actor (cons ping-actor ()))))
+    (let pong-actor (spawn-actor :pong pong ()))
+    (let ping-actor (spawn-actor :ping ping (cons (actor-address pong-actor) (cons 3 ()))))
+    (run-system (cons pong-actor (cons ping-actor ()))))
