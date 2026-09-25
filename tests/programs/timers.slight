@@ -1,0 +1,21 @@
+; Scenario 7: two actors sleep for different virtual durations; output
+; order follows virtual time, and host::now (called from the CPI, which
+; alone is granted the privileged host:: namespace) reports the expected
+; values.
+
+(defun sleeper (name ms)
+  (timer::sleep ms)
+  (IO::print name :woke))
+
+(defun main ()
+  (let pa (process::spawn sleeper (cons :a (cons 100 ())) (environment::self) '(actor IO timer) #false))
+  (let pb (process::spawn sleeper (cons :b (cons 50 ())) (environment::self) '(actor IO timer) #false))
+  (process::run pa 100)
+  (process::run pb 100)
+  (host::wait #false)
+  (IO::print :time (host::now))
+  (process::run pb 100)
+  (host::wait #false)
+  (IO::print :time (host::now))
+  (process::run pa 100)
+  (IO::print :time (host::now)))

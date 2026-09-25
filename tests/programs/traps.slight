@@ -1,0 +1,22 @@
+; Scenario 5: a trapped `send` effect comes back to the CPI, which performs
+; it itself with mailbox::send and resumes the actor.
+
+(defun sender (addr)
+  (actor::send addr :hi)
+  :sent)
+
+(defun main ()
+  (host::set-traps '(send))
+  (let target (mailbox::create #true 10))
+  (let p (process::spawn sender (cons target ()) (environment::self) '(actor) #false))
+  (let r (process::run p 100))
+  (IO::print :stop (car r))
+  (IO::print :effect (car (cdr r)))
+  (let args (car (cdr (cdr r))))
+  (let addr (car args))
+  (let msg (car (cdr args)))
+  (mailbox::send addr msg)
+  (process::resume p #true)
+  (let r2 (process::run p 100))
+  (IO::print :final r2)
+  (IO::print :mailbox-size (mailbox::size target)))

@@ -57,8 +57,20 @@ choices in `prompt.md`, then the simplest consistent behavior.
 - `src/loader.ts`: load-error messages are prefixed with `file:line:col` of the top-level form; a failing `const`'s load-error has the thrown error as both payload and cause, so the CLI prints its trace.
 - `bin/cpi.ts` (manager): prints the error, one `at name (file:line:col)` line per trace entry, then each cause under `caused by:`.
 - `IO::print` uses `display` all the way down, so strings inside printed lists also appear without quotes.
+- `tests/programs/scheduler.slight`: both mailboxes are created before spawning, so each player knows the other's address. The expected output was captured from a run, not simulated by hand. The program prints each full stop reason (manager change).
+- `tests/programs/tailcalls.slight`: the spawned loop runs with a quota of 20,000,000. One iteration costs about 18 ticks, because every step is metered.
+- `tests/programs/timers.slight`: `host::now` is called from the CPI, not from the actors, because `host::` is privileged.
+- `tests/programs/parking.slight`: the address is read with `process::address` before parking (it is `bad-state` afterwards).
+- `tests/programs/traps.slight`: the CPI resumes a trapped send with `#true`, what `actor::send` returns.
 
 ## Spec issues
 
 - SPEC-CPI section 1 says the CPI "is granted the privileged namespaces in section 8"; they are listed in section 10. Editorial.
 - SPEC-CPI section 2.3 calls tag, message, payload and cause "three visible fields". There are four. Editorial.
+- SPEC-CPI section 10.1 says `process::park` returns "plain data: its continuation…", but no value type in section 2.1 can hold a continuation or frame. The prototype keeps the continuation in a runtime table and returns a key (see Prototype decisions). DESIGN-001 section 6 (frames are plain, content-addressed data) suggests frames should become values, or be stored in the store and referenced by hash.
+- SPEC-CPI section 8 says each namespace declares actions "and their arities", and a mismatched count is an `arity-error`. `IO::print` is used with any number of arguments (prototype choices), so the prototype allows a variadic arity for it alone.
+- SPEC-CPI section 10.1 describes `process::state` as "the state as a symbol, plus detail" without fixing the shape of states that have no detail. The prototype always returns a list.
+- SPEC-CPI section 7.5 records one trace entry per frame in `K`. Two frames can wait on the same expression, for example `(let r (catch …))`, where the `let` frame and the `catch` frame both sit at the `catch`. The trace then shows the same entry twice. This follows the spec literally; the spec may want entries collapsed, or per-procedure entries only.
+- An ordinary process cannot read the time: `host::now` is in the privileged `host::` namespace, and `timer::` has only `sleep` in the prototype. SPEC-CPI section 10.5 leaves other namespaces to their subsystems, so this is a gap rather than a contradiction.
+- SPEC-CPI section 11 counts every `step` as a tick, and section 7.3's `Eval((do rest …))` transitions make tick counts depend on how literally the table is read. Quotas are therefore implementation-defined until the spec fixes a canonical step count per form.
+

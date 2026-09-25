@@ -1,0 +1,32 @@
+; Scenario 4: restart an actor from its checkpoint after it fails.
+; The mailbox is durable so it survives across the restart.
+
+(defun counter (n)
+  (let msg (actor::recv))
+  (case msg
+    (:boom (throw (make-error :boom "boom!" n)))
+    (:inc  (do (IO::print :count (+ n 1)) (counter (+ n 1))))
+    (else  (counter n))))
+
+(defun main ()
+  (let mbox (mailbox::create #true 100))
+  (let p1 (process::spawn counter (cons 0 ()) (environment::self) '(actor IO) mbox))
+
+  (mailbox::send mbox :inc)
+  (process::run p1 100)
+  (mailbox::send mbox :inc)
+  (process::run p1 100)
+
+  (mailbox::send mbox :boom)
+  (let r3 (process::run p1 100))
+  (IO::print :stop (car r3))
+  (IO::print :error-tag (error-tag (car (cdr r3))))
+
+  (let checkpoint (process::checkpoint p1))
+  (IO::print :checkpoint checkpoint)
+
+  (let p2 (process::spawn counter checkpoint (environment::self) '(actor IO) mbox))
+  (mailbox::send mbox :inc)
+  (let r4 (process::run p2 100))
+  (IO::print :restarted-stop (car r4))
+  :done)
