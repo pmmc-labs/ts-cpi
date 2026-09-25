@@ -39,6 +39,12 @@ A minimal program:
 
 [`TUTORIAL.md`](TUTORIAL.md) walks through the language, errors, processes and
 the builtins, using the programs in `examples/` and `tests/programs/`.
+`examples/actors/` builds a minimal actor system in the language (message
+helpers, a round-robin scheduler, idle shutdown) and runs ping pong on it:
+
+```sh
+node bin/cpi.ts examples/actors/actors.slight examples/actors/ping-pong.slight
+```
 
 ## Modules
 
