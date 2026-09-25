@@ -100,7 +100,9 @@ export type Frame =
   | { readonly k: 'catch'; readonly name: Sym; readonly handler: Value; readonly scope: Scope; readonly site: Site }
   // Resumption frames (SPEC-CPI section 8): each discards the value it receives.
   | { readonly k: 'val';   readonly v: Value }
-  | { readonly k: 'throw'; readonly e: ErrorValue }
+  // ThrowK also records the site and scope of the host request it answers, so
+  // an error thrown by a handler has a trace and a pad (SPEC-CPI 7.1, 7.5).
+  | { readonly k: 'throw'; readonly e: ErrorValue; readonly site: Site; readonly scope: Scope }
   | { readonly k: 'eval';  readonly x: Value; readonly scope: Scope; readonly site: Site };
 
 // Persistent list of frames, top first. Pushing makes a new node; nothing is mutated.
@@ -114,7 +116,7 @@ export type Mode =
   | { readonly m: 'eval';   readonly x: Value; readonly scope: Scope; readonly site: Site }
   | { readonly m: 'ret';    readonly v: Value }
   | { readonly m: 'throw';  readonly e: ErrorValue } // e.box.ctx is already set
-  | { readonly m: 'host';   readonly ns: string; readonly action: string; readonly args: readonly Value[]; readonly site: Site }
+  | { readonly m: 'host';   readonly ns: string; readonly action: string; readonly args: readonly Value[]; readonly scope: Scope; readonly site: Site }
   | { readonly m: 'done';   readonly v: Value }
   | { readonly m: 'failed'; readonly e: ErrorValue };
 
