@@ -1,0 +1,21 @@
+(const greeting "counting down")
+
+(defun sum-to (n acc)
+  (if (= n 0)
+      acc
+      (sum-to (- n 1) (+ acc n))))
+
+(defun describe (x)
+  (case x
+    (:red   "warm")
+    (:blue  "cool")
+    (else   "unknown")))
+
+(defun main ()
+  (IO::print greeting)
+  (let total (sum-to 100 0))
+  (IO::print :sum total)
+  (IO::print :red (describe :red) :green (describe :green))
+  (let twice (lambda (f x) (f (f x))))
+  (IO::print :twice (twice (lambda (n) (* n 3)) 5))
+  (IO::print :list (cons 1 (cons "two" (cons :three ())))))

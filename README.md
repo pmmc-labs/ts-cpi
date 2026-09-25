@@ -37,8 +37,8 @@ A minimal program:
   (IO::print "hello" (* 6 7)))
 ```
 
-The programs in `tests/programs/` show the builtins in use: a round-robin
-scheduler, restart from a checkpoint, traps, parking and timers.
+[`TUTORIAL.md`](TUTORIAL.md) walks through the language, errors, processes and
+the builtins, using the programs in `examples/` and `tests/programs/`.
 
 ## Modules
 

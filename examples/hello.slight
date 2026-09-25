@@ -1,0 +1,2 @@
+(defun main ()
+  (IO::print "hello," "world" 42))
