@@ -1,0 +1,287 @@
+; 19 · The Tick Economy
+;
+; A quota is the right to run: `(process::run pid 1000)` spends a thousand
+; evaluator steps of the machine's time. Here the CPI turns quotas into
+; money. One coin buys one slice of 1000 ticks, and nothing runs without
+; paying.
+;
+; The board is split into four 4x4 regions (NW, NE, SW, SE), each computed
+; by its own worker process. A worker only looks near live cells, so a
+; region with the glider or the blinker in it costs two or three times as
+; much as a quiet one. Every generation each region is paid the same wage,
+; and the regions then take turns buying slices until each has sent in its
+; quarter of the next board. The CPI plays every institution:
+;
+;   - the market: a region that is broke borrows a coin from the richest
+;     other region, at 25% interest, repaid out of the next wages (a debt
+;     that cannot be repaid in full compounds);
+;   - the regional supervisors: one per region, keeping its books;
+;   - the Treasury, the supervisor of supervisors: when a region is broke
+;     and nobody can lend, the Treasury declares it bankrupt. It kills the
+;     worker with `process::kill`, forgives its debts (the lenders take the
+;     loss), prints money for a bailout, and restarts the worker from its
+;     checkpoint on the same mailbox. The restart recomputes the region from
+;     scratch, so the ticks bought on credit are simply lost.
+;
+; The wage is set a little below what the whole board costs, so the economy
+; drifts from thrift to debt to bankruptcy and inflation, and a ledger is
+; printed after each frame. The frames never notice: however the money
+; moves, every region's answer is a pure function of the board it was sent.
+;
+; CPI features: `process::run` quotas as a currency, `(quota)` stop reasons
+; as the unit of account, `process::state`, `process::kill`,
+; `process::checkpoint`, respawning on a durable mailbox so the address
+; outlives the worker, `mailbox::take` for the CPI's inbox, and control
+; plane code as policy (a market, a supervision tree, a central bank).
+
+(const qe-coin 1000)
+(const qe-wage 50)
+(const qe-endowment 30)
+(const qe-names '("NW" "NE" "SW" "SE"))
+
+; ---------------------------------------------------------------------------
+; Inside a worker (granted only actor)
+; ---------------------------------------------------------------------------
+
+; A job is (gen live), with `live` the (row col) list of live cells of the
+; whole board. The worker answers (id gen born), the live cells of its
+; region in the next generation. The job is an argument of the loop, so the
+; checkpoint holds it: a worker restarted from its checkpoint redoes the job.
+(defun qe-region (id reply job)
+    (if (nil? job)
+        (qe-region id reply (actor::recv))
+        (do
+            (let born (qe-compute (qe-row0 id) (qe-col0 id) (second job)))
+            (actor::send reply (list3 id (car job) born))
+            (qe-region id reply ()))))
+
+(defun qe-row0 (id) (* 4 (/ id 2)))
+(defun qe-col0 (id) (* 4 (% id 2)))
+
+(defun qe-in-region? (r0 c0 p)
+    (and (>= (car p) r0) (< (car p) (+ r0 4)) (>= (second p) c0) (< (second p) (+ c0 4))))
+
+; Only cells that are live or next to a live cell can be live next time.
+(defun qe-candidates (r0 c0 live)
+    (fold (lambda (acc cell)
+            (fold (lambda (acc2 p)
+                    (if (and (qe-in-region? r0 c0 p) (not (member-cell? (car p) (second p) acc2)))
+                        (cons p acc2)
+                        acc2))
+                acc (cons cell (neighbors-of (car cell) (second cell)))))
+        () live))
+
+(defun qe-next-alive? (live p)
+    (let alive (if (member-cell? (car p) (second p) live) 1 0))
+    (let count (length (filter (lambda (q) (member-cell? (car q) (second q) live))
+                (neighbors-of (car p) (second p)))))
+    (= (life-rule alive count) 1))
+
+(defun qe-compute (r0 c0 live)
+    (filter (lambda (p) (qe-next-alive? live p)) (qe-candidates r0 c0 live)))
+
+; ---------------------------------------------------------------------------
+; The books. A region record is (id pid wallet debts spent borrowed done),
+; with `debts` a list of (lender amount). `spent` and `borrowed` count this
+; generation only.
+; ---------------------------------------------------------------------------
+
+(defun qe-rec (id pid wallet debts spent borrowed done)
+    (cons id (cons pid (cons wallet (cons debts (cons spent (cons borrowed (cons done ()))))))))
+
+(defun qe-id (r) (car r))
+(defun qe-pid (r) (second r))
+(defun qe-wallet (r) (third r))
+(defun qe-debts (r) (list-ref r 3))
+(defun qe-spent (r) (list-ref r 4))
+(defun qe-borrowed (r) (list-ref r 5))
+(defun qe-done? (r) (list-ref r 6))
+
+(defun qe-name (id) (list-ref qe-names id))
+
+(defun qe-find (regions id)
+    (car (filter (lambda (r) (= (qe-id r) id)) regions)))
+
+; Replaces region `id` with (f record).
+(defun qe-update (regions id f)
+    (map (lambda (r) (if (= (qe-id r) id) (f r) r)) regions))
+
+(defun qe-add-wallet (r n)
+    (qe-rec (qe-id r) (qe-pid r) (+ (qe-wallet r) n) (qe-debts r) (qe-spent r) (qe-borrowed r) (qe-done? r)))
+
+(defun qe-total-debt (r)
+    (sum (map second (qe-debts r))))
+
+(defun qe-money-supply (regions)
+    (sum (map qe-wallet regions)))
+
+; Adds `amount` to the debt owed to `lender`.
+(defun qe-owe (debts lender amount)
+    (cond
+        ((nil? debts) (cons (list2 lender amount) ()))
+        ((= (car (car debts)) lender)
+            (cons (list2 lender (+ (second (car debts)) amount)) (cdr debts)))
+        (#true (cons (car debts) (qe-owe (cdr debts) lender amount)))))
+
+; ---------------------------------------------------------------------------
+; Payday: wages, then debts repaid with interest out of the new wallet.
+; ---------------------------------------------------------------------------
+
+(defun qe-payday (regions)
+    (let paid (map (lambda (r)
+                (qe-rec (qe-id r) (qe-pid r) (+ (qe-wallet r) qe-wage) (qe-debts r) 0 0 #false))
+            regions))
+    (fold (lambda (rs r) (qe-settle rs (qe-id r))) paid paid))
+
+; Repays each of `id`'s debts in turn: principal plus 25% interest.
+(defun qe-settle (regions id)
+    (qe-settle-debts regions id (qe-debts (qe-find regions id))))
+
+(defun qe-settle-debts (regions id debts)
+    (if (nil? debts)
+        regions
+        (do
+            (let lender (car (car debts)))
+            (let principal (second (car debts)))
+            (let owed (+ principal (/ (+ principal 3) 4)))
+            (let wallet (qe-wallet (qe-find regions id)))
+            (let pay (if (< wallet owed) wallet owed))
+            (IO::print (string-append "  " (qe-name id)) "repays" pay "of" owed "coins owed to" (qe-name lender)
+                (if (< pay owed) "(the rest compounds)" "(paid off)"))
+            (let rs1 (qe-update regions id
+                    (lambda (r)
+                        (qe-rec (qe-id r) (qe-pid r) (- (qe-wallet r) pay)
+                            (if (< pay owed)
+                                (qe-owe (filter (lambda (d) (not (= (car d) lender))) (qe-debts r))
+                                    lender (- owed pay))
+                                (filter (lambda (d) (not (= (car d) lender))) (qe-debts r)))
+                            (qe-spent r) (qe-borrowed r) (qe-done? r)))))
+            (let rs2 (qe-update rs1 lender (lambda (r) (qe-add-wallet r pay))))
+            (qe-settle-debts rs2 id (cdr debts)))))
+
+; ---------------------------------------------------------------------------
+; The market: regions take turns buying one slice each until all are done.
+; ---------------------------------------------------------------------------
+
+; Marks the regions whose answers have arrived, collecting their cells.
+; Returns (regions born).
+(defun qe-collect (gen inbox regions born)
+    (let msg (mailbox::take inbox))
+    (cond
+        ((eq? msg #false) (list2 regions born))
+        ((or (not (= (second msg) gen)) (qe-done? (qe-find regions (car msg))))
+            (qe-collect gen inbox regions born))
+        (#true
+            (qe-collect gen inbox
+                (qe-update regions (car msg)
+                    (lambda (r) (qe-rec (qe-id r) (qe-pid r) (qe-wallet r) (qe-debts r)
+                            (qe-spent r) (qe-borrowed r) #true)))
+                (append (third msg) born)))))
+
+; The richest other region that can spare a coin, or #false.
+(defun qe-lender (regions id)
+    (fold (lambda (best r)
+            (cond
+                ((= (qe-id r) id) best)
+                ((< (qe-wallet r) 2) best)
+                ((eq? best #false) r)
+                ((> (qe-wallet r) (qe-wallet best)) r)
+                (#true best)))
+        #false regions))
+
+; One turn for region `id`: find a coin, then spend it on a slice.
+(defun qe-turn (regions id mailboxes bailouts)
+    (let r (qe-find regions id))
+    (cond
+        ((> (qe-wallet r) 0)
+            (qe-buy-slice (qe-update regions id (lambda (r) (qe-add-wallet r -1))) id bailouts))
+        ((not (eq? (qe-lender regions id) #false))
+            (do
+                (let lender (qe-id (qe-lender regions id)))
+                (let rs (qe-update regions lender (lambda (r) (qe-add-wallet r -1))))
+                (qe-buy-slice (qe-update rs id
+                        (lambda (r) (qe-rec (qe-id r) (qe-pid r) (qe-wallet r)
+                                (qe-owe (qe-debts r) lender 1)
+                                (qe-spent r) (+ (qe-borrowed r) 1) (qe-done? r))))
+                    id bailouts)))
+        (#true (qe-bankrupt regions id mailboxes bailouts))))
+
+(defun qe-buy-slice (regions id bailouts)
+    (process::run (qe-pid (qe-find regions id)) qe-coin)
+    (list2 (qe-update regions id
+            (lambda (r) (qe-rec (qe-id r) (qe-pid r) (qe-wallet r) (qe-debts r)
+                    (+ (qe-spent r) 1) (qe-borrowed r) (qe-done? r))))
+        bailouts))
+
+; The Treasury. Kill, forgive, print money, restart from the checkpoint.
+; Each bailout is bigger than the last. Returns (regions bailouts).
+(defun qe-bankrupt (regions id mailboxes bailouts)
+    (let r (qe-find regions id))
+    (let grant (* 20 (+ bailouts 1)))
+    (process::kill (qe-pid r) :bankrupt)
+    (let checkpoint (process::checkpoint (qe-pid r)))
+    (let fresh (process::spawn qe-region checkpoint (environment::self) '(actor) (list-ref mailboxes id)))
+    (IO::print "  TREASURY:" (qe-name id) "is bankrupt after buying" (qe-spent r) "slices this generation."
+        "Worker killed; debts of" (qe-total-debt r) "forgiven; minted" grant
+        "coins; restarted from checkpoint"
+        (if (nil? (third checkpoint)) "(its job still waits in its mailbox)" "(its job is in the checkpoint)"))
+    (list2 (qe-update regions id
+            (lambda (r) (qe-rec id fresh grant () (qe-spent r) (qe-borrowed r) (qe-done? r))))
+        (+ bailouts 1)))
+
+(defun qe-wants-slice? (regions id)
+    (let r (qe-find regions id))
+    (and (not (qe-done? r)) (eq? (car (process::state (qe-pid r))) :ready)))
+
+; Round after round: every unfinished region gets one turn. Returns
+; (regions born bailouts).
+(defun qe-market (gen inbox regions born mailboxes bailouts)
+    (let collected (qe-collect gen inbox regions born))
+    (let rs (car collected))
+    (if (all? qe-done? rs)
+        (list3 rs (second collected) bailouts)
+        (do
+            (let after (fold (lambda (acc id)
+                        (if (qe-wants-slice? (car acc) id)
+                            (qe-turn (car acc) id mailboxes (second acc))
+                            acc))
+                    (list2 rs bailouts) (range 0 4)))
+            (qe-market gen inbox (car after) (second collected) mailboxes (second after)))))
+
+; ---------------------------------------------------------------------------
+; The generations
+; ---------------------------------------------------------------------------
+
+(defun qe-ledger (regions)
+    (for-each (lambda (r)
+            (IO::print (string-append "    " (qe-name (qe-id r))) "bought" (qe-spent r) "slices,"
+                (qe-borrowed r) "on credit; wallet" (qe-wallet r) "coins, owes" (qe-total-debt r)))
+        regions)
+    (IO::print "    money supply:" (qe-money-supply regions) "coins"))
+
+(defun qe-run (gen board regions inbox mailboxes bailouts)
+    (print-board gen board)
+    (when (< gen life-generations)
+        (do
+            (IO::print "-- payday before generation" (+ gen 1) ": wage" qe-wage "each --")
+            (let rs (qe-payday regions))
+            (let live (live-cells board))
+            (for-each (lambda (m) (mailbox::send m (list2 (+ gen 1) live))) mailboxes)
+            (let out (qe-market (+ gen 1) inbox rs () mailboxes bailouts))
+            (qe-ledger (car out))
+            (let born (second out))
+            (let next (make-board (lambda (row col) (if (member-cell? row col born) 1 0))))
+            (qe-run (+ gen 1) next (car out) inbox mailboxes (third out)))))
+
+(defun main ()
+    (let inbox (mailbox::create #true 100))
+    (let mailboxes (map (lambda (id) (mailbox::create #true 10)) (range 0 4)))
+    (let regions (map (lambda (id)
+                (qe-rec id
+                    (process::spawn qe-region (list3 id inbox ()) (environment::self) '(actor)
+                        (list-ref mailboxes id))
+                    qe-endowment () 0 0 #false))
+            (range 0 4)))
+    (IO::print "the supervision tree:  Treasury -> (NW NE SW SE) supervisors -> one worker each")
+    (IO::print "one coin buys" qe-coin "ticks; every region starts with" qe-endowment "coins")
+    (qe-run 0 (seed-board) regions inbox mailboxes 0))

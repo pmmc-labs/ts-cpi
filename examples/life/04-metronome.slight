@@ -1,0 +1,175 @@
+; 04 · Metronome
+;
+; Generations are driven by the virtual clock: one beat every 100 ms, and one
+; generation per beat. Eight row "players" sit with their music (the three
+; rows around their own) and `timer::sleep` until the next beat. When the
+; beat comes they play (compute their next row), hand it in, and wait for
+; new music. The CPI is the conductor: it loops on `host::wait`, which jumps
+; the virtual clock straight to the next deadline, collects the rows, and
+; prints each frame with the time it was completed (`host::now`).
+;
+; One player drags. On beat 3 the player of row 5 oversleeps by 30 ms. The
+; conductor will not print a frame with a hole in it, so it waits, checking
+; its watch every 10 ms with `host::wait 10`: a wait with a timeout shorter
+; than the next deadline just moves the clock forward and returns `()`.
+; Frame 3 therefore appears at t=330, not t=300. The players' sleeps are
+; aimed at absolute beats (the conductor tells them the time with each
+; score), so the band is back on the beat at t=400: lateness does not
+; accumulate.
+;
+; Nothing here takes real time. Evaluation costs ticks, never milliseconds:
+; the clock moves only when the CPI calls `host::wait`, and a whole
+; 800 ms performance runs in a fraction of a second.
+;
+; CPI features: `timer::sleep` and `(blocked host)`, `host::wait` with and
+; without a timeout, `host::now`, `process::run` of just the woken PIDs,
+; `mailbox::take` on a shared result mailbox.
+
+(const mt-beat 100)
+
+; The late player, the beat it is late for, and by how much.
+(const mt-late-row 5)
+(const mt-late-beat 3)
+(const mt-lag 30)
+
+; How often the conductor checks its watch while waiting for a late player.
+(const mt-patience 10)
+
+; ---------------------------------------------------------------------------
+; A player (granted actor and timer)
+; ---------------------------------------------------------------------------
+
+(defun mt-triple (row col)
+    (+ (list-ref row (wrap (- col 1) life-width))
+        (+ (list-ref row col)
+            (list-ref row (wrap (+ col 1) life-width)))))
+
+(defun mt-step-row (above own below)
+    (map (lambda (col)
+            (do
+                (let alive (list-ref own col))
+                (let count (- (+ (mt-triple above col)
+                            (+ (mt-triple own col) (mt-triple below col)))
+                        alive))
+                (life-rule alive count)))
+        (range 0 life-width)))
+
+; How long a player sleeps: until the next beat, measured from `now`, the
+; time the conductor wrote on the score. Players cannot read the clock
+; themselves: `host::now` is privileged.
+(defun mt-sleep-for (row beat now)
+    (let on-time (- (* beat mt-beat) now))
+    (if (and (= row mt-late-row) (= beat mt-late-beat))
+        (+ on-time mt-lag)
+        on-time))
+
+; A score is (gen now above own below). The answer, (row gen new-row), goes
+; to the shared result mailbox. `:stop` ends the performance.
+(defun mt-player (row results)
+    (let score (actor::recv))
+    (if (eq? score :stop)
+        :bow
+        (do
+            (let gen (car score))
+            (let rows (cdr (cdr score)))
+            (timer::sleep (mt-sleep-for row (+ gen 1) (second score)))
+            (actor::send results (list3 row (+ gen 1) (mt-step-row (car rows) (second rows) (third rows))))
+            (mt-player row results))))
+
+; ---------------------------------------------------------------------------
+; The conductor (the CPI)
+; ---------------------------------------------------------------------------
+
+(defun mt-ready? (p)
+    (eq? (car (process::state p)) :ready))
+
+; Runs a process until it blocks; anything else is a bug in a player.
+(defun mt-run (p)
+    (let reason (process::run p 100000))
+    (cond
+        ((eq? (car reason) :quota) (mt-run p))
+        ((eq? (car reason) :blocked) reason)
+        (#true (throw (make-error :player-died "a player stopped" reason)))))
+
+(defun mt-run-ready (players)
+    (for-each (lambda (p) (when (mt-ready? p) (mt-run p))) players))
+
+; The rows whose players are ready to run. `host::wait` returns the woken
+; PIDs, but as fresh values that are not `eq?` to the PIDs `process::spawn`
+; returned, so the conductor asks each player's state instead.
+(defun mt-ready-rows (players)
+    (filter (lambda (row) (mt-ready? (list-ref players row))) (range 0 life-height)))
+
+; Hands every player its score for the next beat, and lets each one read it
+; and go to sleep.
+(defun mt-hand-out (players gen board)
+    (let now (host::now))
+    (for-each (lambda (row)
+            (mailbox::send (process::address (list-ref players row))
+                (cons gen (cons now (list3 (list-ref board (wrap (- row 1) life-height))
+                            (list-ref board row)
+                            (list-ref board (wrap (+ row 1) life-height)))))))
+        (range 0 life-height))
+    (mt-run-ready players))
+
+; Moves every result waiting in the mailbox into `got`, a list of (row new-row).
+(defun mt-collect (results gen got)
+    (let r (mailbox::take results))
+    (cond
+        ((eq? r #false) got)
+        ((= (second r) gen) (mt-collect results gen (cons (list2 (car r) (third r)) got)))
+        (#true (throw (make-error :off-beat "a row for the wrong beat" r)))))
+
+(defun mt-missing (got)
+    (filter (lambda (row) (not (any? (lambda (g) (= (car g) row)) got)))
+        (range 0 life-height)))
+
+(defun mt-assemble (got)
+    (map (lambda (row)
+            (second (car (filter (lambda (g) (= (car g) row)) got))))
+        (range 0 life-height)))
+
+; Waits for the rows of generation `gen`, due at `due`. Before the beat the
+; conductor sleeps until the next deadline; after it, only `mt-patience` ms
+; at a time, so it can grumble about the missing rows.
+(defun mt-await (players results gen due got)
+    (if (nil? (mt-missing got))
+        got
+        (do
+            (let late? (>= (host::now) due))
+            (let woken (host::wait (if late? mt-patience #false)))
+            (if (nil? woken)
+                (do
+                    (when (not late?)
+                        (throw (make-error :silence "nobody is asleep, yet rows are missing" (mt-missing got))))
+                    (IO::print "[conductor] t =" (host::now) "ms," (- (host::now) due)
+                        "ms late, still waiting for rows" (mt-missing got)))
+                (IO::print "[clock] t =" (host::now) "ms, woke rows" (mt-ready-rows players)))
+            (mt-run-ready players)
+            (mt-await players results gen due (mt-collect results gen got)))))
+
+(defun mt-perform (players results gen board)
+    (IO::print "[conductor] t =" (host::now) "ms, beat" gen)
+    (print-board gen board)
+    (when (< gen life-generations)
+        (do
+            (mt-hand-out players gen board)
+            (let due (* (+ gen 1) mt-beat))
+            (let got (mt-await players results (+ gen 1) due ()))
+            (when (> (host::now) due)
+                (IO::print "[conductor] beat" (+ gen 1) "lands" (- (host::now) due)
+                    "ms late; players aim at absolute beats, so beat" (+ gen 2) "is still due at"
+                    (+ due mt-beat) "ms"))
+            (mt-perform players results (+ gen 1) (mt-assemble got)))))
+
+(defun main ()
+    (let results (mailbox::create #true 100))
+    (let players (map (lambda (row)
+                (process::spawn mt-player (list2 row results) (environment::self) '(actor timer) #false))
+            (range 0 life-height)))
+    (IO::print "[conductor]" (length players) "players, one beat every" mt-beat "ms of virtual time")
+    (mt-perform players results 0 (seed-board))
+    (for-each (lambda (p) (mailbox::send (process::address p) :stop)) players)
+    (for-each (lambda (p) (process::run p 1000)) players)
+    (IO::print "[conductor] t =" (host::now) "ms, the players"
+        (map (lambda (p) (third (process::state p))) players)))

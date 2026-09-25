@@ -1,0 +1,212 @@
+; 20 · The Rule Swap
+;
+; Can the control plane change the code of a running simulation, run it for
+; a while, and change it back, without the frames noticing? This version is
+; one long-lived "world" process that computes every generation itself,
+; reports each board to the CPI, and waits for a go-ahead between
+; generations. While it runs, the CPI swaps the Life rule four times:
+;
+;   A. Swap the environment. SPEC-CPI says `process::set-env` changes which
+;      code later calls by name reach, so a hot reload would be: build an env
+;      in which `life-rule` means something else, and set it. The CPI tries.
+;      It can get env refs from `environment::self`, `environment::compose`,
+;      `process::env` and `environment::error-env`, but every one of them is
+;      the CPI's own env or a composition of it with itself: the binding
+;      hashes all match. There is no builtin that adds or replaces a binding,
+;      so the language cannot build the patch env a hot reload needs. The
+;      swap goes through (the world keeps running, unharmed), and changes
+;      nothing. This is a finding, printed at generation 1.
+;
+;   B. Swap by message. The world takes its rule as a loop argument, and a
+;      go-ahead may carry an upgrade. At generation 2 the CPI sends an
+;      instrumented rule: a closure that computes `life-rule` and also
+;      reports every decision to a census mailbox, so the CPI can print
+;      births and deaths per generation. Code travels as a value.
+;
+;   C. Swap by checkpoint surgery. At generation 4 the CPI lets the world
+;      start computing, preempts it mid-generation with a small quota, kills
+;      it, rewrites the rule in its checkpoint to a table-driven rule (Life as
+;      data, not code), and respawns it on the same mailbox. The restart
+;      replays from the checkpoint: the world re-reports generation 4 (the
+;      CPI ignores the duplicate) and the census it half-sent from the
+;      aborted attempt is discarded.
+;
+;   D. Swap back. At generation 6 the original `life-rule` is sent back, and
+;      the CPI confirms, by reading the checkpoint, that the world is running
+;      exactly the code it started with.
+;
+; Before every go-ahead the CPI names the rule the world holds, found by
+; comparing the checkpoint's rule argument with `eq?`.
+;
+; CPI features: `process::set-env`, `process::env`, `environment::compose`,
+; `environment::binding-hash`, `environment::conflicts`, `environment::error-env`,
+; closures sent in messages, `process::checkpoint` as editable data,
+; `process::kill` and respawn on a durable mailbox, quota preemption,
+; `mailbox::take`.
+
+; ---------------------------------------------------------------------------
+; Inside the world (granted only actor)
+; ---------------------------------------------------------------------------
+
+; Reports the board, waits for (go) or (upgrade rule), computes the next
+; generation with whichever rule it now holds, and loops. The rule is an
+; argument, so the checkpoint holds it.
+(defun hr-world (gen board rule out)
+    (actor::send out (list2 gen board))
+    (let msg (actor::recv))
+    (let next-rule (if (eq? (car msg) :upgrade) (second msg) rule))
+    (hr-world (+ gen 1) (hr-step next-rule board) next-rule out))
+
+(defun hr-step (rule board)
+    (make-board (lambda (row col) (rule (cell-at board row col) (neighbor-count board row col)))))
+
+; ---------------------------------------------------------------------------
+; The replacement rules, made by the CPI and sent to the world
+; ---------------------------------------------------------------------------
+
+; `life-rule`, plus a report of each decision as (alive next) to `census`.
+(defun hr-counting-rule (census)
+    (lambda (alive count)
+        (let next (life-rule alive count))
+        (actor::send census (list2 alive next))
+        next))
+
+; Life as data: row `alive` of the table, column `count`.
+(const hr-table '((0 0 0 1 0 0 0 0 0)
+        (0 0 1 1 0 0 0 0 0)))
+
+(defun hr-table-rule (table)
+    (lambda (alive count) (list-ref (list-ref table alive) count)))
+
+; ---------------------------------------------------------------------------
+; The CPI
+; ---------------------------------------------------------------------------
+
+; A world record is (pid census known-rules), with known-rules a list of
+; (name rule) used to name what the world is running.
+(defun hr-rule-name (rule known)
+    (let hits (filter (lambda (k) (eq? (second k) rule)) known))
+    (if (nil? hits) "an unknown rule" (car (car hits))))
+
+(defun hr-show-rule (p known)
+    (IO::print (string-append "  [the world's checkpoint holds " (string-append (hr-rule-name (third (process::checkpoint p)) known) "]"))))
+
+; Prints the frames waiting in `out`, skipping any generation already shown.
+; Returns the highest generation printed so far.
+(defun hr-frames (out shown)
+    (let msg (mailbox::take out))
+    (cond
+        ((eq? msg #false) shown)
+        ((> (car msg) shown)
+            (do
+                (print-board (car msg) (second msg))
+                (hr-frames out (car msg))))
+        (#true
+            (do
+                (IO::print "  (ignored a second report of generation" (car msg) "from the restarted world)")
+                (hr-frames out shown)))))
+
+
+; Tallies the census reports waiting in `census`, each (alive next).
+; Returns (births deaths survivals calls).
+(defun hr-drain-census (census b d s n)
+    (let msg (mailbox::take census))
+    (cond
+        ((eq? msg #false) (cons b (list3 d s n)))
+        ((and (= (car msg) 0) (= (second msg) 1)) (hr-drain-census census (+ b 1) d s (+ n 1)))
+        ((and (= (car msg) 1) (= (second msg) 0)) (hr-drain-census census b (+ d 1) s (+ n 1)))
+        ((and (= (car msg) 1) (= (second msg) 1)) (hr-drain-census census b d (+ s 1) (+ n 1)))
+        (#true (hr-drain-census census b d s (+ n 1)))))
+
+(defun hr-print-census (census gen)
+    (let c (hr-drain-census census 0 0 0 0))
+    (when (> (list-ref c 3) 0)
+        (IO::print "  census of the step to generation" gen ":" (list-ref c 3) "rule calls,"
+            (car c) "births," (second c) "deaths," (third c) "survivals")))
+
+; Runs the world until it waits for its next go-ahead.
+(defun hr-run-world (p)
+    (let r (process::run p 10000000))
+    (when (not (eq? (car r) :blocked))
+        (throw (make-error :world-stopped "the world stopped unexpectedly" r))))
+
+(defun hr-go (p home msg)
+    (mailbox::send home msg)
+    (hr-run-world p)
+    p)
+
+; Swap A: every env ref the CPI can lay its hands on, and a set-env.
+(defun hr-try-env-swap (p)
+    (let mine (environment::self))
+    (let worlds (process::env p))
+    (let composed (environment::compose mine worlds))
+    (let caught (catch (throw (make-error :probe "thrown only to capture an env" ())) e e))
+    (let thrown (environment::error-env caught))
+    (let hash (environment::binding-hash mine))
+    (IO::print "  swap A: looking for an env in which life-rule means something else")
+    (IO::print "    environment::self binding hash" hash)
+    (for-each (lambda (named)
+            (IO::print "   " (car named) "same hash:" (eq? (environment::binding-hash (second named)) hash)
+                "same life-rule:" (eq? (environment::lookup (second named) 'life-rule) life-rule)))
+        (list3 (list2 "process::env of the world," worlds)
+            (list2 "compose self with it," composed)
+            (list2 "environment::error-env of a probe," thrown)))
+    (IO::print "    conflicts in the composition:" (environment::conflicts composed))
+    (IO::print "    eq? of two environment::self refs:" (eq? mine (environment::self))
+        "(refs are compared by identity, so only the hash can tell envs apart)")
+    (IO::print "    process::set-env of the running world to the composition:" (process::set-env p composed))
+    (IO::print "  swap A: no builtin adds or replaces a binding, so every env ref is this one env.")
+    (IO::print "    The swap went through and changed nothing; the language cannot build a patch."))
+
+; Swap C: preempt mid-generation, kill, edit the checkpoint, respawn.
+(defun hr-surgery (p home census new-rule)
+    (mailbox::send home (cons :go ()))
+    (let r (process::run p 20000))
+    (IO::print "  swap C: let the world start the next generation, then stopped it:" r)
+    (process::kill p :surgery)
+    (let cp (process::checkpoint p))
+    (IO::print "    killed it; its checkpoint is (gen board rule out) with gen" (car cp))
+    (let partial (hr-drain-census census 0 0 0 0))
+    (IO::print "    discarded" (list-ref partial 3) "census reports from the aborted attempt")
+    (let edited (cons (car cp) (cons (second cp) (cons new-rule (cdr (cdr (cdr cp)))))))
+    (let p2 (process::spawn hr-world edited (environment::self) '(actor) home))
+    (IO::print "    respawned it from the edited checkpoint on the same mailbox; it replays from there")
+    (hr-run-world p2)
+    (hr-go p2 home (cons :go ())))
+
+; One transition per call: gen `shown` to gen `shown` + 1.
+(defun hr-drive (p home out census rules shown)
+    (if (= shown life-generations)
+        (do
+            (hr-show-rule p rules)
+            (process::kill p :the-end)
+            (IO::print "the world ran" life-generations "generations under three rules and one empty env swap, and never knew"))
+        (do
+            (hr-show-rule p rules)
+            (let rule-of (lambda (i) (second (list-ref rules i))))
+            (let p2 (case shown
+                    (1 (do
+                            (hr-try-env-swap p)
+                            (hr-go p home (cons :go ()))))
+                    (2 (do
+                            (IO::print "  swap B: sending the counting rule in the go-ahead")
+                            (hr-go p home (list2 :upgrade (rule-of 1)))))
+                    (4 (hr-surgery p home census (rule-of 2)))
+                    (6 (do
+                            (IO::print "  swap D: sending the original life-rule back")
+                            (hr-go p home (list2 :upgrade (rule-of 0)))))
+                    (else (hr-go p home (cons :go ())))))
+            (hr-print-census census (+ shown 1))
+            (hr-drive p2 home out census rules (hr-frames out shown)))))
+
+(defun main ()
+    (let out (mailbox::create #true 100))
+    (let census (mailbox::create #true 1000))
+    (let home (mailbox::create #true 10))
+    (let rules (list3 (list2 "life-rule, the original" life-rule)
+            (list2 "the counting rule" (hr-counting-rule census))
+            (list2 "the table rule" (hr-table-rule hr-table))))
+    (let p (process::spawn hr-world (cons 0 (cons (seed-board) (cons life-rule (cons out ()))))
+            (environment::self) '(actor) home))
+    (hr-run-world p)
+    (hr-drive p home out census rules (hr-frames out -1)))

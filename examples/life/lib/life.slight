@@ -29,8 +29,8 @@
 ; (f row col) gives each cell's state.
 (defun make-board (f)
     (map (lambda (row)
-             (map (lambda (col) (f row col)) (range 0 life-width)))
-         (range 0 life-height)))
+            (map (lambda (col) (f row col)) (range 0 life-width)))
+        (range 0 life-height)))
 
 (defun seed-board ()
     (make-board (lambda (row col) (if (member-cell? row col seed-cells) 1 0))))
@@ -44,8 +44,8 @@
 ; The (row col) positions of the eight neighbors of a cell, wrapped.
 (defun neighbors-of (row col)
     (map (lambda (o) (list2 (wrap (+ row (car o)) life-height)
-                            (wrap (+ col (second o)) life-width)))
-         neighbor-offsets))
+                (wrap (+ col (second o)) life-width)))
+        neighbor-offsets))
 
 (defun neighbor-count (board row col)
     (sum (map (lambda (p) (cell-at board (car p) (second p))) (neighbors-of row col))))
@@ -64,8 +64,8 @@
 
 (defun live-cells (board)
     (filter (lambda (p) (= (cell-at board (car p) (second p)) 1))
-            (fold append () (map (lambda (row) (map (lambda (col) (list2 row col)) (range 0 life-width)))
-                                 (range 0 life-height)))))
+        (fold append () (map (lambda (row) (map (lambda (col) (list2 row col)) (range 0 life-width)))
+                (range 0 life-height)))))
 
 (defun row->string (row)
     (fold (lambda (s cell) (string-append s (if (= cell 1) "#" "."))) "" row))

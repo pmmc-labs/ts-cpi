@@ -1,0 +1,217 @@
+; 09 · Hibernation
+;
+; One process per cell, 64 in all. A cell knows only its own state, a count
+; of its live neighbors, and the addresses of its eight neighbors. It spends
+; its life blocked in `actor::recv`, waiting to be told something:
+;
+;     (delta d)   a neighbor was born (+1) or died (-1)
+;     tick        work out your next state; report to the CPI if it changes
+;     commit      you changed: tell your neighbors
+;
+; Life only changes where something just changed. A cell whose own state and
+; whose neighbor count did not move last generation will not move this one,
+; so there is no reason for it to exist as a running process. The CPI parks
+; it: `process::park` sets its continuation aside as parked data and ends its
+; PID. Its mailbox stays, keeps its address, and keeps collecting deltas.
+; When a delta lands in a hibernating cell's mailbox, activity has reached
+; it: the CPI unparks the data into `(environment::self)` and the new process
+; carries on from inside the very `recv` it was parked in.
+;
+; A generation has two phases, so every cell sees the counts of generation n
+; while computing generation n+1: first `tick` the awake cells (they report
+; changes to the CPI's mailbox and send nothing to each other), then `commit`
+; the changed ones (they send their deltas, which wait in mailboxes until the
+; next generation). The CPI prints the board from the reports it collects.
+;
+; The 8x8 torus is small and busy: the glider and the blinker touch most of
+; it, so a generation runs 37 to 43 of the 64 cells, and the rest sleep. The
+; heat map printed at the end shows where the work went; the cells with a 0
+; never ran a single tick, and on a larger board with the same seed nearly
+; every cell would be a 0.
+;
+; CPI features: process::park and process::unpark (new PID, same address,
+; same continuation), mailbox::size on parked processes' mailboxes, durable
+; mailboxes, mailbox::create / mailbox::take for the CPI's own inbox, cell to
+; cell sends delivered at batch end, and the checkpoint carried in parked data.
+
+; ---------------------------------------------------------------------------
+; The cell process
+; ---------------------------------------------------------------------------
+
+(defun hb-cell (row col alive count nbrs cpi)
+    (let msg (actor::recv))
+    (cond
+        ((pair? msg)
+            (hb-cell row col alive (+ count (second msg)) nbrs cpi))
+        ((eq? msg :tick)
+            (do
+                (let next (life-rule alive count))
+                (when (not (= next alive))
+                    (actor::send cpi (list3 row col next)))
+                (hb-cell row col next count nbrs cpi)))
+        ((eq? msg :commit)
+            (do
+                (hb-tell nbrs (if (= alive 1) 1 -1))
+                (hb-cell row col alive count nbrs cpi)))
+        (#true (hb-cell row col alive count nbrs cpi))))
+
+(defun hb-tell (nbrs d)
+    (for-each (lambda (addr) (actor::send addr (list2 :delta d))) nbrs))
+
+; ---------------------------------------------------------------------------
+; The CPI's view of a cell: (index addr handle), where handle is
+; (awake <pid>) or (asleep <parked data>).
+; ---------------------------------------------------------------------------
+
+(defun hb-index (c) (car c))
+(defun hb-addr (c) (second c))
+(defun hb-handle (c) (third c))
+(defun hb-awake? (c) (eq? (car (hb-handle c)) :awake))
+(defun hb-pid (c) (second (hb-handle c)))
+
+; Run a process until it blocks in recv again.
+(defun hb-settle (pid)
+    (let r (process::run pid 5000))
+    (case (car r)
+        (:quota (hb-settle pid))
+        (:blocked r)
+        (else (throw (make-error :hb-surprise "a cell stopped" r)))))
+
+(defun hb-count (pred xs)
+    (length (filter pred xs)))
+
+(defun hb-spawn-all (addrs cpi)
+    (map (lambda (i)
+            (let row (index-row i))
+            (let col (index-col i))
+            (let nbrs (map (lambda (p) (list-ref addrs (cell-index (car p) (second p))))
+                    (neighbors-of row col)))
+            (let alive (if (member-cell? row col seed-cells) 1 0))
+            (let addr (list-ref addrs i))
+            (let pid (process::spawn hb-cell
+                    (cons row (cons col (cons alive (cons 0 (cons nbrs (cons cpi ()))))))
+                    (environment::self) '(actor) addr))
+            (hb-settle pid)
+            (list3 i addr (list2 :awake pid)))
+        (range 0 (cell-count))))
+
+; ---------------------------------------------------------------------------
+; Hibernation policy
+; ---------------------------------------------------------------------------
+
+; A cell must run this generation if it changed last generation or if its
+; mailbox holds news from a neighbor. Everyone else is quiet.
+(defun hb-needed? (c changed)
+    (or (member? (hb-index c) changed)
+        (> (mailbox::size (hb-addr c)) 0)))
+
+(defun hb-wake (c)
+    (if (hb-awake? c)
+        c
+        (list3 (hb-index c) (hb-addr c)
+            (list2 :awake (process::unpark (second (hb-handle c)) (environment::self))))))
+
+(defun hb-sleep (c)
+    (if (hb-awake? c)
+        (list3 (hb-index c) (hb-addr c) (list2 :asleep (process::park (hb-pid c))))
+        c))
+
+; ---------------------------------------------------------------------------
+; Generations
+; ---------------------------------------------------------------------------
+
+(defun hb-board (live)
+    (make-board (lambda (row col) (if (member-cell? row col live) 1 0))))
+
+(defun hb-drain (addr acc)
+    (let m (mailbox::take addr))
+    (if (eq? m #false)
+        (reverse acc)
+        (hb-drain addr (cons m acc))))
+
+(defun hb-apply (live report)
+    (let row (car report))
+    (let col (second report))
+    (if (= (third report) 1)
+        (cons (list2 row col) live)
+        (filter (lambda (p) (not (and (= (car p) row) (= (second p) col)))) live)))
+
+(defun hb-generation (gen cells live changed cpi history)
+    (print-board gen (hb-board live))
+    (if (= gen life-generations)
+        (hb-finish cells history)
+        (do
+            (let next-cells (map (lambda (c) (if (hb-needed? c changed) (hb-wake c) (hb-sleep c))) cells))
+            (let awake (filter hb-awake? next-cells))
+            (let woke (hb-count (lambda (i) (and (not (hb-awake? (list-ref cells i)))
+                            (hb-awake? (list-ref next-cells i))))
+                    (range 0 (cell-count))))
+            (let parked (hb-count (lambda (i) (and (hb-awake? (list-ref cells i))
+                            (not (hb-awake? (list-ref next-cells i)))))
+                    (range 0 (cell-count))))
+            ; Phase 1: tick every awake cell.
+            (for-each (lambda (c) (mailbox::send (hb-addr c) :tick)) awake)
+            (for-each (lambda (c) (hb-settle (hb-pid c))) awake)
+            (let reports (hb-drain cpi ()))
+            ; Phase 2: the changed cells tell their neighbors.
+            (let changed-cells (map (lambda (r) (list-ref next-cells (cell-index (car r) (second r)))) reports))
+            (for-each (lambda (c) (mailbox::send (hb-addr c) :commit)) changed-cells)
+            (for-each (lambda (c) (hb-settle (hb-pid c))) changed-cells)
+            (IO::print "  step" gen "->" (+ gen 1) ": awake" (length awake)
+                "hibernating" (- (cell-count) (length awake))
+                "| woke" woke "parked" parked "| changed" (length reports))
+            (hb-generation (+ gen 1)
+                next-cells
+                (fold hb-apply live reports)
+                (map (lambda (r) (cell-index (car r) (second r))) reports)
+                cpi
+                (cons (map hb-index awake) history)))))
+
+; `history` holds, for each generation, the indices of the cells that ran.
+(defun hb-finish (cells history)
+    (let work (sum (map length history)))
+    (IO::print "  cell-steps computed:" work "of" (* life-generations (cell-count))
+        "that an always-awake board would pay for")
+    (let awake-for (lambda (row col)
+            (hb-count (lambda (awake) (member? (cell-index row col) awake)) history)))
+    (IO::print "  generations each cell spent awake (of" life-generations "):")
+    (for-each (lambda (row)
+            (IO::print (fold (lambda (s col) (string-append s (hb-digit (awake-for row col))))
+                    "  awake-for | "
+                    (range 0 life-width))))
+        (range 0 life-height))
+    (let never (hb-count (lambda (i) (= (awake-for (index-row i) (index-col i)) 0)) (range 0 (cell-count))))
+    (IO::print "  cells that slept through all of it:" never)
+    ; Show a sleeper with live neighbors, if there is one: its count rests in
+    ; the parked data's checkpoint, the arguments of its last `hb-cell` call.
+    (let sleepers (filter (lambda (c) (not (hb-awake? c))) cells))
+    (let neighborly (filter (lambda (c) (> (list-ref (third (second (hb-handle c))) 3) 0)) sleepers))
+    (let shown (if (nil? neighborly) sleepers neighborly))
+    (when (not (nil? shown))
+        (do
+            (let data (second (hb-handle (car shown))))
+            (let args (third data))
+            (IO::print "  a hibernating cell is plain data: parked key" (second data)
+                "checkpoint (row col alive count) ="
+                (cons (car args) (cons (second args) (cons (third args) (cons (list-ref args 3) ()))))))))
+
+(defun hb-digit (n)
+    (list-ref '("0" "1" "2" "3" "4" "5" "6" "7" "8" "9") n))
+
+(defun main ()
+    (let cpi (mailbox::create #true 1000))
+    (let addrs (map (lambda (i) (mailbox::create #true 100)) (range 0 (cell-count))))
+    (let cells (hb-spawn-all addrs cpi))
+    ; Every cell starts with a count of 0. The seed's live cells are told to
+    ; commit, which announces them to their neighbors: the deltas wait in the
+    ; neighbors' mailboxes, and those neighbors wake for generation 0.
+    (let seeds (map (lambda (p) (list-ref cells (cell-index (car p) (second p)))) seed-cells))
+    (for-each (lambda (c) (mailbox::send (hb-addr c) :commit)) seeds)
+    (for-each (lambda (c) (hb-settle (hb-pid c))) seeds)
+    (IO::print "  spawned" (length cells) "cell processes; the" (length seeds) "live ones have announced themselves")
+    (hb-generation 0
+        cells
+        seed-cells
+        (map (lambda (p) (cell-index (car p) (second p))) seed-cells)
+        cpi
+        ()))

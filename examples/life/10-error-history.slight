@@ -1,0 +1,134 @@
+; 10 · History as an error chain
+;
+; There is no list of boards here. Each generation is an error value whose
+; payload is the board, and generation n+1 is
+;
+;     (wrap-error <generation n> :generation "<what happened>" <board n+1>)
+;
+; An error can be thrown only once, so a generation cannot be thrown again;
+; it can only be wrapped by the next one. After eight generations the whole
+; history hangs off the last error through `error-cause`, and nothing else
+; holds it.
+;
+; Each generation is thrown from the bottom of a deliberately non-tail
+; recursion, `eh-descend`, that walks the new board's live cells, one frame
+; per live cell, before throwing. So each link in the chain carries its own
+; stack trace, as deep as its population, and each frame of that trace keeps
+; its local scope. At the end the CPI walks the chain back to the seed and
+; replays it forwards. For every link it reads the trace (`stack-trace-for`)
+; and the pads (`environment::error-pad`): level 0 gives the locals at the
+; throw point (the generation number and the births and deaths), and the
+; deeper levels give back, one frame at a time, the live cells that were on
+; the stack when the generation was thrown. The stack remembers the board as
+; well as the payload does, and the replay checks that the two agree.
+;
+; CPI features: make-error, wrap-error, throw / catch, the at-most-once
+; throw rule, error-cause chains, error-payload, stack-trace-for, and
+; environment::error-pad at several trace levels.
+
+; ---------------------------------------------------------------------------
+; Making history
+; ---------------------------------------------------------------------------
+
+; Throws `e` from beneath one frame per cell in `cells`. The `cons` keeps
+; each frame waiting, so none of them is a tail call.
+(defun eh-descend (cells e gen born died)
+    (if (nil? cells)
+        (throw e)
+        (do
+            (let cell (car cells))
+            (cons cell (eh-descend (cdr cells) e gen born died)))))
+
+; Throw a generation and catch it straight back: now it has a trace.
+(defun eh-throw (e gen born died board)
+    (catch (eh-descend (live-cells board) e gen born died) caught caught))
+
+(defun eh-seed ()
+    (let board (seed-board))
+    (eh-throw (make-error :generation "the seed" board) 0 (length (live-cells board)) 0 board))
+
+(defun eh-advance (history gen)
+    (let board (error-payload history))
+    (let next (step-board board))
+    (let born (eh-count-changes board next 0 1))
+    (let died (eh-count-changes board next 1 0))
+    (let message (cond
+            ((> born died) "the population grew")
+            ((< born died) "the population shrank")
+            (#true "the population held")))
+    (eh-throw (wrap-error history :generation message next) gen born died next))
+
+(defun eh-count-changes (before after from to)
+    (length (filter (lambda (p) (and (= (cell-at before (car p) (second p)) from)
+                    (= (cell-at after (car p) (second p)) to)))
+            (map (lambda (i) (list2 (index-row i) (index-col i))) (range 0 (cell-count))))))
+
+(defun eh-grow (history gen)
+    (if (= gen life-generations)
+        history
+        (eh-grow (eh-advance history (+ gen 1)) (+ gen 1))))
+
+; ---------------------------------------------------------------------------
+; Reading it back
+; ---------------------------------------------------------------------------
+
+; Walking back through the causes builds the list oldest first.
+(defun eh-chain (e acc)
+    (if (eq? e #false)
+        acc
+        (eh-chain (error-cause e) (cons e acc))))
+
+(defun eh-pad-get (pad name)
+    (cond
+        ((nil? pad) #false)
+        ((eq? (car (car pad)) name) (second (car pad)))
+        (#true (eh-pad-get (cdr pad) name))))
+
+; The `cell` local of every trace level that has one, innermost first.
+(defun eh-cells-on-stack (e)
+    (let depth (length (stack-trace-for e)))
+    (filter (lambda (c) (not (eq? c #false)))
+        (map (lambda (level) (eh-pad-get (environment::error-pad e level) :cell))
+            (range 0 depth))))
+
+;  (a a a b) -> ((a 3) (b 1))
+(defun eh-runs (names)
+    (reverse (fold (lambda (acc name)
+                (if (and (not (nil? acc)) (eq? (car (car acc)) name))
+                    (cons (list2 name (+ (second (car acc)) 1)) (cdr acc))
+                    (cons (list2 name 1) acc)))
+            ()
+            names)))
+
+(defun eh-same-cells? (xs ys)
+    (cond
+        ((nil? xs) (nil? ys))
+        ((nil? ys) #false)
+        (#true (and (= (car (car xs)) (car (car ys)))
+                (= (second (car xs)) (second (car ys)))
+                (eh-same-cells? (cdr xs) (cdr ys))))))
+
+(defun eh-replay (links)
+    (for-each (lambda (e)
+            (let trace (stack-trace-for e))
+            (let here (environment::error-pad e 0))
+            (let gen (eh-pad-get here :gen))
+            (let board (error-payload e))
+            (let remembered (reverse (eh-cells-on-stack e)))
+            (IO::print "  link" gen ":" (error-tag e) "/" (error-message e)
+                "| born" (eh-pad-get here :born) "died" (eh-pad-get here :died))
+            (IO::print "    thrown at" (car trace) "with" (length trace) "trace entries:" (eh-runs (map car trace)))
+            (IO::print "    cells read back from the stack's pads:" remembered
+                (if (eh-same-cells? remembered (live-cells board))
+                    "(matches the payload)"
+                    "(DOES NOT match the payload)"))
+            (print-board gen board))
+        links))
+
+(defun main ()
+    (let latest (eh-grow (eh-seed) 0))
+    (IO::print "  history is one error:" latest)
+    (IO::print "  throwing it again:" (catch (throw latest) e (error-tag e)))
+    (let links (eh-chain latest ()))
+    (IO::print "  links in its cause chain:" (length links))
+    (eh-replay links))

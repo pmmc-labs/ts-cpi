@@ -1,0 +1,64 @@
+; 22 · Decision tree, compiled at load time
+;
+; The rule is compiled before the program runs. A `const` evaluated by the
+; loader builds a complete binary decision tree over a cell's 3x3
+; neighborhood: each of nine levels branches on one cell (car for dead,
+; cdr for alive), and each of the 512 leaves holds the next state. At run
+; time there is no counting and no rule, only nine steps down the tree per
+; cell.
+;
+; CPI features: `const` evaluation at load time (the loader runs the
+; evaluator before `main` exists), and pairs as a data structure. The tree
+; is immutable and shared, so every generation reads the same one.
+
+; The neighborhood, in the order the tree branches on it: the center first,
+; then the eight neighbors in `neighbor-offsets` order.
+(defun dt-cells (board row col)
+    (cons (cell-at board row col)
+        (map (lambda (p) (cell-at board (car p) (second p))) (neighbors-of row col))))
+
+; Builds the subtree for the cells still to decide. `center` is #false
+; until the first level is decided; `count` is the live neighbors so far.
+(defun dt-build (remaining center count)
+    (cond
+        ((= remaining 0) (life-rule center count))
+        ((eq? center #false)
+            (cons (dt-build (- remaining 1) 0 0)
+                (dt-build (- remaining 1) 1 0)))
+        (#true
+            (cons (dt-build (- remaining 1) center count)
+                (dt-build (- remaining 1) center (+ count 1))))))
+
+(const dt-tree (dt-build 9 #false 0))
+
+(defun dt-lookup (tree cells)
+    (cond
+        ((nil? cells) tree)
+        ((= (car cells) 1) (dt-lookup (cdr tree) (cdr cells)))
+        (#true (dt-lookup (car tree) (cdr cells)))))
+
+(defun dt-step (board)
+    (make-board (lambda (row col) (dt-lookup dt-tree (dt-cells board row col)))))
+
+(defun dt-leaves (tree)
+    (if (pair? tree)
+        (+ (dt-leaves (car tree)) (dt-leaves (cdr tree)))
+        1))
+
+(defun dt-births (tree)
+    (if (pair? tree)
+        (+ (dt-births (car tree)) (dt-births (cdr tree)))
+        tree))
+
+(defun dt-run (gen board)
+    (print-board gen board)
+    (when (< gen life-generations)
+        (dt-run (+ gen 1) (dt-step board))))
+
+(defun main ()
+    (IO::print "  the tree has" (dt-leaves dt-tree) "leaves," (dt-births dt-tree)
+        "of which lead to a live cell")
+    (IO::print "  a lonely dead cell:" (dt-lookup dt-tree '(0 0 0 0 0 0 0 0 0)))
+    (IO::print "  a dead cell with three neighbors:" (dt-lookup dt-tree '(0 1 1 1 0 0 0 0 0)))
+    (IO::print "  a live cell with four:" (dt-lookup dt-tree '(1 1 1 1 1 0 0 0 0)))
+    (dt-run 0 (seed-board)))

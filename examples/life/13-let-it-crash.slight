@@ -1,0 +1,157 @@
+; 13 · Let it crash
+;
+; Erlang's motto, applied to biology. Death is not a decision the CPI makes:
+; it is a failure. Every live cell is a process that, each generation,
+; receives `(neighbors n)` and applies the rule to itself. If it survives it
+; loops and waits again. If it does not, it throws:
+;
+;     (throw (make-error :died "overcrowding" count))
+;
+; and `process::run` reports `(failed e)`. The CPI is a supervisor, and birth
+; is a restart: when a dead position has exactly three live neighbors, the
+; supervisor restarts the cell that last lived there.
+;
+; Every position owns one durable mailbox, created before anything runs. It
+; is the cell's address, and it outlives every one of the cell's lives: a
+; restarted cell is spawned on the same address as the process that crashed.
+; The supervisor restarts from `process::checkpoint` of the failed run, the
+; arguments of the cell's last loop iteration, `(row col age lives)`: it
+; keeps the position, resets `age`, and bumps `lives`, so a cell knows which
+; incarnation it is.
+;
+; Like any supervisor, it writes a post-mortem for each crash. It does not
+; trust the error's payload alone: `environment::error-pad` returns the
+; local variables that were live where the error was thrown, so it reads
+; the dying cell's neighbor count, age and incarnation straight out of the
+; crashed frame. The first post-mortem prints the whole pad and the stack
+; trace.
+;
+; Whether a cell is alive is whatever the process table says:
+; `process::state` of the last PID at a position is `(ended failed ...)`
+; for a dead cell.
+;
+; CPI features: `(failed e)` stop reasons, `make-error`/`throw` inside a
+; process, `environment::error-pad`, `stack-trace-for`, `error-message`,
+; `process::checkpoint` of a failed process, durable `mailbox::create`,
+; `process::spawn` on an existing address, `mailbox::send`.
+
+(const lc-quota 1000)
+
+; ---------------------------------------------------------------------------
+; Inside a cell (granted actor only)
+; ---------------------------------------------------------------------------
+
+; One life of a cell. It waits for the news of its neighborhood, judges
+; itself, and either lives on or crashes.
+(defun lc-cell (row col age lives)
+    (let news (actor::recv))
+    (let count (second news))
+    (let cause (cond ((< count 2) "loneliness") ((> count 3) "overcrowding") (#true #false)))
+    (if (eq? cause #false)
+        (lc-cell row col (+ age 1) lives)
+        (throw (make-error :died cause count))))
+
+; ---------------------------------------------------------------------------
+; The supervisor (the CPI)
+; ---------------------------------------------------------------------------
+
+(defun lc-alive? (p)
+    (and (pid? p) (not (eq? (car (process::state p)) :ended))))
+
+(defun lc-board (registry)
+    (make-board (lambda (row col) (if (lc-alive? (cell-at registry row col)) 1 0))))
+
+; The value of `name` in a pad, a list of (name value) pairs.
+(defun lc-pad-ref (pad name)
+    (cond
+        ((nil? pad) #false)
+        ((eq? (car (car pad)) name) (second (car pad)))
+        (#true (lc-pad-ref (cdr pad) name))))
+
+; Runs a cell until it waits, or crashes.
+(defun lc-run (p)
+    (let r (process::run p lc-quota))
+    (if (eq? (car r) :quota) (lc-run p) r))
+
+(defun lc-post-mortem (crash full?)
+    (let row (car crash))
+    (let col (second crash))
+    (let e (third crash))
+    (let pad (environment::error-pad e 0))
+    (when full?
+        (IO::print "    [supervisor] the first crash, in full:")
+        (IO::print "    [supervisor]   error" (error-tag e) (error-message e) "payload" (error-payload e))
+        (IO::print "    [supervisor]   trace" (stack-trace-for e))
+        (IO::print "    [supervisor]   pad  " pad))
+    (IO::print "    [supervisor]" (list2 row col) "crashed of" (error-message e)
+        "- its frame says: count" (lc-pad-ref pad :count)
+        "age" (lc-pad-ref pad :age) "life" (lc-pad-ref pad :lives)))
+
+; Starts a cell at (row col) on its own address: a restart from the
+; checkpoint of its last life if it had one, otherwise a first boot.
+(defun lc-start (old box row col)
+    (let args
+        (if (pid? old)
+            (do
+                (let last (process::checkpoint old))
+                (let args (cons row (cons col (list2 0 (+ (list-ref last 3) 1)))))
+                (IO::print "    [supervisor]" (list2 row col) "restarted on" box "from checkpoint" last "as" args)
+                args)
+            (do
+                (let args (cons row (cons col (list2 0 1))))
+                (IO::print "    [supervisor]" (list2 row col) "first boot on" box "as" args)
+                args)))
+    (let p (process::spawn lc-cell args (environment::self) '(actor) box))
+    (lc-run p)
+    p)
+
+; Tells one live cell its neighbor count and runs it. Returns the crash,
+; (row col e), or #false if it lived.
+(defun lc-judge (p box row col count)
+    (mailbox::send box (list2 :neighbors count))
+    (let r (lc-run p))
+    (if (eq? (car r) :failed) (list3 row col (second r)) #false))
+
+; One generation. All counts are taken first, from this generation's board.
+; Then every live cell hears its news and runs; the crashes are written up;
+; then dead positions with three live neighbors restart. Returns the next
+; registry.
+(defun lc-step (gen registry boxes)
+    (let board (lc-board registry))
+    (let counts (make-board (lambda (row col) (neighbor-count board row col))))
+    (let verdicts
+        (make-board (lambda (row col)
+                (if (= (cell-at board row col) 1)
+                    (lc-judge (cell-at registry row col) (cell-at boxes row col) row col (cell-at counts row col))
+                    #false))))
+    (let crashes (filter (lambda (v) (not (eq? v #false))) (fold append () verdicts)))
+    (for-each (lambda (c) (lc-post-mortem c (= gen 0))) (if (= gen 0) (cons (car crashes) ()) ()))
+    (for-each (lambda (c) (lc-post-mortem c #false)) (if (= gen 0) (cdr crashes) crashes))
+    (let next
+        (make-board (lambda (row col)
+                (if (and (= (cell-at board row col) 0) (= (cell-at counts row col) 3))
+                    (lc-start (cell-at registry row col) (cell-at boxes row col) row col)
+                    (cell-at registry row col)))))
+    (let births
+        (sum (map (lambda (row) (length (filter (lambda (col) (and (= (cell-at board row col) 0) (= (cell-at counts row col) 3)))
+                            (range 0 life-width))))
+                (range 0 life-height))))
+    (IO::print "    [supervisor] tally:" (length crashes) "crashes," births "births")
+    next)
+
+(defun lc-generation (gen registry boxes)
+    (print-board gen (lc-board registry))
+    (when (< gen life-generations)
+        (lc-generation (+ gen 1) (lc-step gen registry boxes) boxes)))
+
+(defun main ()
+    ; One durable mailbox per position: the address every life of that cell
+    ; will receive on.
+    (let boxes (make-board (lambda (row col) (mailbox::create #true 10))))
+    (let seed (seed-board))
+    (let registry
+        (make-board (lambda (row col)
+                (if (= (cell-at seed row col) 1)
+                    (lc-start #false (cell-at boxes row col) row col)
+                    #false))))
+    (lc-generation 0 registry boxes))

@@ -431,3 +431,14 @@ test('IO::print writes space-separated, newline-terminated, strings unquoted', (
     `);
     assert.deepEqual(output, ['hi 42 tag']);
 });
+
+test('a PID returned by host::wait is eq? to the one process::spawn returned', () => {
+    const v = ok(`
+        (defun napper () (timer::sleep 10))
+        (defun main ()
+            (let p (process::spawn napper () (environment::self) '(timer) #false))
+            (process::run p 100)
+            (eq? (car (host::wait #false)) p))
+    `);
+    assert.equal(print(v), '#true');
+});

@@ -1,0 +1,159 @@
+; 07 · Literal death
+;
+; A live cell is a running process. A dead cell is no process at all. The
+; board exists only in the process table: to learn whether a neighbor is
+; alive the CPI asks `process::state`, and anything that has `(ended ...)`
+; is a ghost, a PID with nothing behind it.
+;
+; Each generation the CPI plays the part of fate:
+;
+;   census     it counts every cell's live neighbors from the process table
+;              and decides, for the whole board at once, who dies and who
+;              is born;
+;   death      a dying cell is killed with `process::kill` and a reason that
+;              says why: `:loneliness` (fewer than two neighbors) or
+;              `:overcrowding` (more than three);
+;   birth      a newborn is a fresh `process::spawn`, registered in the place
+;              of the ghost that was there.
+;
+; Deaths are observed with `process::watch`. An undertaker mailbox watches
+; every cell, and receives `(signal terminated <pid> (killed <reason>))` for
+; each one; the CPI drains it to print the obituary column. Neighbors watch
+; each other too: every cell is told when a neighbor that lived beside it
+; dies. A cell's whole life is receiving those signals and counting them,
+; in the argument `mourned` of its loop, so `process::checkpoint` of a dead
+; cell tells the obituary how many neighbors it outlived.
+;
+; CPI features: `process::spawn`, `process::state` as the source of truth,
+; `process::kill` with a reason, `process::watch` (to an address and to a
+; PID), terminated signals, `process::checkpoint` of an ended process,
+; `mailbox::take`.
+
+(const ld-quota 1000)
+
+; ---------------------------------------------------------------------------
+; Inside a cell (granted actor only)
+; ---------------------------------------------------------------------------
+
+; A cell does nothing but live, and mourn: every message it ever receives is
+; the terminated signal of a neighbor.
+(defun ld-cell (row col born mourned)
+    (let signal (actor::recv))
+    (ld-cell row col born (+ mourned 1)))
+
+; ---------------------------------------------------------------------------
+; Fate (the CPI)
+; ---------------------------------------------------------------------------
+
+; The registry maps each position to the PID last spawned there, or #false
+; if no cell has ever lived there. It says nothing about who is alive: only
+; the process table knows that.
+(defun ld-alive? (p)
+    (and (pid? p) (not (eq? (car (process::state p)) :ended))))
+
+(defun ld-board (registry)
+    (make-board (lambda (row col) (if (ld-alive? (cell-at registry row col)) 1 0))))
+
+(defun ld-count (registry row col)
+    (length (filter (lambda (p) (ld-alive? (cell-at registry (car p) (second p))))
+            (neighbors-of row col))))
+
+; What fate has in store for one cell: :born, :stays, :empty, or the reason
+; it dies.
+(defun ld-fate (registry row col)
+    (let alive? (ld-alive? (cell-at registry row col)))
+    (let n (ld-count registry row col))
+    (let next (life-rule (if alive? 1 0) n))
+    (cond
+        ((and alive? (= next 1)) :stays)
+        (alive? (if (< n 2) :loneliness :overcrowding))
+        ((= next 1) :born)
+        (#true :empty)))
+
+(defun ld-dies? (fate)
+    (or (eq? fate :loneliness) (eq? fate :overcrowding)))
+
+; Lets every cell with mail read it, so its count of mourned neighbors is
+; current.
+(defun ld-wake (registry)
+    (for-each (lambda (row)
+            (for-each (lambda (p)
+                    (when (and (ld-alive? p) (eq? (car (process::state p)) :ready))
+                        (process::run p ld-quota)))
+                row))
+        registry))
+
+(defun ld-spawn (row col gen undertaker)
+    (let p (process::spawn ld-cell (cons row (cons col (list2 gen 0)))
+            (environment::self) '(actor) #false))
+    (process::watch p undertaker)
+    p)
+
+; A newborn is told when any live neighbor dies. Older neighbors are told
+; when the newborn dies; neighbors born in the same generation wire
+; themselves, so every pair is wired once.
+(defun ld-wire (registry fates row col)
+    (let me (cell-at registry row col))
+    (for-each (lambda (pos)
+            (let other (cell-at registry (car pos) (second pos)))
+            (when (ld-alive? other)
+                (process::watch other me)
+                (when (not (eq? (cell-at fates (car pos) (second pos)) :born))
+                    (process::watch me other))))
+        (neighbors-of row col)))
+
+(defun ld-for-cells (f)
+    (for-each (lambda (row) (for-each (lambda (col) (f row col)) (range 0 life-width)))
+        (range 0 life-height)))
+
+(defun ld-tally (fates keep?)
+    (sum (map (lambda (row) (length (filter keep? row))) fates)))
+
+; Drains the undertaker's mailbox, one obituary per terminated signal.
+(defun ld-obituaries (undertaker gen)
+    (let signal (mailbox::take undertaker))
+    (when (not (eq? signal #false))
+        (let dead (third signal))
+        (let how (list-ref signal 3))
+        (let life (process::checkpoint dead))
+        (IO::print "    [obituary]" (list2 (car life) (second life)) (second how) "- lived generations"
+            (third life) "to" (- gen 1) "and outlived" (list-ref life 3) "neighbors")
+        (ld-obituaries undertaker gen)))
+
+(defun ld-generation (gen registry undertaker)
+    (ld-wake registry)
+    (print-board gen (ld-board registry))
+    (if (< gen life-generations)
+        (do
+            (let fates (make-board (lambda (row col) (ld-fate registry row col))))
+            (ld-for-cells (lambda (row col)
+                    (let fate (cell-at fates row col))
+                    (when (ld-dies? fate)
+                        (process::kill (cell-at registry row col) fate))))
+            (let next
+                (make-board (lambda (row col)
+                        (if (eq? (cell-at fates row col) :born)
+                            (ld-spawn row col (+ gen 1) undertaker)
+                            (cell-at registry row col)))))
+            (ld-for-cells (lambda (row col)
+                    (when (eq? (cell-at fates row col) :born)
+                        (ld-wire next fates row col))))
+            (IO::print "    [census] the step to generation" (+ gen 1) "brings" (ld-tally fates (lambda (f) (eq? f :born))) "births,"
+                (ld-tally fates ld-dies?) "deaths," (sum (map sum (ld-board next))) "living")
+            (ld-obituaries undertaker (+ gen 1))
+            (ld-generation (+ gen 1) next undertaker))
+        (IO::print "    [census] the end: the process table holds" (sum (map sum (ld-board registry)))
+            "living cells; everything else is a ghost")))
+
+(defun main ()
+    (let undertaker (mailbox::create #true 1000))
+    (let seed (seed-board))
+    (let registry
+        (make-board (lambda (row col)
+                (if (= (cell-at seed row col) 1) (ld-spawn row col 0 undertaker) #false))))
+    ; The seed cells were all born together: wire them as newborns.
+    (let fates (make-board (lambda (row col) (if (= (cell-at seed row col) 1) :born :empty))))
+    (ld-for-cells (lambda (row col)
+            (when (= (cell-at seed row col) 1)
+                (ld-wire registry fates row col))))
+    (ld-generation 0 registry undertaker))

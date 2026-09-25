@@ -53,7 +53,18 @@ export function newAddr(): Addr {
     return { t: 'addr', id: `a${addrCounter}` };
 }
 
-export const pid = (id: number): Pid => ({ t: 'pid', id });
+const pids = new Map<number, Pid>();
+
+// Interned, like symbols: every PID value for process n is the same object,
+// so `eq?` (identity for PIDs) holds however the runtime produced it.
+export function pid(id: number): Pid {
+    let p = pids.get(id);
+    if (p === undefined) {
+        p = { t: 'pid', id };
+        pids.set(id, p);
+    }
+    return p;
+}
 
 export function list(...items: Value[]): Value {
     let out: Value = NIL;

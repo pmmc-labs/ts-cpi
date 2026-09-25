@@ -30,6 +30,7 @@ choices in `prompt.md`, then the simplest consistent behavior.
 - A terminated signal to a watcher is appended to its mailbox like any message (signals are not reordered ahead of messages yet). A PID watcher is sent to its process's mailbox.
 - `actor::` requests from the CPI throw `bad-state`: the CPI has no process layer (SPEC-CPI section 1). `timer::sleep` in the CPI advances the virtual clock at once.
 - `host::wait` with nothing pending returns `()` at once. With a timeout shorter than the earliest deadline, it advances the clock by the timeout and returns `()`.
+- PIDs are interned like symbols, so every PID value for one process is the same object and `eq?` holds (before, PIDs returned by `host::wait` were fresh objects).
 
 ## Worker decisions
 
@@ -73,4 +74,8 @@ choices in `prompt.md`, then the simplest consistent behavior.
 - SPEC-CPI section 7.5 records one trace entry per frame in `K`. Two frames can wait on the same expression, for example `(let r (catch …))`, where the `let` frame and the `catch` frame both sit at the `catch`. The trace then shows the same entry twice. This follows the spec literally; the spec may want entries collapsed, or per-procedure entries only.
 - An ordinary process cannot read the time: `host::now` is in the privileged `host::` namespace, and `timer::` has only `sleep` in the prototype. SPEC-CPI section 10.5 leaves other namespaces to their subsystems, so this is a gap rather than a contradiction.
 - SPEC-CPI section 11 counts every `step` as a tick, and section 7.3's `Eval((do rest …))` transitions make tick counts depend on how literally the table is read. Quotas are therefore implementation-defined until the spec fixes a canonical step count per form.
+- The language cannot build an environment with a new or replaced binding: every env ref derives from `environment::self`. `process::set-env`, and the hot reload of SPEC-CPI section 6 and DESIGN-001 section 8, therefore can't be driven from control plane code (`examples/life/20-rule-swap.slight`). DESIGN-001 has patches come from the pipeline, which is not specified yet.
+- SPEC-CPI does not say what happens when several live processes receive on one address (spawning onto a live process's mailbox, or unparking one parked value twice). The prototype lets the newest process own it, and a non-durable mailbox dead-letters sends once that owner ends, even if others still wait on it.
+- The CPI has no way to wait for a particular process: `actor::join` and `actor::recv` are not available to it (SPEC-CPI section 1), and `host::wait` reports which PIDs woke but not why.
+- Nothing in SPEC-CPI reclaims ended processes or parked state: the process table and the park table only grow.
 

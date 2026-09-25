@@ -1,0 +1,109 @@
+; 16 · Join-chain abacus
+;
+; Numbers here are unary, and each unit is a stuck process. A number is a
+; chain of processes, each blocked in `actor::join` on the one below it,
+; ending in an "anchor" blocked in `actor::recv`:
+;
+;     bead --join--> bead --join--> bead --join--> anchor (recv)      = 3
+;
+; No process holds a count, and no message carries one. The value lives
+; only in the shape of a deadlock: who is waiting for whom.
+;
+; Every generation, the CPI builds one abacus per cell. It spawns the
+; cell's anchor, then threads one bead onto the chain for each live
+; neighbor: a new process whose only argument is the PID of the current
+; top, run until it reports `(blocked join <top>)`. When all 64 chains are
+; built the whole image is one frozen deadlock: nothing is ready.
+;
+; Reading a number means chasing pointers through the process table:
+; `process::state` of the top says `(blocked join <pid>)`, so go to <pid>
+; and ask again, until the answer is `(blocked recv)`. The number of join
+; edges walked is the neighbor count, and `life-rule` does the rest.
+;
+; Then the abacus is cleared, domino style: one message to each anchor lets
+; it exit, which wakes the bead joined on it (the runtime flips joiners back
+; to `ready`), which exits when run and wakes the next, up the chain.
+;
+; CPI features: `actor::join` on a live process, `(blocked join <pid>)`
+; both as a stop reason and as `process::state`, PIDs as data passed to
+; `process::spawn`, `process::address`, `mailbox::send` from the CPI, and
+; joiner wakeup when a process ends.
+
+(const ja-quota 1000)
+
+; The zero at the bottom of every chain: waits for the message that ends it.
+(defun ja-anchor ()
+    (actor::recv))
+
+; One unit: waits for the process below it to end.
+(defun ja-bead (below)
+    (actor::join below))
+
+(defun ja-start (f args)
+    (let p (process::spawn f args (environment::self) '(actor) #false))
+    (process::run p ja-quota)
+    p)
+
+; Threads one bead onto a chain whose top is `top`; the bead is the new top.
+(defun ja-thread (top)
+    (ja-start ja-bead (cons top ())))
+
+; Builds the abacus for one cell: an anchor plus one bead per live neighbor.
+(defun ja-build (board row col)
+    (fold (lambda (top p)
+            (if (= (cell-at board (car p) (second p)) 1)
+                (ja-thread top)
+                top))
+        (ja-start ja-anchor ())
+        (neighbors-of row col)))
+
+; The chain from its top down to its anchor, found by following join edges.
+(defun ja-chain (top)
+    (let state (process::state top))
+    (if (eq? (second state) :join)
+        (cons top (ja-chain (third state)))
+        (cons top ())))
+
+(defun ja-read (top)
+    (- (length (ja-chain top)) 1))
+
+; Lets the anchor go, then runs the chain bottom-up; every link should exit.
+; Returns how many processes exited.
+(defun ja-release (top)
+    (let chain (reverse (ja-chain top)))
+    (mailbox::send (process::address (car chain)) :let-go)
+    (length (filter (lambda (p) (eq? (car (process::run p ja-quota)) :exited)) chain)))
+
+; ---------------------------------------------------------------------------
+
+(defun ja-flat (board)
+    (fold append () board))
+
+(defun ja-census (tops)
+    (let chains (map ja-chain (ja-flat tops)))
+    (let procs (fold append () chains))
+    (let ready (filter (lambda (p) (eq? (car (process::state p)) :ready)) procs))
+    (IO::print "  abacus:" (length procs) "processes," (- (length procs) 64) "beads,"
+        "tallest number" (- (fold (lambda (m c) (if (> (length c) m) (length c) m)) 0 chains) 1)
+        "- ready to run:" (length ready)))
+
+(defun ja-show-one (tops row col)
+    (IO::print "  e.g. the abacus for cell" row col "reads" (ja-read (cell-at tops row col))
+        "via" (ja-chain (cell-at tops row col))))
+
+(defun ja-run (gen board)
+    (print-board gen board)
+    (when (< gen life-generations)
+        (do
+            (let tops (make-board (lambda (row col) (ja-build board row col))))
+            (ja-census tops)
+            (when (= gen 0)
+                (ja-show-one tops 1 1))
+            (let next (make-board (lambda (row col)
+                        (life-rule (cell-at board row col) (ja-read (cell-at tops row col))))))
+            (let released (sum (map ja-release (ja-flat tops))))
+            (IO::print "  released:" released "processes exited, domino style")
+            (ja-run (+ gen 1) next))))
+
+(defun main ()
+    (ja-run 0 (seed-board)))

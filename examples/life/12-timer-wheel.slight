@@ -1,0 +1,83 @@
+; 12 · The board lives in the timer queue
+;
+; Between generations the board is stored nowhere but in virtual time. For
+; every live cell of generation g the CPI spawns a sleeper process that does
+; nothing except `timer::sleep` until the moment
+;
+;     (g + 1) * 1000 + cell-index
+;
+; so the clock reading at which it wakes *is* the cell. (Generation 0 starts
+; at 1000, not 0: a sleep of 0 ms returns at once and would lose cell 0.) A
+; last sleeper, the sentinel, wakes at (g + 1) * 1000 + 999 to mark the end
+; of the frame.
+;
+; To see a generation, the CPI calls `host::wait` over and over. Each call
+; jumps the clock to the earliest deadline and hands back the PID that woke;
+; `host::now` modulo 1000 is its cell index, and the sentinel's time divided
+; by 1000 gives the generation number. The CPI lets each woken sleeper finish,
+; turns the indices into a board, prints it, computes the next board, spawns
+; its sleepers, and forgets everything. The loop that does this takes no
+; arguments: nothing about the board survives a trip round it except pending
+; timers.
+;
+; CPI features: timer::sleep and (blocked host), host::wait and host::now,
+; virtual time as a data structure, many short-lived processes.
+
+(const tw-period 1000)
+(const tw-sentinel 999)
+
+; The sleeper: granted only `timer`. It knows nothing, not even which cell it
+; is; the CPI chose how long it sleeps.
+(defun tw-sleeper (ms)
+    (timer::sleep ms))
+
+; Spawn a sleeper that wakes at absolute time `at`. `timer::sleep` counts
+; from the moment the process first runs, so run it at once, now, to arm it.
+(defun tw-arm (at)
+    (let p (process::spawn tw-sleeper (cons (- at (host::now)) ()) (environment::self) '(timer) #false))
+    (process::run p 100))
+
+; Write generation `gen` into the future: one timer per live cell, then the
+; sentinel.
+(defun tw-schedule (gen board)
+    (let base (* (+ gen 1) tw-period))
+    (for-each (lambda (cell) (tw-arm (+ base (cell-index (car cell) (second cell)))))
+        (live-cells board))
+    (tw-arm (+ base tw-sentinel)))
+
+; Read one generation back out of the timer queue: wait, decode, repeat until
+; the sentinel. Returns (gen live-indices), with the indices ascending.
+(defun tw-read (acc)
+    (let woke (host::wait #false))
+    (when (nil? woke)
+        (throw (make-error :lost "the timer queue is empty" acc)))
+    ; Deadlines are all distinct, so exactly one sleeper wakes per wait.
+    ; Run it so it returns from its sleep and ends.
+    (for-each (lambda (p) (process::run p 100)) woke)
+    (let t (host::now))
+    (if (= (% t tw-period) tw-sentinel)
+        (list2 (- (/ t tw-period) 1) (reverse acc))
+        (tw-read (cons (% t tw-period) acc))))
+
+(defun tw-board (indices)
+    (make-board (lambda (row col)
+            (if (any? (lambda (i) (= i (cell-index row col))) indices) 1 0))))
+
+; One trip round the wheel. No arguments: the only state is the timer queue.
+(defun tw-turn ()
+    (let frame (tw-read ()))
+    (let gen (car frame))
+    (let board (tw-board (second frame)))
+    (let base (* (+ gen 1) tw-period))
+    (IO::print "t =" (host::now) ": sentinel; cells woke at" (map (lambda (i) (+ base i)) (second frame)))
+    (print-board gen board)
+    (when (< gen life-generations)
+        (do
+            (tw-schedule (+ gen 1) (step-board board))
+            (tw-turn))))
+
+(defun main ()
+    (IO::print "t =" (host::now) ": writing the seed into the timer queue")
+    (tw-schedule 0 (seed-board))
+    (tw-turn)
+    (IO::print "t =" (host::now) ": nothing pending:" (host::wait #false)))

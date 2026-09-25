@@ -1,0 +1,71 @@
+; 21 · Rulestring
+;
+; Life-like automata are named by rulestrings: "B3/S23" means a dead cell is
+; born with 3 live neighbors and a live cell survives with 2 or 3. Here the
+; rule is not code at all. It is a string, parsed at load time by a `const`
+; that walks its code points with `string-ref`, and the simulation consults
+; the parsed rule. The same machinery reads other rules, shown as
+; commentary: HighLife (B36/S23), Seeds (B2/S) and Day & Night.
+;
+; CPI features: `const` evaluation at load time, string core operations
+; (`string-length`, `string-ref` returning Unicode scalar values as
+; integers), and symbols as data.
+
+; A parsed rule is (births survivals), two lists of neighbor counts.
+(defun rs-parse (text)
+    (rs-scan text 0 :none () ()))
+
+; Walks the string one code point at a time. `mode` is :births after a B,
+; :survivals after an S.
+(defun rs-scan (text i mode births survivals)
+    (if (= i (string-length text))
+        (list2 (reverse births) (reverse survivals))
+        (do
+            (let c (string-ref text i))
+            (cond
+                ((or (= c 66) (= c 98)) (rs-scan text (+ i 1) :births births survivals))      ; B or b
+                ((or (= c 83) (= c 115)) (rs-scan text (+ i 1) :survivals births survivals))  ; S or s
+                ((= c 47) (rs-scan text (+ i 1) mode births survivals))                       ; /
+                ((and (>= c 48) (<= c 56))                                                    ; 0 to 8
+                    (if (eq? mode :births)
+                        (rs-scan text (+ i 1) mode (cons (- c 48) births) survivals)
+                        (rs-scan text (+ i 1) mode births (cons (- c 48) survivals))))
+                (#true (throw (make-error :bad-rulestring "unexpected character" (list2 text i))))))))
+
+(const rs-conway (rs-parse "B3/S23"))
+
+(defun rs-next (rule alive count)
+    (if (= alive 1)
+        (if (member? count (second rule)) 1 0)
+        (if (member? count (car rule)) 1 0)))
+
+(defun rs-step (rule board)
+    (make-board (lambda (row col)
+            (rs-next rule (cell-at board row col) (neighbor-count board row col)))))
+
+(defun rs-run (gen board)
+    (print-board gen board)
+    (when (< gen life-generations)
+        (rs-run (+ gen 1) (rs-step rs-conway board))))
+
+; How other rules treat the same seed after four generations.
+(defun rs-compare (name text)
+    (let rule (rs-parse text))
+    (IO::print "  rule" name text "parses to births" (car rule) "survivals" (second rule))
+    (IO::print "    live cells after 4 generations:"
+        (length (live-cells (rs-evolve rule 4 (seed-board))))))
+
+(defun rs-evolve (rule n board)
+    (if (= n 0)
+        board
+        (rs-evolve rule (- n 1) (rs-step rule board))))
+
+(defun main ()
+    (IO::print "  running Conway's rule, parsed from \"B3/S23\" as" rs-conway)
+    (rs-run 0 (seed-board))
+    (rs-compare "HighLife" "B36/S23")
+    (rs-compare "Seeds" "B2/S")
+    (rs-compare "Day&Night" "B3678/S34678")
+    (catch (rs-parse "B3/X23")
+        e
+        (IO::print "  a bad rulestring is an error:" (error-message e) (error-payload e))))

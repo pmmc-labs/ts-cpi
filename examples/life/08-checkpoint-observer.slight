@@ -1,0 +1,183 @@
+; 08 · Checkpoint observer and forked timelines
+;
+; The whole universe is one silent process. `universe` is a tail-recursive
+; loop over (gen board) that never prints, never sends, never stops, and is
+; spawned with no grants at all: '(). It cannot tell anyone anything.
+;
+; The CPI watches it anyway. It runs the universe in small quota batches and,
+; after each batch, reads `process::checkpoint`: the arguments of the most
+; recent call to `universe`. A tail call is the moment one generation hands
+; the next one its board, so the checkpoint slot is exactly "the latest
+; finished generation". The CPI prints frames from what it observes.
+;
+; At generation `cp-fork-gen` the CPI forks history. It takes the checkpoint
+; (gen board) and spawns two new loops from it under different rules:
+; HighLife (B36/S23) and Seeds (B2/S). Those are also silent, also ungranted,
+; also observed only through their checkpoints. The three timelines run side
+; by side under a barrier scheduler: each round gives one batch to every
+; timeline that is behind, so no timeline gets more than one generation ahead
+; of the others. The forks' boards are printed as commentary, each row
+; prefixed with its rule's name, so the canonical frames stay Conway's.
+;
+; CPI features: process::spawn with empty grants, process::run with quotas
+; (preemption), process::checkpoint as an observation port, restarting from
+; a checkpoint, process::kill for a loop that would otherwise run forever.
+
+; Ticks per batch. One generation costs about 250,000 ticks, so a batch
+; never spans two checkpoints; the observer checks that it doesn't.
+(const cp-batch 10000)
+(const cp-fork-gen 3)
+
+; ---------------------------------------------------------------------------
+; The processes. Nothing here has any grant.
+; ---------------------------------------------------------------------------
+
+(defun universe (gen board)
+    (universe (+ gen 1) (step-board board)))
+
+(defun cp-highlife (gen board)
+    (cp-highlife (+ gen 1) (cp-step-with cp-highlife-rule board)))
+
+(defun cp-seeds (gen board)
+    (cp-seeds (+ gen 1) (cp-step-with cp-seeds-rule board)))
+
+; HighLife, B36/S23: Conway plus birth on six.
+(defun cp-highlife-rule (alive count)
+    (cond
+        ((= count 3) 1)
+        ((and (= alive 0) (= count 6)) 1)
+        ((and (= alive 1) (= count 2)) 1)
+        (#true 0)))
+
+; Seeds, B2/S: born on exactly two, and nothing ever survives.
+(defun cp-seeds-rule (alive count)
+    (if (and (= alive 0) (= count 2)) 1 0))
+
+(defun cp-step-with (rule board)
+    (make-board (lambda (row col)
+            (rule (cell-at board row col) (neighbor-count board row col)))))
+
+; ---------------------------------------------------------------------------
+; Timelines, as the CPI sees them: (label pid gen board batches).
+; `gen` and `board` are only ever what the checkpoint said.
+; ---------------------------------------------------------------------------
+
+(defun cp-timeline (label pid gen board batches)
+    (cons label (cons pid (cons gen (cons board (cons batches ()))))))
+
+(defun cp-label (tl) (car tl))
+(defun cp-pid (tl) (second tl))
+(defun cp-gen (tl) (third tl))
+(defun cp-board (tl) (list-ref tl 3))
+(defun cp-batches (tl) (list-ref tl 4))
+
+(defun cp-spawn (label loop args)
+    (let pid (process::spawn loop args (environment::self) '() #false))
+    (cp-observe-now (cp-timeline label pid 0 () 0)))
+
+; Read the checkpoint slot without running anything.
+(defun cp-observe-now (tl)
+    (let args (process::checkpoint (cp-pid tl)))
+    (cp-timeline (cp-label tl) (cp-pid tl) (car args) (second args) (cp-batches tl)))
+
+; Give the timeline one batch, then look at its checkpoint.
+(defun cp-observe (tl)
+    (let r (process::run (cp-pid tl) cp-batch))
+    (when (not (eq? (car r) :quota))
+        (throw (make-error :cp-surprise "a universe stopped" r)))
+    (let seen (cp-observe-now tl))
+    (when (> (cp-gen seen) (+ (cp-gen tl) 1))
+        (throw (make-error :cp-missed "a batch spanned two generations" (cp-label tl))))
+    (cp-timeline (cp-label seen) (cp-pid seen) (cp-gen seen) (cp-board seen) (+ (cp-batches tl) 1)))
+
+; The barrier scheduler: one batch for every timeline still behind `target`.
+(defun cp-round (tls target)
+    (map (lambda (tl) (if (< (cp-gen tl) target) (cp-observe tl) tl)) tls))
+
+(defun cp-sync (tls target)
+    (if (all? (lambda (tl) (>= (cp-gen tl) target)) tls)
+        tls
+        (cp-sync (cp-round tls target) target)))
+
+(defun cp-reset-batches (tl)
+    (cp-timeline (cp-label tl) (cp-pid tl) (cp-gen tl) (cp-board tl) 0))
+
+; ---------------------------------------------------------------------------
+; Commentary
+; ---------------------------------------------------------------------------
+
+(defun cp-report-batches (tls)
+    (IO::print "  observed after"
+        (map (lambda (tl) (list2 (cp-label tl) (cp-batches tl))) tls)
+        "batches of" cp-batch "ticks"))
+
+; The forks, row by row, next to each other.
+(defun cp-print-forks (conway forks gen)
+    (when (not (nil? forks))
+        (IO::print "  forks at" gen ":"
+            (map (lambda (tl) (list2 (cp-label tl) (cp-verdict conway tl))) forks))
+        (cp-print-fork-rows (map cp-board forks) (map cp-label forks))))
+
+(defun cp-verdict (conway tl)
+    (if (eq? (cp-board-string (cp-board conway)) (cp-board-string (cp-board tl)))
+        :same-as-conway
+        :diverged))
+
+; Strings compare by content, boards (pairs) only by identity.
+(defun cp-board-string (board)
+    (fold (lambda (s row) (string-append s (row->string row))) "" board))
+
+(defun cp-print-fork-rows (boards labels)
+    (when (not (nil? (car boards)))
+        (IO::print (fold (lambda (s pair)
+                    (string-append s (string-append (string-append "  " (cp-pad (car pair)))
+                            (string-append " | " (row->string (car (second pair)))))))
+                ""
+                (cp-zip labels boards)))
+        (cp-print-fork-rows (map cdr boards) labels)))
+
+(defun cp-zip (xs ys)
+    (if (nil? xs)
+        ()
+        (cons (list2 (car xs) (car ys)) (cp-zip (cdr xs) (cdr ys)))))
+
+(defun cp-pad (label)
+    (case label
+        (:highlife "highlife")
+        (:seeds "   seeds")
+        (else "       ?")))
+
+; ---------------------------------------------------------------------------
+; The observer
+; ---------------------------------------------------------------------------
+
+(defun cp-generations (conway forks)
+    (let gen (cp-gen conway))
+    (print-board gen (cp-board conway))
+    (cp-print-forks conway forks gen)
+    (cond
+        ((= gen life-generations)
+            (cp-finish (cons conway forks)))
+        ((= gen cp-fork-gen)
+            (do
+                (let args (process::checkpoint (cp-pid conway)))
+                (IO::print "  forking history at generation" gen "from checkpoint of" (cp-pid conway))
+                (let new-forks (cons (cp-spawn :highlife cp-highlife args)
+                        (cons (cp-spawn :seeds cp-seeds args) ())))
+                (cp-next conway new-forks)))
+        (#true (cp-next conway forks))))
+
+(defun cp-next (conway forks)
+    (let tls (cp-sync (map cp-reset-batches (cons conway forks)) (+ (cp-gen conway) 1)))
+    (cp-report-batches tls)
+    (cp-generations (car tls) (cdr tls)))
+
+(defun cp-finish (tls)
+    (for-each (lambda (tl)
+            (process::kill (cp-pid tl) :enough-history)
+            (IO::print "  killed" (cp-label tl) (cp-pid tl) "->" (process::state (cp-pid tl))))
+        tls))
+
+(defun main ()
+    (IO::print "  the universe is spawned with grants ()")
+    (cp-generations (cp-spawn :conway universe (list2 0 (seed-board))) ()))

@@ -1,0 +1,163 @@
+; 18 · The Hostile Scheduler
+;
+; The CPI is the game master, and in this version it plays against its own
+; workers. Four worker processes share ONE job queue: they are all spawned on
+; the same mailbox, so whichever of them happens to be running takes the next
+; job. Each job is "compute cell i of generation g from this board", and each
+; worker sends its answer to a results mailbox that the CPI drains.
+;
+; The scheduler is an adversary. Every time slice it rolls deterministic dice
+; (a pure hash of the generation and the slice number, so every run is the
+; same run) to pick which ready worker runs and for how many ticks, from 300
+; to 9300, when a cell costs about 4000. Almost every slice ends in the
+; middle of a cell, so workers are preempted mid-thought and finish their
+; jobs in a scrambled order. It also cheats:
+;
+;   - it posts the 64 jobs in a shuffled order (a random odd stride mod 64);
+;   - it forges a stale job from the previous generation, and posts one
+;     current job twice;
+;   - it picks a victim worker each generation and starves it, running it
+;     only when nobody else is ready;
+;   - it declares a generation over the moment 64 distinct answers are in,
+;     even if workers are still chewing on jobs, so late answers leak into
+;     the next generation.
+;
+; None of it changes the frames, because correctness lives in the protocol,
+; not in the schedule: boards are immutable values sent inside the job, and
+; every answer is tagged (generation cell value worker). The collector keeps
+; the first answer for each cell of the current generation and drops stale
+; and duplicate answers, saying so. After each frame the CPI prints which
+; worker computed each cell, a map that changes wildly from generation to
+; generation while the board does not care.
+;
+; CPI features: several processes spawned on one shared durable mailbox (a
+; work queue: a delivery wakes every worker blocked on it), `process::run`
+; with varying quotas as the scheduling policy, `(quota)` preemption,
+; `process::state`, sends buffered until a batch ends, `mailbox::create`,
+; `mailbox::send` and `mailbox::take` for the CPI's side of the queue.
+
+(const hs-worker-count 4)
+(const hs-digits '("0" "1" "2" "3" "4" "5" "6" "7" "8" "9"))
+
+; ---------------------------------------------------------------------------
+; Inside a worker (granted only actor)
+; ---------------------------------------------------------------------------
+
+; A job is (gen index board). The answer is (gen index value worker-id).
+(defun hs-worker (id results)
+    (let job (actor::recv))
+    (let index (second job))
+    (let value (step-cell (third job) (index-row index) (index-col index)))
+    (actor::send results (cons (car job) (cons index (cons value (cons id ())))))
+    (hs-worker id results))
+
+; ---------------------------------------------------------------------------
+; The dice: a pure hash of (gen slice salt), so the chaos is reproducible.
+; An LCG step mod 2^31 never overflows 64 bits, nor does squaring below 2^31.
+; ---------------------------------------------------------------------------
+
+(defun hs-lcg (x) (% (+ (* x 1103515245) 12345) 2147483648))
+
+; Squaring makes the mix nonlinear, so nearby inputs give unrelated dice.
+(defun hs-mix (x) (hs-lcg (% (+ (/ (* x x) 65536) x) 2147483648)))
+
+(defun hs-rand (gen slice salt n)
+    (% (/ (hs-mix (+ salt (hs-mix (+ slice (hs-mix (+ gen 977)))))) 65536) n))
+
+; ---------------------------------------------------------------------------
+; The CPI: posting jobs, the adversarial schedule, and the collector
+; ---------------------------------------------------------------------------
+
+(defun hs-post (jobs gen board index)
+    (mailbox::send jobs (list3 gen index board)))
+
+; Posts the forged stale job, the 64 real jobs in shuffled order, and a
+; duplicate of one of them.
+(defun hs-post-all (jobs gen board prev)
+    (let stride (+ 1 (* 2 (hs-rand gen 0 11 32))))
+    (let offset (hs-rand gen 0 12 64))
+    (let order (map (lambda (i) (% (+ offset (* i stride)) 64)) (range 0 (cell-count))))
+    (hs-post jobs (- gen 1) prev (hs-rand gen 0 13 64))
+    (for-each (lambda (index) (hs-post jobs gen board index)) order)
+    (hs-post jobs gen board (car order))
+    (IO::print "  the adversary posts 66 jobs: stride" stride "offset" offset
+        "+ a forged job from generation" (- gen 1) "+ a duplicate of cell" (car order)))
+
+(defun hs-has? (index got)
+    (any? (lambda (g) (= (car g) index)) got))
+
+(defun hs-find (index got)
+    (if (= (car (car got)) index)
+        (car got)
+        (hs-find index (cdr got))))
+
+; Takes every answer waiting in the results mailbox. `got` is a list of
+; (index value worker) for the current generation.
+(defun hs-drain (gen results got)
+    (let msg (mailbox::take results))
+    (cond
+        ((eq? msg #false) got)
+        ((not (= (car msg) gen))
+            (do
+                (IO::print "  dropped a stale answer: generation" (car msg) "cell" (second msg)
+                    "from worker" (list-ref msg 3))
+                (hs-drain gen results got)))
+        ((hs-has? (second msg) got)
+            (do
+                (IO::print "  dropped a duplicate answer: cell" (second msg) "from worker" (list-ref msg 3))
+                (hs-drain gen results got)))
+        (#true (hs-drain gen results (cons (list3 (second msg) (third msg) (list-ref msg 3)) got)))))
+
+(defun hs-ready? (w)
+    (eq? (car (process::state (second w))) :ready))
+
+; One time slice after another until 64 distinct answers are in. Returns
+; (got slices preemptions timeline). The timeline is a string with one
+; character per slice: the digit of the worker that ran.
+(defun hs-schedule (gen workers results victim got slices preempts timeline)
+    (let got2 (hs-drain gen results got))
+    (if (= (length got2) (cell-count))
+        (cons got2 (list3 slices preempts timeline))
+        (do
+            (let ready (filter hs-ready? workers))
+            (when (nil? ready)
+                (throw (make-error :deadlock "no worker is ready and answers are missing" gen)))
+            (let others (filter (lambda (w) (not (= (car w) victim))) ready))
+            (let pool (if (nil? others) ready others))
+            (let w (list-ref pool (hs-rand gen slices 1 (length pool))))
+            (let quota (+ 300 (hs-rand gen slices 2 9000)))
+            (let r (process::run (second w) quota))
+            (let preempted (eq? (car r) :quota))
+            (hs-schedule gen workers results victim got2 (+ slices 1)
+                (if preempted (+ preempts 1) preempts)
+                (string-append timeline (list-ref hs-digits (car w)))))))
+
+(defun hs-owner-row (got row)
+    (fold (lambda (s col) (string-append s (list-ref hs-digits (third (hs-find (cell-index row col) got)))))
+        "  " (range 0 life-width)))
+
+(defun hs-run (gen board prev jobs results workers)
+    (print-board gen board)
+    (when (< gen life-generations)
+        (do
+            (IO::print "-- scheduling generation" (+ gen 1) "--")
+            (hs-post-all jobs (+ gen 1) board prev)
+            (let victim (hs-rand gen 0 14 hs-worker-count))
+            (IO::print "  victim of the week: worker" victim)
+            (let out (hs-schedule (+ gen 1) workers results victim () 0 0 ""))
+            (let got (car out))
+            (IO::print " " (second out) "slices," (third out) "ended mid-job; timeline of who ran:")
+            (IO::print (string-append "  " (list-ref out 3)))
+            (IO::print "  who computed each cell:")
+            (for-each (lambda (row) (IO::print (hs-owner-row got row))) (range 0 life-height))
+            (let next (make-board (lambda (row col) (second (hs-find (cell-index row col) got)))))
+            (hs-run (+ gen 1) next board jobs results workers))))
+
+(defun main ()
+    (let jobs (mailbox::create #true 1000))
+    (let results (mailbox::create #true 1000))
+    (let workers (map (lambda (id)
+                (list2 id (process::spawn hs-worker (list2 id results) (environment::self) '(actor) jobs)))
+            (range 0 hs-worker-count)))
+    (IO::print "four workers share one job queue; the scheduler is out to get them")
+    (hs-run 0 (seed-board) (seed-board) jobs results workers))

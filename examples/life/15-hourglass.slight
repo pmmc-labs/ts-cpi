@@ -1,0 +1,114 @@
+; 15 · Hourglass
+;
+; Nobody ever counts the neighbors. Each cell gets an hourglass: a process
+; that is handed its eight neighbors' states and pours one grain of sand for
+; each live one. The process computes nothing and returns nothing useful
+; (it exits with :empty). The only thing it produces is *duration*: an
+; hourglass with more live neighbors takes more evaluator steps to run dry.
+;
+; The CPI reads that duration with the quota of `process::run`, which here
+; is a measuring instrument rather than a scheduling knob:
+;
+; 1. Calibration. Tick costs are implementation-defined (see DECISIONS.md),
+;    so the CPI first builds hourglasses with 1, 2 and 3 grains and times
+;    them with a stopwatch: `process::run p 1` over and over, one tick per
+;    call, counting the `(quota)` answers until `(exited ...)` comes back.
+;    That gives T1 < T2 < T3, the tick counts at which those glasses run dry.
+;
+; 2. Gates. Conway's rule only cares whether the count is <=1, 2, 3 or >=4.
+;    So each cell's hourglass is run in three slices that end exactly at T1,
+;    T2 and T3. The *stop reason* of each slice is the answer: if the glass
+;    runs dry (`exited`) in the first slice there were at most 1 neighbors,
+;    in the second exactly 2, in the third exactly 3. If it is still pouring
+;    (`(quota)`) after T3 the cell is overcrowded, and the CPI kills it.
+;
+; The gate number (1, 2, 3 or 4) goes straight into the library's
+; `life-rule` as the neighbor count: Conway cannot tell 0 from 1 or 4 from 8.
+;
+; CPI features: `process::run` quotas as a clock, the exact-tick boundary
+; between `(quota)` and `(exited v)`, preemption and continuation of a
+; process across several batches, `process::kill`, processes with no grants.
+
+; The hourglass: one grain per live neighbor. Stripped of all meaning, it
+; is just a loop whose running time depends on the data.
+(defun hg-pour (neighbors)
+    (if (nil? neighbors)
+        :empty
+        (do
+            (hg-grain (car neighbors))
+            (hg-pour (cdr neighbors)))))
+
+(defun hg-grain (n)
+    (if (= n 0)
+        ()
+        (hg-grain (- n 1))))
+
+; An hourglass process for a list of neighbor states. It is granted nothing:
+; it cannot print, send or sleep. All it can do is take time.
+(defun hg-glass (neighbors)
+    (process::spawn hg-pour (cons neighbors ()) (environment::self) () #false))
+
+; ---------------------------------------------------------------------------
+; Calibration: a stopwatch made of one-tick batches.
+
+(defun hg-stopwatch (p ticks)
+    (if (eq? (car (process::run p 1)) :exited)
+        ticks
+        (hg-stopwatch p (+ ticks 1))))
+
+; A list of eight neighbor states, the first k alive.
+(defun hg-sample (k)
+    (map (lambda (i) (if (< i k) 1 0)) (range 0 8)))
+
+(defun hg-time (k)
+    (hg-stopwatch (hg-glass (hg-sample k)) 1))
+
+; ---------------------------------------------------------------------------
+; Reading a cell: run its glass slice by slice until the gate it runs dry in.
+
+; `gates` are the remaining absolute tick marks, `spent` the ticks already
+; given, `gate` the number of the slice about to run.
+(defun hg-gate (p gates spent gate)
+    (if (nil? gates)
+        (do
+            (process::kill p :overcrowded)
+            gate)
+        (do
+            (let stop (process::run p (- (car gates) spent)))
+            (if (eq? (car stop) :exited)
+                gate
+                (hg-gate p (cdr gates) (car gates) (+ gate 1))))))
+
+(defun hg-neighbor-states (board row col)
+    (map (lambda (p) (cell-at board (car p) (second p))) (neighbors-of row col)))
+
+(defun hg-read-cell (board gates row col)
+    (hg-gate (hg-glass (hg-neighbor-states board row col)) gates 0 1))
+
+; ---------------------------------------------------------------------------
+
+(defun hg-tally (gate-board gate)
+    (sum (map (lambda (row) (length (filter (lambda (g) (= g gate)) row))) gate-board)))
+
+(defun hg-report (gate-board)
+    (IO::print "  sand ran dry at gate 1:" (hg-tally gate-board 1)
+        "gate 2:" (hg-tally gate-board 2)
+        "gate 3:" (hg-tally gate-board 3)
+        "still pouring, killed:" (hg-tally gate-board 4)))
+
+(defun hg-run (gen board gates)
+    (print-board gen board)
+    (when (< gen life-generations)
+        (do
+            (let gate-board (make-board (lambda (row col) (hg-read-cell board gates row col))))
+            (hg-report gate-board)
+            (let next (make-board (lambda (row col)
+                        (life-rule (cell-at board row col) (cell-at gate-board row col)))))
+            (hg-run (+ gen 1) next gates))))
+
+(defun main ()
+    (let gates (map hg-time '(1 2 3)))
+    (IO::print "calibration: hourglasses with 0 1 2 3 grains run dry after"
+        (hg-time 0) (car gates) (second gates) (third gates) "ticks")
+    (IO::print "gates at ticks" gates)
+    (hg-run 0 (seed-board) gates))

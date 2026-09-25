@@ -1,0 +1,169 @@
+; 11 · Dataflow by join
+;
+; Every cell of every generation is its own short-lived process: 64 cells x 9
+; generations = 576 processes, all spawned before anything runs. A cell of
+; generation g+1 is handed the PIDs of the nine generation-g processes it
+; depends on (itself and its eight neighbors). It calls `actor::join` on each,
+; which blocks with `(blocked join <pid>)` until that process has ended and
+; then answers `(exited v)`. It applies the rule and exits with its new state.
+; The whole run is one dataflow graph whose edges are joins.
+;
+; The CPI knows nothing about Life once the graph is built. It runs a generic
+; scheduler: go round the process list, give every `ready` process a batch,
+; and stop when every process has ended. Ending a process wakes whoever is
+; joined on it (the runtime flips joiners back to `ready`). To make the wave
+; visible, the scheduler is handed the processes newest-first, the worst
+; order: generation 8 runs first and blocks at once, and each round can only
+; finish the generation whose inputs have all ended.
+;
+; Frames are read back from the dead: `process::state` of an ended process is
+; `(ended exited <state>)`. After each round an observer prints any generation
+; whose 64 processes have all ended, plus how many processes are blocked in
+; join.
+;
+; CPI features: process::spawn with PID arguments, actor::join and its wakeup,
+; (blocked join <pid>) stop reasons, process::state of ended processes, a
+; scheduler loop written in the language.
+
+(const jd-quota 10000)
+
+; ---------------------------------------------------------------------------
+; The processes. They are granted only `actor`.
+; ---------------------------------------------------------------------------
+
+; Generation 0: nothing to wait for, just exit with the seed state.
+(defun jd-seed (state)
+    state)
+
+; Generation g+1. `deps` is (self n1 .. n8): nine PIDs of generation g.
+(defun jd-cell (deps)
+    (let states (map jd-join-state deps))
+    (life-rule (car states) (sum (cdr states))))
+
+; `actor::join` answers (exited v) once the process has ended.
+(defun jd-join-state (p)
+    (let r (actor::join p))
+    (second r))
+
+; ---------------------------------------------------------------------------
+; Building the graph. A "pid board" has the shape of a board, with PIDs
+; where the states would be, so `cell-at` and `neighbors-of` work on it.
+; ---------------------------------------------------------------------------
+
+(defun jd-spawn (f args)
+    (process::spawn f args (environment::self) '(actor) #false))
+
+(defun jd-seed-pids ()
+    (let seed (seed-board))
+    (make-board (lambda (row col) (jd-spawn jd-seed (cons (cell-at seed row col) ())))))
+
+(defun jd-deps (prev row col)
+    (cons (cell-at prev row col)
+        (map (lambda (p) (cell-at prev (car p) (second p))) (neighbors-of row col))))
+
+(defun jd-next-pids (prev)
+    (make-board (lambda (row col) (jd-spawn jd-cell (cons (jd-deps prev row col) ())))))
+
+; A list of pid boards, generation 0 first.
+(defun jd-build (gen prev acc)
+    (if (> gen life-generations)
+        (reverse acc)
+        (do
+            (let pids (jd-next-pids prev))
+            (jd-build (+ gen 1) pids (cons pids acc)))))
+
+(defun jd-flatten (board)
+    (fold append () board))
+
+; ---------------------------------------------------------------------------
+; The generic scheduler: it sees only a list of PIDs.
+; ---------------------------------------------------------------------------
+
+(defun jd-status (p)
+    (car (process::state p)))
+
+(defun jd-ready? (p) (eq? (jd-status p) :ready))
+(defun jd-ended? (p) (eq? (jd-status p) :ended))
+(defun jd-joining? (p)
+    (let s (process::state p))
+    (and (eq? (car s) :blocked) (eq? (second s) :join)))
+
+(defun jd-count (pred xs)
+    (length (filter pred xs)))
+
+; One pass over the list: run every `ready` process once. Returns the stop
+; reasons of the batches it ran.
+(defun jd-round (pids stops)
+    (cond
+        ((nil? pids) stops)
+        ((jd-ready? (car pids))
+            (jd-round (cdr pids) (cons (process::run (car pids) jd-quota) stops)))
+        (#true (jd-round (cdr pids) stops))))
+
+; `observe` is called after every round as (observe round stops state) and
+; returns its next state, so the scheduler can carry an observer without
+; knowing what it watches.
+(defun jd-schedule (pids round observe state)
+    (if (all? jd-ended? pids)
+        state
+        (do
+            (let stops (jd-round pids ()))
+            (when (nil? stops)
+                (throw (make-error :deadlock "nothing ready, nothing ended" round)))
+            (jd-schedule pids (+ round 1) observe (observe round stops state)))))
+
+; ---------------------------------------------------------------------------
+; The observer: it knows the graph's shape and reads frames from the dead.
+; ---------------------------------------------------------------------------
+
+(defun jd-exit-value (p)
+    (third (process::state p)))
+
+(defun jd-frame (pids)
+    (map (lambda (row) (map jd-exit-value row)) pids))
+
+; Print every generation, in order, that has fully ended but not been printed.
+; Returns the next generation still to print.
+(defun jd-print-ready (gen boards)
+    (cond
+        ((> gen life-generations) gen)
+        ((all? jd-ended? (jd-flatten (list-ref boards gen)))
+            (do
+                (print-board gen (jd-frame (list-ref boards gen)))
+                (jd-print-ready (+ gen 1) boards)))
+        (#true gen)))
+
+(defun jd-bar (n)
+    (if (<= n 0) "" (string-append "=" (jd-bar (- n 8)))))
+
+(defun jd-graph ()
+    (let seed-pids (jd-seed-pids))
+    (cons seed-pids (jd-build 1 seed-pids ())))
+
+(defun main ()
+    (let boards (jd-graph))
+    (let all-pids (fold append () (map jd-flatten boards)))
+    (IO::print "spawned" (length all-pids) "processes; none has run yet")
+    (IO::print "scheduling newest first, so every join has to wait:")
+    ; The observer's state is the next generation to print.
+    (jd-schedule (reverse all-pids) 1
+        (lambda (round stops next)
+            (let joining (jd-count jd-joining? all-pids))
+            (IO::print "round" round ":" (length stops) "batches,"
+                (jd-count (lambda (r) (eq? (car r) :exited)) stops) "exited,"
+                (jd-count (lambda (r) (eq? (car r) :blocked)) stops) "stopped in join;"
+                "now blocked in join:" joining (jd-bar joining))
+            (jd-print-ready next boards))
+        0)
+    (IO::print "all" (length all-pids) "processes ended")
+    ; The same graph again, handed to the same scheduler oldest first: every
+    ; join finds its target already ended, so nothing ever blocks.
+    (let again (fold append () (map jd-flatten (jd-graph))))
+    (let rounds
+        (jd-schedule again 1
+            (lambda (round stops seen)
+                (IO::print "oldest first, round" round ":" (length stops) "batches,"
+                    (jd-count (lambda (r) (eq? (car r) :blocked)) stops) "stopped in join")
+                round)
+            0))
+    (IO::print "oldest first took" rounds "round(s) for the same" (length again) "processes"))

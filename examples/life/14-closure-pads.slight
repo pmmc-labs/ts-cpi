@@ -1,0 +1,121 @@
+; 14 · Life in the pads
+;
+; The board is a bag of 64 closures in scrambled order. Each closure was made
+; by `cp-cell` and so captured `row`, `col` and `alive`, but it does nothing
+; with them: calling it throws. Nobody ever calls one. The CPI reads the board
+; by peeking at what the closures captured, with `environment::closure-pad`
+; (PadWalker for closures), which lists a closure's captured variables as
+; ((name value) ...). Even the position of a cell is known only from its pad.
+;
+; The next generation is worked out by "thinker" processes, one per cell,
+; granted nothing at all. A thinker binds its verdict to a local variable
+; `next` and then calls `cp-confess`, which throws an error that carries no
+; data. The process fails with `(failed e)`. The CPI reads the verdict out of
+; the dead process's stack: `environment::error-pad e 1` is the pad of the
+; frame one level above the throw, where the thinker was waiting, and it
+; still holds `row`, `col`, `alive`, `count` and `next`. From those the CPI
+; makes the next generation's closures, and the bag goes round again.
+;
+; No value is returned or sent anywhere. State moves only by being captured
+; (closures) or by being stranded on a stack when an error unwinds it.
+;
+; CPI features: environment::closure-pad, environment::error-pad at levels 0
+; and 1, processes with no grants that end in (failed e), throw and errors as
+; carriers of context rather than data.
+
+; ---------------------------------------------------------------------------
+; Cells: closures that must not be called.
+; ---------------------------------------------------------------------------
+
+(defun cp-cell (row col alive)
+    (lambda ()
+        (throw (make-error :hands-off "a cell is for looking at, not calling" ()))))
+
+; The value of `name` in a pad, which is a list of (name value) entries.
+(defun cp-pad-ref (pad name)
+    (cond
+        ((nil? pad) (throw (make-error :no-such-variable "not in the pad" name)))
+        ((eq? (car (car pad)) name) (second (car pad)))
+        (#true (cp-pad-ref (cdr pad) name))))
+
+; Peek at one cell: (row col alive), read from what its closure captured.
+(defun cp-peek (cell)
+    (let pad (environment::closure-pad cell))
+    (list3 (cp-pad-ref pad :row) (cp-pad-ref pad :col) (cp-pad-ref pad :alive)))
+
+; Rebuild the board from a bag of cells, in any order.
+(defun cp-board (bag)
+    (let peeks (map cp-peek bag))
+    (make-board (lambda (row col) (cp-find peeks row col))))
+
+(defun cp-find (peeks row col)
+    (let p (car peeks))
+    (if (and (= (car p) row) (= (second p) col))
+        (third p)
+        (cp-find (cdr peeks) row col)))
+
+; The seed, as a scrambled bag: cell i goes to position (i * 29) mod 64,
+; since 29 and 64 share no factor, so the bag's order says nothing useful.
+(defun cp-seed-bag ()
+    (let seed (seed-board))
+    (map (lambda (k)
+            (do
+                (let i (% (* k 29) (cell-count)))
+                (cp-cell (index-row i) (index-col i) (cell-at seed (index-row i) (index-col i)))))
+        (range 0 (cell-count))))
+
+; ---------------------------------------------------------------------------
+; Thinkers: processes that answer by dying.
+; ---------------------------------------------------------------------------
+
+(defun cp-thinker (row col alive neighbors)
+    (let count (sum neighbors))
+    (let next (life-rule alive count))
+    ; Not a tail call: this frame stays on the stack, holding the pad above.
+    (let answer (cp-confess))
+    answer)
+
+(defun cp-confess ()
+    (throw (make-error :confession "I have nothing to say" ())))
+
+; Spawn a thinker for one cell, run it until it throws, and read its verdict
+; from the stack it left behind. Returns the next generation's closure.
+(defun cp-think (board cell)
+    (let p (cp-peek cell))
+    (let row (car p))
+    (let col (second p))
+    (let neighbors (map (lambda (n) (cell-at board (car n) (second n))) (neighbors-of row col)))
+    (let pid (process::spawn cp-thinker (cons row (cons col (cons (third p) (cons neighbors ()))))
+            (environment::self) () #false))
+    (let r (process::run pid 10000))
+    (when (not (eq? (car r) :failed))
+        (throw (make-error :thinker-survived "a thinker did not throw" r)))
+    (let stranded (environment::error-pad (second r) 1))
+    (cp-cell (cp-pad-ref stranded :row) (cp-pad-ref stranded :col) (cp-pad-ref stranded :next)))
+
+; ---------------------------------------------------------------------------
+; The loop.
+; ---------------------------------------------------------------------------
+
+(defun cp-show-one (bag)
+    (let cell (car bag))
+    (IO::print "the first cell in the bag captured" (environment::closure-pad cell))
+    (IO::print "calling it would throw:" (error-tag (catch (cell) e e)))
+    (let p (cp-peek cell))
+    (let pid (process::spawn cp-thinker (cons (car p) (cons (second p) (cons (third p) (cons '(0 1 0 1 0 1 0 0) ()))))
+            (environment::self) () #false))
+    (let e (second (process::run pid 10000)))
+    (IO::print "a thinker for it (3 live neighbors) died with" (error-tag e) "payload" (error-payload e))
+    (IO::print "  pad at the throw (level 0):" (environment::error-pad e 0))
+    (IO::print "  pad one frame up (level 1):" (environment::error-pad e 1)))
+
+(defun cp-run (gen bag)
+    (let board (cp-board bag))
+    (print-board gen board)
+    (when (< gen life-generations)
+        (cp-run (+ gen 1) (map (lambda (cell) (cp-think board cell)) bag))))
+
+(defun main ()
+    (let bag (cp-seed-bag))
+    (cp-show-one bag)
+    (cp-run 0 bag))

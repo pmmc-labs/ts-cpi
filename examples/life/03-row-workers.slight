@@ -1,0 +1,150 @@
+; 03 · Row workers, bulk-synchronous
+;
+; The classic BSP (bulk-synchronous parallel) design: one worker process per
+; row, and a sequence of supersteps. Each superstep has three phases:
+;
+;   1. scatter  the CPI sends every worker the three rows it needs
+;               (above, own, below) with `mailbox::send`;
+;   2. compute  the CPI runs the workers round robin, in a different order
+;               each superstep and with uneven quotas, so they interleave
+;               and finish in an order nobody planned;
+;   3. barrier  the CPI drains one shared result mailbox with `mailbox::take`
+;               until it holds a new row from every worker.
+;
+; Nothing crosses the barrier early: a worker can only start generation g+1
+; once the CPI has seen every row of generation g and scattered them again.
+; Results arrive in whatever order the workers happened to finish, so each
+; one is tagged with its row number and put back in place by the CPI.
+;
+; Raw builtins only, no actor library: `process::spawn`, `process::run`,
+; `process::state`, `mailbox::create`, `mailbox::send`, `mailbox::take`,
+; `mailbox::size`, and inside the workers `actor::recv` and `actor::send`.
+; Workers are granted only `actor`: they cannot even print.
+
+; Ticks a worker may run before it is preempted. Small on purpose: a worker
+; needs several thousand ticks per row, so every superstep interleaves them.
+; Each worker gets a different quota each superstep (150 to 550 ticks), so
+; some rows race ahead and others lag: the arrival order is scrambled.
+(defun rw-quota (row gen)
+    (+ 150 (* 100 (% (+ (* row 7) (* gen 11)) 5))))
+
+; ---------------------------------------------------------------------------
+; Inside a worker (granted actor only)
+; ---------------------------------------------------------------------------
+
+; The number of live cells among the three cells centered on `col`.
+(defun rw-triple (row col)
+    (+ (list-ref row (wrap (- col 1) life-width))
+        (+ (list-ref row col)
+            (list-ref row (wrap (+ col 1) life-width)))))
+
+; The next state of the middle row, from the rows above and below it.
+(defun rw-step-row (above own below)
+    (map (lambda (col)
+            (do
+                (let alive (list-ref own col))
+                (let count (- (+ (rw-triple above col)
+                            (+ (rw-triple own col) (rw-triple below col)))
+                        alive))
+                (life-rule alive count)))
+        (range 0 life-width)))
+
+; A worker's whole life. Each work order is (gen above own below); the answer,
+; sent to the shared result mailbox, is (row gen new-row). `:stop` ends it.
+(defun rw-worker (row results)
+    (let order (actor::recv))
+    (if (eq? order :stop)
+        (list2 :rows-done row)
+        (do
+            (let gen (car order))
+            (let rows (cdr order))
+            (let new-row (rw-step-row (car rows) (second rows) (third rows)))
+            (actor::send results (list3 row (+ gen 1) new-row))
+            (rw-worker row results))))
+
+; ---------------------------------------------------------------------------
+; The CPI: supersteps
+; ---------------------------------------------------------------------------
+
+; Phase 1. Every worker gets the rows around its own, wrapped on the torus.
+(defun rw-scatter (workers gen board)
+    (for-each (lambda (row)
+            (mailbox::send (process::address (list-ref workers row))
+                (cons gen (list3 (list-ref board (wrap (- row 1) life-height))
+                        (list-ref board row)
+                        (list-ref board (wrap (+ row 1) life-height))))))
+        (range 0 life-height)))
+
+; The order workers run in during a superstep. 5 is coprime to 8, so this is
+; a permutation of the rows, and a different one every generation.
+(defun rw-run-order (gen)
+    (map (lambda (i) (% (+ (* i 5) (* gen 3)) life-height)) (range 0 life-height)))
+
+(defun rw-ready? (p)
+    (eq? (car (process::state p)) :ready))
+
+; Phase 2. Round robin over the ready workers until every one has blocked
+; in recv again. Returns the number of rounds it took.
+(defun rw-compute (workers gen order rounds)
+    (let ready (filter (lambda (row) (rw-ready? (list-ref workers row))) order))
+    (if (nil? ready)
+        rounds
+        (do
+            (for-each (lambda (row)
+                    (do
+                        (let reason (process::run (list-ref workers row) (rw-quota row gen)))
+                        (when (not (or (eq? (car reason) :quota) (eq? (car reason) :blocked)))
+                            (throw (make-error :worker-died "a row worker stopped" (list2 row reason))))))
+                ready)
+            (rw-compute workers gen order (+ rounds 1)))))
+
+; Phase 3, the barrier. Takes results until every row is in. `got` holds
+; (row new-row) pairs, most recent first; `arrivals` the rows in arrival
+; order. A missing result after compute would be a bug, so it throws.
+(defun rw-gather (results gen got arrivals)
+    (if (= (length got) life-height)
+        (list2 got (reverse arrivals))
+        (do
+            (let r (mailbox::take results))
+            (when (eq? r #false)
+                (throw (make-error :barrier-short "a row never arrived" (list2 gen arrivals))))
+            (when (not (= (second r) gen))
+                (throw (make-error :stale-result "a result from the wrong superstep" r)))
+            (rw-gather results gen (cons (list2 (car r) (third r)) got) (cons (car r) arrivals)))))
+
+; Puts the tagged rows back in order.
+(defun rw-assemble (got)
+    (map (lambda (row)
+            (second (car (filter (lambda (g) (= (car g) row)) got))))
+        (range 0 life-height)))
+
+; One superstep takes generation `gen` to `gen + 1`.
+(defun rw-superstep (workers results gen board)
+    (rw-scatter workers gen board)
+    (let order (rw-run-order gen))
+    (let rounds (rw-compute workers gen order 0))
+    (IO::print "[superstep]" (+ gen 1) "ran rows in order" order "for" rounds "rounds,"
+        (mailbox::size results) "results wait at the barrier")
+    (let gathered (rw-gather results (+ gen 1) () ()))
+    (IO::print "[superstep]" (+ gen 1) "results arrived in order" (second gathered))
+    (rw-assemble (car gathered)))
+
+(defun rw-loop (workers results gen board)
+    (print-board gen board)
+    (when (< gen life-generations)
+        (rw-loop workers results (+ gen 1) (rw-superstep workers results gen board))))
+
+(defun rw-stop (workers)
+    (for-each (lambda (p) (mailbox::send (process::address p) :stop)) workers)
+    (for-each (lambda (p) (process::run p 1000)) workers)
+    (IO::print "[cpi] workers ended:" (map (lambda (p) (third (process::state p))) workers)))
+
+(defun main ()
+    ; One shared result mailbox. Nobody receives on it: only the CPI takes.
+    (let results (mailbox::create #true 100))
+    (let workers (map (lambda (row)
+                (process::spawn rw-worker (list2 row results) (environment::self) '(actor) #false))
+            (range 0 life-height)))
+    (IO::print "[cpi] spawned" (length workers) "row workers, one result mailbox")
+    (rw-loop workers results 0 (seed-board))
+    (rw-stop workers))

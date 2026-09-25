@@ -72,7 +72,7 @@
 
 (defun any? (pred xs)
     (and (not (nil? xs))
-         (or (pred (car xs)) (any? pred (cdr xs)))))
+        (or (pred (car xs)) (any? pred (cdr xs)))))
 
 (defun all? (pred xs)
     (or (nil? xs)

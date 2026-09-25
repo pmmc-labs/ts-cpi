@@ -1,0 +1,169 @@
+; 02 · Actors
+;
+; load: examples/actors/actors.slight
+;
+; One actor per cell, 64 in all, built on examples/actors/actors.slight. Each
+; cell knows only its own state and the addresses of its eight neighbors.
+; Every generation it tells its neighbors its state, listens for theirs, and
+; applies the rule. There is no global clock and no central board: the CPI
+; never tells a cell what generation it is.
+;
+; The trap in this design (and the bug in the old ts-slight version) is that
+; cells run at different speeds. A cell can finish generation g and announce
+; its state for g+1 before a slower neighbor has even heard all of g. A cell
+; that simply counted the first eight messages it received would mix states
+; from two generations. So every state message is tagged with its generation,
+; and a cell that hears from the future buffers the message until it gets
+; there. A neighbor can never be more than one generation ahead (it cannot
+; compute g+1 without our state for g), so a message is always for this
+; generation or the next, and one buffer is enough. (Try it: make
+; `ac-gather` count any state message it gets, and frame 1 is already wrong.)
+;
+; To make the race real, the CPI runs cells with uneven quotas (40 to 400
+; ticks), in a different order each round: some cells race ahead and others
+; lag, and the generations spread out across the board.
+;
+; The CPI observes the board through a collector mailbox. Each cell reports
+; (gen index state) to it every generation; the CPI drains it with
+; `mailbox::take` between rounds and prints a frame as soon as all 64 cells
+; have reported that generation, even while fast cells are already further
+; on. When a cell retires, its exit value says how many messages it had to
+; buffer.
+;
+; CPI features: actors with their own mailboxes, messages sent in a batch
+; and delivered when it ends, `mailbox::send` from the CPI (introductions),
+; a shared mailbox that nobody receives on (`mailbox::take`), a hand-written
+; round robin scheduler with per-process quotas, deadlock detection, and
+; exit values read back with `process::state`.
+
+; ---------------------------------------------------------------------------
+; Inside a cell (granted actor)
+; ---------------------------------------------------------------------------
+
+; A cell's first message is its introduction, (neighbors <collector> <addrs>):
+; the collector introduces it to its eight neighbors.
+(defun ac-cell (row col state)
+    (let intro (receive))
+    (ac-live row col 0 state (msg-body intro) () (msg-from intro) 0))
+
+; One generation of a cell's life. `early` holds the neighbor states for
+; `gen` that arrived during the previous generation; `buffered` counts every
+; message this cell ever had to set aside.
+(defun ac-live (row col gen state neighbors early collector buffered)
+    (send collector :report (list3 gen (cell-index row col) state))
+    (if (= gen life-generations)
+        (list2 :retired buffered)
+        (do
+            (for-each (lambda (n) (send n :state (list2 gen state))) neighbors)
+            (let heard (ac-gather gen (- 8 (length early)) (sum (map second early)) ()))
+            (let later (second heard))
+            (ac-live row col (+ gen 1) (life-rule state (car heard)) neighbors later collector
+                (+ buffered (length later))))))
+
+; Receives until `need` more states for generation `gen` have arrived.
+; Returns (live-count early), with `early` the states for gen+1 that came in
+; the meantime, as (gen state) pairs.
+(defun ac-gather (gen need count early)
+    (if (= need 0)
+        (list2 count early)
+        (do
+            (let m (receive))
+            (let g (car (msg-body m)))
+            (let alive (second (msg-body m)))
+            (cond
+                ((= g gen) (ac-gather gen (- need 1) (+ count alive) early))
+                ((= g (+ gen 1)) (ac-gather gen need count (cons (msg-body m) early)))
+                (#true (throw (make-error :time-travel "a state from too far away in time" (list2 gen m))))))))
+
+; ---------------------------------------------------------------------------
+; The CPI: spawning, introductions, scheduling, observing
+; ---------------------------------------------------------------------------
+
+; Like `spawn-actor`, but quiet: 64 "spawned" lines would drown the board.
+(defun ac-spawn (row col state)
+    (let pid (process::spawn ac-cell (list3 row col state) (environment::self) '(actor) #false))
+    (cons (list2 row col) (cons pid (cons (process::address pid) ()))))
+
+; Cells are numbered by `cell-index`, so the cell list doubles as the board.
+(defun ac-introduce (cells collector)
+    (for-each (lambda (i)
+            (do
+                (let neighbors (map (lambda (p) (actor-address (list-ref cells (cell-index (car p) (second p)))))
+                        (neighbors-of (index-row i) (index-col i))))
+                (mailbox::send (actor-address (list-ref cells i)) (list3 :neighbors collector neighbors))))
+        (range 0 (cell-count))))
+
+; Uneven quotas: 40 to 400 ticks, fixed per cell.
+(defun ac-quota (i)
+    (+ 40 (* 60 (% (* i 37) 7))))
+
+; The order cells run in, a different permutation each round (37 is coprime
+; to 64).
+(defun ac-order (round)
+    (map (lambda (i) (% (+ (* i 37) (* round 11)) (cell-count))) (range 0 (cell-count))))
+
+; One round: every ready cell runs once. Returns #true if any cell ran.
+(defun ac-round (cells round)
+    (let ready (filter (lambda (i) (ready? (list-ref cells i))) (ac-order round)))
+    (for-each (lambda (i)
+            (do
+                (let a (list-ref cells i))
+                (let reason (process::run (actor-pid a) (ac-quota i)))
+                (when (eq? (car reason) :failed)
+                    (throw (wrap-error (second reason) :cell-failed "a cell failed" (actor-name a))))))
+        ready)
+    (not (nil? ready)))
+
+; Moves every waiting report from the collector into `reports`.
+(defun ac-drain (collector reports)
+    (let r (ac-take-body (mailbox::take collector)))
+    (if (eq? r #false)
+        reports
+        (ac-drain collector (cons r reports))))
+
+(defun ac-take-body (m)
+    (if (eq? m #false) #false (msg-body m)))
+
+(defun ac-reports-for (gen reports)
+    (filter (lambda (r) (= (car r) gen)) reports))
+
+(defun ac-highest-gen (reports best)
+    (fold (lambda (b r) (if (> (car r) b) (car r) b)) best reports))
+
+; Prints every frame that is complete, in order. Returns (next-gen reports).
+(defun ac-print-ready (next reports round highest)
+    (let mine (ac-reports-for next reports))
+    (if (or (> next life-generations) (< (length mine) (cell-count)))
+        (list2 next reports)
+        (do
+            (IO::print "[collector] round" round "- all 64 cells reported; the fastest cell has reported gen" highest)
+            (print-board next (make-board (lambda (row col)
+                        (third (car (filter (lambda (r) (= (second r) (cell-index row col))) mine))))))
+            (ac-print-ready (+ next 1) (filter (lambda (r) (not (= (car r) next))) reports) round highest))))
+
+; The scheduler. It stops when no cell is ready; by then every frame must
+; have been printed, or the cells are deadlocked.
+(defun ac-schedule (cells collector round next reports highest)
+    (let ran (ac-round cells round))
+    (let all (ac-drain collector reports))
+    (let top (ac-highest-gen all highest))
+    (let printed (ac-print-ready next all round top))
+    (cond
+        (ran (ac-schedule cells collector (+ round 1) (car printed) (second printed) top))
+        ((<= (car printed) life-generations)
+            (throw (make-error :deadlock "no cell can move, but frames are missing" (car printed))))
+        (#true round)))
+
+(defun main ()
+    (let collector (mailbox::create #true 1000))
+    (let board (seed-board))
+    (let cells (map (lambda (i) (ac-spawn (index-row i) (index-col i) (cell-at board (index-row i) (index-col i))))
+            (range 0 (cell-count))))
+    (IO::print "[system] spawned" (length cells) "cell actors")
+    (ac-introduce cells collector)
+    (IO::print "[system] introduced every cell to its eight neighbors")
+    (let rounds (ac-schedule cells collector 0 0 () 0))
+    (let ends (map (lambda (a) (process::state (actor-pid a))) cells))
+    (IO::print "[system] after" rounds "rounds:"
+        (length (filter (lambda (s) (eq? (second s) :exited)) ends)) "cells retired,"
+        (sum (map (lambda (s) (second (third s))) ends)) "state messages arrived a generation early and were buffered"))

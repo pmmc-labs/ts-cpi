@@ -1,0 +1,122 @@
+; 17 · Amb: one process, forked 64 ways
+;
+; Only one cell process is ever written, and it is spawned only once. It
+; does not know where it is. It asks, six times, "is the next bit of my
+; position 0 or 1?" by calling `actor::recv`, then asks for the board and
+; exits with its next state.
+;
+; The CPI answers each question *both ways*. This works because parked
+; data is a multi-shot continuation: `process::unpark` may be applied to
+; the same parked value any number of times, and each time it makes a new
+; process that resumes inside the very same `recv`. So at each question the
+; CPI parks the process, unparks it twice, and sends one copy a 0 and the
+; other a 1. Like Scheme's `amb`, the choice points fan out into a binary
+; tree:
+;
+;     root ? --0--> ? --0--> ... 6 levels ... --> leaf at (0 0)
+;            \--1--> ? ...                     --> leaf at (7 7)
+;
+; Six levels give 64 leaves, one per cell, each a continuation parked in
+; its last `recv`, waiting for the board. The tree is grown once. From then
+; on every generation just unparks each leaf again (the parked value is
+; never used up), sends it the current board, and runs it until it exits
+; with its cell's next state. The same 64 frozen continuations are revived
+; once per generation; the cells are "compiled" into parked data.
+;
+; The CPI never tells a cell its coordinates as numbers: a cell's identity
+; is only the path of answers that led to it. That path is visible in the
+; parked data, because a process's checkpoint is the arguments of its most
+; recent call to the procedure it was spawned with.
+;
+; All the clones share one durable mailbox (unpark keeps the address), so
+; the CPI sends each answer and immediately runs the one clone meant to
+; receive it.
+;
+; CPI features: `process::park` and multi-shot `process::unpark`, the
+; parked data's checkpoint and address fields, a shared durable mailbox
+; from `mailbox::create`, `mailbox::send` from the CPI, and `(exited v)`
+; as the way a cell reports.
+
+(const am-quota 100000)
+(const am-bits 6)
+
+; The one cell program. `path` holds the answers so far, newest first.
+(defun am-cell (path)
+    (if (= (length path) am-bits)
+        (am-leaf (reverse path))
+        (am-cell (cons (actor::recv) path))))
+
+; A leaf knows its path; the first three bits are the row, the last three
+; the column. It waits for a board and reports its cell's next state.
+(defun am-leaf (bits)
+    (let row (am-number (list3 (car bits) (second bits) (third bits))))
+    (let col (am-number (cdr (cdr (cdr bits)))))
+    (let board (actor::recv))
+    (step-cell board row col))
+
+(defun am-number (bits)
+    (fold (lambda (n b) (+ (* n 2) b)) 0 bits))
+
+; Parked data is (parked <key> <checkpoint-args> <binding-hash> <address>).
+(defun am-parked-path (parked)
+    (car (third parked)))
+
+(defun am-parked-address (parked)
+    (list-ref parked 4))
+
+; Revives a parked continuation, answers its `recv` with `msg`, and runs it
+; until it stops again.
+(defun am-revive (parked msg)
+    (let p (process::unpark parked (environment::self)))
+    (mailbox::send (am-parked-address parked) msg)
+    (list2 p (process::run p am-quota)))
+
+; ---------------------------------------------------------------------------
+; Growing the tree: at every choice point, fork both ways.
+
+(defun am-grow (parked depth)
+    (if (= depth am-bits)
+        (cons parked ())
+        (append (am-branch parked 0 depth) (am-branch parked 1 depth))))
+
+(defun am-branch (parked bit depth)
+    (let revived (am-revive parked bit))
+    (am-grow (process::park (car revived)) (+ depth 1)))
+
+; ---------------------------------------------------------------------------
+; Running a generation: revive every leaf with the board.
+
+(defun am-ask (leaf board)
+    (let stop (second (am-revive leaf board)))
+    (if (eq? (car stop) :exited)
+        (second stop)
+        (throw (make-error :am-cell "a cell did not exit" stop))))
+
+; Cuts a flat row-major list back into rows.
+(defun am-rows (cells)
+    (if (nil? cells)
+        ()
+        (cons (am-take cells life-width) (am-rows (am-drop cells life-width)))))
+
+(defun am-take (xs n)
+    (if (= n 0) () (cons (car xs) (am-take (cdr xs) (- n 1)))))
+
+(defun am-drop (xs n)
+    (if (= n 0) xs (am-drop (cdr xs) (- n 1))))
+
+(defun am-run (gen board leaves)
+    (print-board gen board)
+    (when (< gen life-generations)
+        (am-run (+ gen 1) (am-rows (map (lambda (leaf) (am-ask leaf board)) leaves)) leaves)))
+
+(defun main ()
+    (let mbox (mailbox::create #true 10))
+    (let root (process::spawn am-cell (cons () ()) (environment::self) '(actor) mbox))
+    (IO::print "the root asks its first question:" (process::run root am-quota))
+    (let leaves (am-grow (process::park root) 0))
+    (IO::print "grew" (length leaves) "leaves from one process;"
+        "each is a parked continuation waiting for a board")
+    (IO::print "leaf 0 was reached by the answers" (am-parked-path (car leaves))
+        "and leaf 11 (row 1, col 3) by" (am-parked-path (list-ref leaves 11)) "(newest first)")
+    (am-run 0 (seed-board) leaves)
+    (IO::print "every leaf was revived" life-generations "times; none was used up"))

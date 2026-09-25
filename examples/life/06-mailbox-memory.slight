@@ -1,0 +1,105 @@
+; 06 · Mailboxes as memory
+;
+; No processes at all. The board is not a value the CPI holds: it lives in
+; mailboxes, one per cell, used as one-bit memory cells.
+;
+;   a live cell   is a mailbox holding one message, its "life token";
+;   a dead cell   is an empty mailbox.
+;
+; Reading the board is `mailbox::size`; a neighbor count is a sum of sizes.
+; Writing it is `mailbox::send`; erasing it is `mailbox::take`. Each mailbox
+; is created with capacity 1, so the runtime itself enforces that a cell
+; cannot be more than alive: a second token is refused with `full`.
+;
+; The memory is double-buffered, like video memory: two banks of 64
+; mailboxes. Each generation reads bank `now`, writes bank `next`, erases
+; `now`, and the banks swap roles. The token is not just a bit: it is
+; `(born g)`, minted when the cell is born. A surviving cell's token is
+; moved to the other bank, so it travels through the generations; a dying
+; cell's token is taken and dropped. So the memory also remembers how old
+; every live cell is, without the CPI keeping any record of it.
+;
+; There is no `mailbox::peek`, so reading a token without erasing the cell
+; is a take followed by a send back into the same mailbox.
+;
+; Between generations the CPI's loop carries only the generation number and
+; the two banks of addresses; `print-board` is fed a board read back from
+; the mailboxes.
+;
+; CPI features: `mailbox::create` (durable, capacity 1), `mailbox::send`,
+; `mailbox::size`, `mailbox::take`, the `full` error.
+
+; A bank of 64 one-message mailboxes, as a board of addresses.
+(defun mm-bank ()
+    (make-board (lambda (row col) (mailbox::create #true 1))))
+
+(defun mm-alive (bank row col)
+    (mailbox::size (cell-at bank row col)))
+
+; The board, read back out of memory.
+(defun mm-read (bank)
+    (make-board (lambda (row col) (mm-alive bank row col))))
+
+(defun mm-count (bank row col)
+    (sum (map (lambda (p) (mm-alive bank (car p) (second p))) (neighbors-of row col))))
+
+; Reads the token in a live cell without killing it.
+(defun mm-peek (box)
+    (let token (mailbox::take box))
+    (mailbox::send box token)
+    token)
+
+; Writes the next state of one cell into bank `next`, reading only bank
+; `now`. Returns what happened to the cell.
+(defun mm-write (now next row col gen)
+    (let here (cell-at now row col))
+    (let alive (mailbox::size here))
+    (cond
+        ((= (life-rule alive (mm-count now row col)) 0)
+            (if (= alive 1) :died :empty))
+        ((= alive 1)
+            (mailbox::send (cell-at next row col) (mm-peek here))
+            :survived)
+        (#true
+            (mailbox::send (cell-at next row col) (list2 :born (+ gen 1)))
+            :born)))
+
+; Erases a bank: every token left in it is taken and dropped.
+(defun mm-erase (bank)
+    (for-each (lambda (row) (for-each (lambda (box) (mailbox::take box)) row)) bank))
+
+(defun mm-tally (events what)
+    (sum (map (lambda (row) (length (filter (lambda (e) (eq? e what)) row))) events)))
+
+; The birth generations of the tokens in a bank, row by row.
+(defun mm-births (bank)
+    (map (lambda (box) (second (mm-peek box)))
+        (filter (lambda (box) (= (mailbox::size box) 1)) (fold append () bank))))
+
+(defun mm-messages (bank)
+    (sum (map (lambda (row) (sum (map (lambda (box) (mailbox::size box)) row))) bank)))
+
+(defun mm-run (gen now next)
+    (print-board gen (mm-read now))
+    (IO::print "    [memory]" (mm-messages now) "tokens; minted in generations" (mm-births now))
+    (if (< gen life-generations)
+        (do
+            (let events (make-board (lambda (row col) (mm-write now next row col gen))))
+            (mm-erase now)
+            (IO::print "    [memory]" (mm-tally events :survived) "moved," (mm-tally events :born) "minted,"
+                (mm-tally events :died) "taken and dropped; banks swap")
+            (mm-run (+ gen 1) next now))
+        (IO::print "    [memory] the other bank holds" (mm-messages next) "messages: it is blank, ready for a next generation")))
+
+(defun main ()
+    (let bank-a (mm-bank))
+    (let bank-b (mm-bank))
+    (for-each (lambda (c) (mailbox::send (cell-at bank-a (car c) (second c)) (list2 :born 0))) seed-cells)
+    ; Try to make a live cell "more alive": the mailbox refuses.
+    (let refused
+        (catch (mailbox::send (cell-at bank-a 0 1) (list2 :born 0))
+            e
+            (error-tag e)))
+    (IO::print "    [memory] writing a second token into live cell (0 1):" refused)
+    (IO::print "    [memory] cell (0 1) holds" (mm-peek (cell-at bank-a 0 1)))
+    (mm-run 0 bank-a bank-b))
