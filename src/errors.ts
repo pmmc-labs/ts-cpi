@@ -20,8 +20,8 @@ export const fail = (tag: RuntimeTag, message: string, payload: Value = NIL): Re
 // Thrown (as a JS exception) by the reader, expander and loader. `e` has tag load-error.
 export class LoadError extends Error {
   readonly e: ErrorValue;
-  constructor(message: string, payload: Value = NIL) {
+  constructor(message: string, payload: Value = NIL, cause: ErrorValue | null = null) {
     super(message);
-    this.e = makeError('load-error', message, payload);
+    this.e = makeError('load-error', message, payload, cause);
   }
 }

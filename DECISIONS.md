@@ -48,6 +48,15 @@ choices in `prompt.md`, then the simplest consistent behavior.
 - `src/machine.ts`: entering a closure body starts the site `{ fn: <closure name>, pos: null }`; body expressions then use their own positions.
 - `src/machine.ts`: `seq` and `let` frames record the site of the expression they wait on, so trace entries point at the waiting line.
 - `src/machine.ts`: errors the machine raises itself (arity, applying a non-procedure, `apply`'s type checks) have payload `()`.
+- `src/builtins.ts`: `IO::print` is variadic; its declared arity is `'any'`, the one action exempt from the arity check.
+- `src/runtime.ts`: when the CPI fails (section 12), every live process ends as `(killed ())`.
+- `src/runtime.ts`: a parked process's grants are kept in the runtime's park table (not in the parked value), so `process::unpark` restores them.
+- `src/runtime.ts`: `environment::error-pad` on a never-thrown error is `range-error` (there is no trace entry); `error-env` is `bad-state` as the spec says.
+- `src/runtime.ts`: capacity for a process's buffered sends is reserved at send time, so `full` reaches the sender in the same batch.
+- `src/runtime.ts` (manager): `host::wait` never moves the clock backward (the CPI's own `timer::sleep` may already have passed a deadline).
+- `src/loader.ts`: load-error messages are prefixed with `file:line:col` of the top-level form; a failing `const`'s load-error has the thrown error as both payload and cause, so the CLI prints its trace.
+- `bin/cpi.ts` (manager): prints the error, one `at name (file:line:col)` line per trace entry, then each cause under `caused by:`.
+- `IO::print` uses `display` all the way down, so strings inside printed lists also appear without quotes.
 
 ## Spec issues
 
