@@ -55,4 +55,10 @@ function printError(e: ErrorValue): void {
     }
 }
 
+// A closed pipe (e.g. `| head`) ends the output; it is not an error.
+process.stdout.on('error', (e: NodeJS.ErrnoException) => {
+    if (e.code === 'EPIPE') process.exit(0);
+    throw e;
+});
+
 process.exitCode = main();

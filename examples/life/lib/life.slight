@@ -1,0 +1,76 @@
+; The Game of Life, shared by every version in examples/life/.
+;
+; A board is a list of rows, each a list of cells: 1 for alive, 0 for dead.
+; The board is a torus: row -1 is the last row, column `life-width` is 0.
+; Every version runs the same seed for the same number of generations and
+; prints each frame with `print-board`, so their output can be compared.
+
+(const life-width 8)
+(const life-height 8)
+(const life-generations 8)
+
+; A glider in the top left and a blinker in the bottom right.
+(const seed-cells '((0 1) (1 2) (2 0) (2 1) (2 2) (6 4) (6 5) (6 6)))
+
+; Offsets of the eight neighbors, as (row col).
+(const neighbor-offsets '((-1 -1) (-1 0) (-1 1) (0 -1) (0 1) (1 -1) (1 0) (1 1)))
+
+(defun wrap (i n)
+    (% (+ i n) n))
+
+; Conway's rule, B3/S23: the next state of a cell from its state and its
+; number of live neighbors.
+(defun life-rule (alive count)
+    (cond
+        ((= count 3) 1)
+        ((and (= alive 1) (= count 2)) 1)
+        (#true 0)))
+
+; (f row col) gives each cell's state.
+(defun make-board (f)
+    (map (lambda (row)
+             (map (lambda (col) (f row col)) (range 0 life-width)))
+         (range 0 life-height)))
+
+(defun seed-board ()
+    (make-board (lambda (row col) (if (member-cell? row col seed-cells) 1 0))))
+
+(defun member-cell? (row col cells)
+    (any? (lambda (c) (and (= (car c) row) (= (second c) col))) cells))
+
+(defun cell-at (board row col)
+    (list-ref (list-ref board (wrap row life-height)) (wrap col life-width)))
+
+; The (row col) positions of the eight neighbors of a cell, wrapped.
+(defun neighbors-of (row col)
+    (map (lambda (o) (list2 (wrap (+ row (car o)) life-height)
+                            (wrap (+ col (second o)) life-width)))
+         neighbor-offsets))
+
+(defun neighbor-count (board row col)
+    (sum (map (lambda (p) (cell-at board (car p) (second p))) (neighbors-of row col))))
+
+(defun step-cell (board row col)
+    (life-rule (cell-at board row col) (neighbor-count board row col)))
+
+(defun step-board (board)
+    (make-board (lambda (row col) (step-cell board row col))))
+
+; Cells are also numbered 0 .. width*height-1, row by row.
+(defun cell-index (row col) (+ (* row life-width) col))
+(defun index-row (i) (/ i life-width))
+(defun index-col (i) (% i life-width))
+(defun cell-count () (* life-width life-height))
+
+(defun live-cells (board)
+    (filter (lambda (p) (= (cell-at board (car p) (second p)) 1))
+            (fold append () (map (lambda (row) (map (lambda (col) (list2 row col)) (range 0 life-width)))
+                                 (range 0 life-height)))))
+
+(defun row->string (row)
+    (fold (lambda (s cell) (string-append s (if (= cell 1) "#" "."))) "" row))
+
+; Every version prints its frames with this, so tests can compare them.
+(defun print-board (gen board)
+    (IO::print "generation" gen)
+    (for-each (lambda (row) (IO::print (row->string row))) board))

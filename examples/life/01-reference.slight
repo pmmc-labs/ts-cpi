@@ -1,0 +1,13 @@
+; 01 · Reference
+;
+; The plain version: the board is a value, each generation is a pure function
+; of the last, and everything runs in the CPI itself. No processes, no
+; mailboxes. Every other version must print exactly these frames.
+
+(defun run (gen board)
+    (print-board gen board)
+    (when (< gen life-generations)
+        (run (+ gen 1) (step-board board))))
+
+(defun main ()
+    (run 0 (seed-board)))
