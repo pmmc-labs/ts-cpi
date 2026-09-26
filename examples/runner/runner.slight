@@ -58,7 +58,9 @@
                    (range 0 5))
             (Box (@ (height 1)))
             (Text (@ (dimColor #true))
-                ,(string-append (third engine) (if (eq? (engine-function engine) #false) "  (not loaded)" "")))
+                ,(string-append "engine: " (string-append (third engine) (if (eq? (engine-function engine) #false) "  (not loaded)" ""))))
+            (Text (@ (dimColor #true))
+                ,(string-append "rule: " (third (list-ref rules (list-ref choices 3)))))
             (Box (@ (height 1)))
             (Text (@ (dimColor #true)) "↑↓ choose · ←→ change · enter run · q quit"))
         ,(and (not (eq? message "")) `(Text (@ (color yellow)) ,message))))
@@ -103,7 +105,7 @@
             (let preset (list-ref presets (third choices)))
             (let rule-entry (list-ref rules (list-ref choices 3)))
             (let board (preset-board preset (car size) (second size)))
-            (let info `(,(car entry) ,(car preset) ,(car rule-entry) ,(second rule-entry)))
+            (let info `(,(car entry) ,(car preset) ,(car rule-entry) ,(second rule-entry) ,(third rule-entry)))
             (let cell (cell-new (rn-run-state (list-ref choices 4) (host::now))))
             (catch
                 (do
@@ -127,9 +129,10 @@
 ; A run: the report function, and the state it keeps between calls
 ; ---------------------------------------------------------------------------
 
-; (history paused speed stop step last-return last-began draw-ms), where
-; history is the population of every generation so far, newest first.
-(defun rn-run-state (speed now) `(() #false ,speed #false #false ,now ,now 0))
+; (history paused speed stop step last-return last-began draw-ms previous),
+; where history is the population of every generation so far, newest first,
+; and previous is the last board reported (#false before the first).
+(defun rn-run-state (speed now) `(() #false ,speed #false #false ,now ,now 0 #false))
 
 (defun rs-history (st) (car st))
 (defun rs-paused (st) (second st))
@@ -139,6 +142,7 @@
 (defun rs-last-return (st) (list-ref st 5))
 (defun rs-last-began (st) (list-ref st 6))
 (defun rs-draw-ms (st) (list-ref st 7))
+(defun rs-previous (st) (list-ref st 8))
 
 (defun rn-report (cell inbox info)
     (lambda (gen board notes)
@@ -146,8 +150,9 @@
         (let before (cell-get cell))
         (let engine-ms (- began (rs-last-return before)))
         (let frame-ms (- began (rs-last-began before)))
-        (let st (rn-set (rn-set before 0 (cons (board-population board) (rs-history before))) 6 began))
-        (let draw (lambda (s) (tui::render (rn-run-view info gen board notes s engine-ms frame-ms))))
+        (let changes (rn-changes (rs-previous before) board))
+        (let st (rn-set (rn-set (rn-set before 0 (cons (board-population board) (rs-history before))) 6 began) 8 board))
+        (let draw (lambda (s) (tui::render (rn-run-view info gen board notes s engine-ms frame-ms changes))))
         (draw st)
         (let drawn (rn-set st 7 (- (host::now) began)))
         (let outcome (rn-pace drawn inbox (+ began (list-ref rn-speeds (rs-speed drawn))) draw))
@@ -177,8 +182,6 @@
                 (case (second event)
                     (" " (rn-set st 1 (not (rs-paused st))))
                     ("s" (if (rs-paused st) (rn-set st 4 #true) st))
-                    ("+" (rn-set st 2 (rn-max 0 (- (rs-speed st) 1))))
-                    ("-" (rn-set st 2 (if (< (rs-speed st) 5) (+ (rs-speed st) 1) 5)))
                     ("q" (rn-set st 3 #true))
                     (:escape (rn-set st 3 #true))
                     ("c" (if (member? :ctrl (third event)) (rn-set st 3 #true) st))
@@ -204,20 +207,52 @@
         (if (= bottom 1) "█" "▀")
         (if (= bottom 1) "▄" " ")))
 
-(defun rn-sparkline (history)
-    (let recent (rn-take 32 history))
+(defun rn-sparkline (history width)
+    (let recent (rn-take width history))
     (let top (fold (lambda (m n) (if (> n m) n m)) 1 recent))
     (fold (lambda (s n) (string-append s (list-ref rn-bars (/ (* n 7) top)))) "" (reverse recent)))
 
 (defun rn-take (n xs)
     (if (or (= n 0) (nil? xs)) () (cons (car xs) (rn-take (- n 1) (cdr xs)))))
 
-(defun rn-stat (label value)
-    `(Box
-        (Box (@ (width 16) (flexShrink 0)) (Text (@ (dimColor #true)) ,label))
-        (Text (@ (wrap truncate)) ,(value->string value))))
+; (born died) between two boards, or #false when there is no earlier board.
+(defun rn-changes (before after)
+    (if (eq? before #false)
+        #false
+        (fold (lambda (acc rows) (rn-row-changes acc (car rows) (second rows)))
+            '(0 0)
+            (zip (board-rows before) (board-rows after)))))
 
-(defun rn-run-view (info gen board notes st engine-ms frame-ms)
+(defun rn-row-changes (acc before after)
+    (cond
+        ((nil? before) acc)
+        ((= (car before) (car after)) (rn-row-changes acc (cdr before) (cdr after)))
+        ((= (car after) 1) (rn-row-changes (list2 (+ (car acc) 1) (second acc)) (cdr before) (cdr after)))
+        (#true (rn-row-changes (list2 (car acc) (+ (second acc) 1)) (cdr before) (cdr after)))))
+
+; Rows of (value label): values right-aligned in a column as wide as the
+; widest, labels after them, so a label can be as long as it needs to be.
+(defun rn-table (rows)
+    (let texts (map (lambda (r) (list2 (value->string (car r)) (second r))) rows))
+    (let width (+ 2 (fold (lambda (m t) (rn-max m (string-length (car t)))) 1 texts)))
+    `(Box (@ (flexDirection column))
+        ,@(map (lambda (t)
+                   `(Box
+                       (Box (@ (width ,width) (flexShrink 0) (justifyContent flex-end) (paddingRight 2))
+                           (Text (@ (bold #true)) ,(car t)))
+                       (Text (@ (dimColor #true)) ,(second t))))
+               texts)))
+
+(defun rn-keys-view (paused)
+    `(Box (@ (flexDirection column) (paddingTop 1))
+        (Text (@ (bold #true) (color ,(if paused "yellow" "green"))) ,(if paused "paused" "running"))
+        (Box (@ (height 1)))
+        ,(rn-table (if paused
+                       '(("space" "resume") ("s" "step one generation") ("q" "back to the menu"))
+                       '(("space" "pause") ("q" "back to the menu"))))))
+
+(defun rn-run-view (info gen board notes st engine-ms frame-ms changes)
+    (let spark-width (rn-max 32 (board-width board)))
     `(Box (@ (flexDirection column) (paddingX 1))
         (Text (@ (bold #true) (color cyan)) ,(car info)
             (Text (@ (dimColor #true))
@@ -225,25 +260,32 @@
                     (string-append " · " (string-append (third info)
                         (string-append " " (string-append (list-ref info 3)
                             (string-append " · " (rn-size-text (list2 (board-width board) (board-height board))))))))))))
-        (Box (@ (flexWrap wrap) (columnGap 2))
+        (Text (@ (dimColor #true)) ,(list-ref info 4))
+        (Box (@ (columnGap 3))
             (Box (@ (borderStyle round) (borderColor ,(if (rs-paused st) "yellow" "green")) (flexShrink 0))
                 (Box (@ (flexDirection column))
                     ,@(map (lambda (line) `(Text (@ (color yellow)) ,line)) (rn-board-lines (board-rows board)))))
-            (Box (@ (flexDirection column) (width 40) (paddingTop 1))
-                ,(rn-stat "generation" gen)
-                ,(rn-stat "population" (car (rs-history st)))
-                (Text (@ (color cyan)) ,(rn-sparkline (rs-history st)))
-                (Box (@ (height 1)))
-                ,(rn-stat "engine ms" engine-ms)
-                ,(rn-stat "draw ms" (rs-draw-ms st))
-                ,(rn-stat "frame ms" frame-ms)
-                ,(rn-stat "pace ms" (list-ref rn-speeds (rs-speed st)))
-                (Box (@ (height 1)))
-                ,@(map (lambda (note) (rn-stat (car note) (second note))) notes)))
-        (Text (@ (color ,(if (rs-paused st) "yellow" "gray")))
-            ,(if (rs-paused st)
-                "paused · space resume · s step · q back to menu"
-                "space pause · +/- speed · q back to menu"))))
+            ,(rn-keys-view (rs-paused st)))
+        (Box (@ (columnGap 6) (paddingTop 1))
+            ,(rn-table
+                `((,gen "generation")
+                  (,(car (rs-history st)) "live cells")
+                  (,(if changes (car changes) "-") "cells born this generation")
+                  (,(if changes (second changes) "-") "cells that died this generation")
+                  (,engine-ms "ms the engine took to compute this generation")
+                  (,(rs-draw-ms st) "ms to draw the previous frame")
+                  (,frame-ms "ms since the previous frame")
+                  (,(list-ref rn-speeds (rs-speed st)) "ms pace between generations, set in the menu")))
+            ,(and (not (nil? notes))
+                  `(Box (@ (flexDirection column))
+                       (Text (@ (bold #true)) "how the engine is working")
+                       ,(rn-table (map (lambda (note) (list2 (second note) (car note))) notes)))))
+        (Box (@ (paddingTop 1) (columnGap 2))
+            (Text (@ (color cyan)) ,(rn-sparkline (rs-history st) spark-width))
+            (Text (@ (dimColor #true))
+                ,(string-append "live cells over the last " (string-append (value->string (rn-min spark-width (length (rs-history st)))) " generations"))))))
+
+(defun rn-min (a b) (if (< a b) a b))
 
 ; ---------------------------------------------------------------------------
 

@@ -18,10 +18,16 @@ fields are:
 - rule: Conway, HighLife, Seeds, Day & Night, or Life without death;
 - pace: 0 to 600 ms per generation.
 
-**Run screen:** the board is drawn with half blocks (two rows per line), next
-to a population sparkline, timings, and the engine's own notes. Space pauses,
-s steps one generation while paused, +/- change the pace, and q goes back to
-the menu.
+Each rule's description is shown under the fields.
+
+**Run screen:** the board is drawn with half blocks (two rows per line), with
+the keys beside it. Below it are the stats (generation, live cells, cells
+born and died this generation, timings), the engine's own notes, and a
+sparkline of the population. Space pauses, s steps one generation while
+paused, and q goes back to the menu. The pace is set in the menu. The menu
+also describes each rule, since three of them behave nothing like Conway's:
+under Seeds every cell dies each generation, under Day & Night most Conway
+patterns die out, and under Life without death nothing ever dies.
 
 ## How it fits together
 

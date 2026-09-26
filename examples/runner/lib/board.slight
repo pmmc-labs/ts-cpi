@@ -108,12 +108,13 @@
                         (rule-scan text (+ i 1) mode births (cons (- c 48) survivals))))
                 (#true (throw (make-error :bad-rule "not a rulestring" text)))))))
 
+; (name rulestring description)
 (const rules
-    '(("Conway" "B3/S23")
-      ("HighLife" "B36/S23")
-      ("Seeds" "B2/S")
-      ("Day & Night" "B3678/S34678")
-      ("Life without death" "B3/S012345678")))
+    '(("Conway" "B3/S23" "the classic: born with 3 neighbors, survives with 2 or 3")
+      ("HighLife" "B36/S23" "Conway, plus birth with 6 neighbors; gliders still fly")
+      ("Seeds" "B2/S" "every live cell dies each generation, and one is born with exactly 2 neighbors; nearly every pattern explodes")
+      ("Day & Night" "B3678/S34678" "live and dead regions behave alike; most Conway patterns, gliders included, die out")
+      ("Life without death" "B3/S012345678" "cells never die, and one is born with 3 neighbors; patterns only grow")))
 
 ; ---------------------------------------------------------------------------
 ; Presets: (name cells), cells as (row col) from the pattern's top left

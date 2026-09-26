@@ -37,7 +37,8 @@ test('the runner: menu, a run of 30 generations, and back to the menu', async ()
     assert.equal(result.ok, true, result.ok ? '' : print(result.e));
     const runFrames = tui.frames.filter((f) => f.includes('R-pentomino · Conway'));
     assert.equal(runFrames.length, 31);
-    assert.match(runFrames.at(-1)!, /generation\s+30/);
-    assert.match(runFrames.at(-1)!, /population\s+27/);
+    assert.match(runFrames.at(-1)!, /30 {2}generation/);
+    assert.match(runFrames.at(-1)!, /27 {2}live cells/);
+    assert.match(runFrames.at(-1)!, /\d+ {2}cells born this generation/);
     assert.match(tui.frames.at(-1)!, /Reference stopped at generation 30/);
 });
