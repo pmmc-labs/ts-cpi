@@ -103,6 +103,8 @@ type ProcEntry = {
     // Set the first time a sleep blocks; cleared once it resolves (see
     // `timerSleep`). Not recomputed on retry, so the deadline never moves.
     sleepDeadline?: number | undefined;
+    // The PID a process blocked in join waits for (indexed by setStatus).
+    joinTarget?: number | undefined;
     watchers: Array<{ t: 'pid'; pid: number } | { t: 'addr'; addr: Addr }>;
 };
 
@@ -152,6 +154,15 @@ export class Runtime implements Handlers {
     private cpiEnv: Env | null = null;
 
     private readonly procs = new Map<number, ProcEntry>();
+    // Indexes over `procs`, kept by setStatus, so delivering a message, ending
+    // a process and waiting touch only the processes concerned: the table
+    // itself keeps every process ever spawned (ended ones stay readable).
+    private readonly live = new Set<ProcEntry>();
+    private readonly recvWaiters = new Map<string, Set<ProcEntry>>();
+    private readonly joinWaiters = new Map<number, Set<ProcEntry>>();
+    private readonly sleepers = new Set<ProcEntry>();
+    // Environments are immutable, so a binding hash never changes.
+    private readonly hashes = new WeakMap<Env, string>();
     private readonly mailboxes = new Map<string, MailboxEntry>();
     private readonly parkTable = new Map<number, ParkedRecord>();
     private readonly deadLettersList: DeadLetter[] = [];
@@ -199,11 +210,7 @@ export class Runtime implements Handlers {
                 // Section 12: the host stops every process when the CPI fails.
                 // DECISION: the spec does not say what stop detail those processes
                 // get; `killed` with a nil reason is the simplest choice.
-                for (const entry of this.procs.values()) {
-                    if (entry.status !== 'ended' && entry.status !== 'parked') {
-                        this.endProcess(entry, { kind: 'killed', v: NIL });
-                    }
-                }
+                for (const entry of [...this.live]) this.endProcess(entry, { kind: 'killed', v: NIL });
                 return { ok: false, e: state.mode.e };
             }
             if (state.mode.m === 'host') {
@@ -258,21 +265,21 @@ export class Runtime implements Handlers {
                 if (result.kind === 'value') { entry.state = resumeValue(entry.state, result.v); continue; }
                 if (result.kind === 'throw') { entry.state = resumeThrow(entry.state, result.e); continue; }
                 if (result.kind === 'trap') {
-                    entry.status = 'trapped';
+                    this.setStatus(entry, 'trapped');
                     this.flushOutbox(outbox);
                     return list(sym('trap'), sym(result.effect), result.args);
                 }
                 if (result.reason === 'recv') {
-                    entry.status = 'blocked-recv';
+                    this.setStatus(entry, 'blocked-recv');
                     this.flushOutbox(outbox);
                     return list(sym('blocked'), sym('recv'));
                 }
                 if (result.reason === 'join') {
-                    entry.status = 'blocked-join';
+                    this.setStatus(entry, 'blocked-join');
                     this.flushOutbox(outbox);
                     return list(sym('blocked'), sym('join'), mode.args[0]!);
                 }
-                entry.status = 'blocked-host';
+                this.setStatus(entry, 'blocked-host');
                 this.flushOutbox(outbox);
                 return list(sym('blocked'), sym('host'));
             }
@@ -287,7 +294,7 @@ export class Runtime implements Handlers {
                 return list(sym('failed'), mode.e);
             }
             if (used >= n) {
-                entry.status = 'ready';
+                this.setStatus(entry, 'ready');
                 this.flushOutbox(outbox);
                 return list(sym('quota'));
             }
@@ -296,8 +303,36 @@ export class Runtime implements Handlers {
         }
     }
 
+    // The one place a process's status changes, so the indexes stay right.
+    private setStatus(entry: ProcEntry, status: ProcStatus): void {
+        const before = entry.status;
+        if (before === 'blocked-recv') this.recvWaiters.get(entry.addr.id)?.delete(entry);
+        if (before === 'blocked-join' && entry.joinTarget !== undefined) this.joinWaiters.get(entry.joinTarget)?.delete(entry);
+        if (before === 'blocked-host') this.sleepers.delete(entry);
+        entry.status = status;
+        if (status === 'ended' || status === 'parked') this.live.delete(entry);
+        else this.live.add(entry);
+        if (status === 'blocked-recv') indexed(this.recvWaiters, entry.addr.id).add(entry);
+        if (status === 'blocked-join') {
+            const mode = entry.state.mode;
+            const target = mode.m === 'host' ? mode.args[0] : undefined;
+            entry.joinTarget = target !== undefined && target.t === 'pid' ? target.id : undefined;
+            if (entry.joinTarget !== undefined) indexed(this.joinWaiters, entry.joinTarget).add(entry);
+        }
+        if (status === 'blocked-host' && entry.sleepDeadline !== undefined) this.sleepers.add(entry);
+    }
+
+    private bindingHashOf(env: Env): string {
+        let hash = this.hashes.get(env);
+        if (hash === undefined) {
+            hash = bindingHash(env, printForHash);
+            this.hashes.set(env, hash);
+        }
+        return hash;
+    }
+
     private endProcess(entry: ProcEntry, detail: EndedDetail): void {
-        entry.status = 'ended';
+        this.setStatus(entry, 'ended');
         entry.endedDetail = detail;
         const sig = list(sym('signal'), sym('terminated'), pid(entry.pid), list(sym(detail.kind), detail.v));
         for (const w of entry.watchers) {
@@ -308,19 +343,11 @@ export class Runtime implements Handlers {
     }
 
     private wakeJoiners(targetPidNum: number): void {
-        for (const e of this.procs.values()) {
-            if (e.status !== 'blocked-join') continue;
-            const mode = e.state.mode;
-            if (mode.m !== 'host') continue;
-            const target = mode.args[0];
-            if (target !== undefined && target.t === 'pid' && target.id === targetPidNum) e.status = 'ready';
-        }
+        for (const e of [...(this.joinWaiters.get(targetPidNum) ?? [])]) this.setStatus(e, 'ready');
     }
 
     private wakeRecv(addr: Addr): void {
-        for (const e of this.procs.values()) {
-            if (e.status === 'blocked-recv' && e.addr.id === addr.id) e.status = 'ready';
-        }
+        for (const e of [...(this.recvWaiters.get(addr.id) ?? [])]) this.setStatus(e, 'ready');
     }
 
     // Immediate delivery (mailbox::send, and watcher signals): SPEC-CPI 10.2.
@@ -386,6 +413,7 @@ export class Runtime implements Handlers {
         const state = start(fV, argsArr, envV.env);
         const entry: ProcEntry = { pid: pidNum, addr, envRef: envV, grants, state, status: 'ready', watchers: [] };
         this.procs.set(pidNum, entry);
+        this.live.add(entry);
         this.mailboxes.get(addr.id)!.ownerPid = pidNum;
         return V(pid(pidNum));
     }
@@ -409,7 +437,7 @@ export class Runtime implements Handlers {
             return T('bad-state', 'process::resume requires a trapped process', pidV);
         }
         entry.state = resumeValue(entry.state, v);
-        entry.status = 'ready';
+        this.setStatus(entry, 'ready');
         return V(TRUE);
     }
 
@@ -421,7 +449,7 @@ export class Runtime implements Handlers {
             return T('bad-state', 'process::resume-throw requires a trapped process', pidV);
         }
         entry.state = resumeThrow(entry.state, eV);
-        entry.status = 'ready';
+        this.setStatus(entry, 'ready');
         return V(TRUE);
     }
 
@@ -496,9 +524,9 @@ export class Runtime implements Handlers {
         const key = this.nextParkKey++;
         this.parkTable.set(key, { state: entry.state, addr: entry.addr, grants: new Set(entry.grants) });
         const checkpointArgs = list(...entry.state.A.args);
-        const hash = bindingHash(entry.state.R, printForHash);
+        const hash = this.bindingHashOf(entry.state.R);
         const addr = entry.addr;
-        entry.status = 'parked';
+        this.setStatus(entry, 'parked');
         this.wakeJoiners(entry.pid);
         return V(list(sym('parked'), int(key), checkpointArgs, str(hash), addr));
     }
@@ -519,6 +547,7 @@ export class Runtime implements Handlers {
             state, status: 'ready', watchers: [],
         };
         this.procs.set(pidNum, entry);
+        this.live.add(entry);
         const mbox = this.mailboxes.get(rec.addr.id);
         if (mbox !== undefined) mbox.ownerPid = pidNum;
         return V(pid(pidNum));
@@ -637,10 +666,8 @@ export class Runtime implements Handlers {
 
     private earliestDeadline(): number | null {
         let earliest: number | null = null;
-        for (const e of this.procs.values()) {
-            if (e.status === 'blocked-host' && e.sleepDeadline !== undefined) {
-                if (earliest === null || e.sleepDeadline < earliest) earliest = e.sleepDeadline;
-            }
+        for (const e of this.sleepers) {
+            if (earliest === null || e.sleepDeadline! < earliest) earliest = e.sleepDeadline!;
         }
         return earliest;
     }
@@ -655,14 +682,9 @@ export class Runtime implements Handlers {
             if (r.kind === 'throw') this.deadLettersList.push({ from: null, to: this.inputAddr, msg: event });
         }
         const now = this.now();
-        const ready: Value[] = [];
-        for (const [pidNum, e] of this.procs) {
-            if (e.status === 'blocked-host' && e.sleepDeadline !== undefined && e.sleepDeadline <= now) {
-                e.status = 'ready';
-                ready.push(pid(pidNum));
-            }
-        }
-        return list(...ready);
+        const due = [...this.sleepers].filter((e) => e.sleepDeadline! <= now).sort((a, b) => a.pid - b.pid);
+        for (const e of due) this.setStatus(e, 'ready');
+        return list(...due.map((e) => pid(e.pid)));
     }
 
     hostSetTraps(effectsV: Value): ActionResult {
@@ -711,7 +733,7 @@ export class Runtime implements Handlers {
 
     envBindingHash(eV: Value): ActionResult {
         if (eV.t !== 'env') return T('type-error', 'environment::binding-hash requires an env ref', eV);
-        return V(str(bindingHash(eV.env, printForHash)));
+        return V(str(this.bindingHashOf(eV.env)));
     }
 
     envErrorEnv(eV: Value): ActionResult {
@@ -886,4 +908,13 @@ export class Runtime implements Handlers {
         for (const line of this.heldLines) this.out(line);
         this.heldLines = [];
     }
+}
+
+function indexed<K, V>(index: Map<K, Set<V>>, key: K): Set<V> {
+    let set = index.get(key);
+    if (set === undefined) {
+        set = new Set();
+        index.set(key, set);
+    }
+    return set;
 }

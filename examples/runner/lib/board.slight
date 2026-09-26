@@ -4,8 +4,8 @@
 ; each a list of `width` cells, 1 for alive and 0 for dead. The board is a
 ; torus: the row above the first is the last.
 ;
-; A rule is (rule text table): `table` has 18 entries, the next state of a
-; dead cell with 0..8 live neighbors followed by that of a live cell.
+; A rule is (rule text births survivals): each a 9-entry table, the next
+; state of a dead (births) or live (survivals) cell with 0..8 live neighbors.
 
 ; ---------------------------------------------------------------------------
 ; Boards
@@ -81,15 +81,17 @@
 ; ---------------------------------------------------------------------------
 
 (defun rule-text (rule) (second rule))
-(defun rule-next (rule alive count) (list-ref (third rule) (+ (* alive 9) count)))
+(defun rule-next (rule alive count)
+    (list-ref (if (= alive 1) (list-ref rule 3) (third rule)) count))
 
 ; "B36/S23": born with 3 or 6 neighbors, survives with 2 or 3.
 (defun rule-parse (text)
     (let parsed (rule-scan text 0 :none () ()))
     (let births (car parsed))
     (let survivals (second parsed))
-    `(rule ,text ,(append (map (lambda (n) (if (member? n births) 1 0)) (range 0 9))
-                         (map (lambda (n) (if (member? n survivals) 1 0)) (range 0 9)))))
+    `(rule ,text
+        ,(map (lambda (n) (if (member? n births) 1 0)) (range 0 9))
+        ,(map (lambda (n) (if (member? n survivals) 1 0)) (range 0 9))))
 
 (defun rule-scan (text i mode births survivals)
     (if (= i (string-length text))
