@@ -1,0 +1,41 @@
+; Decision tree: when the run starts, the rule is compiled into a binary
+; decision tree over a cell's 3x3 neighborhood (512 leaves). Each cell's next
+; state is then nine steps down the tree: no counting. The tree is built per
+; run, so it follows whichever rule the runner chose.
+
+(defun tree-engine (config report)
+    (let rule (config-rule config))
+    (let tree (tree-build rule 9 #false 0))
+    (tree-loop tree (tree-count tree) 0 (config-board config) report))
+
+(defun tree-loop (tree births gen board report)
+    (let notes `(("tree leaves" 512) ("leaves that live" ,births) ("lookups per generation" ,(* (board-width board) (board-height board)))))
+    (when (eq? (report gen board notes) :continue)
+        (tree-loop tree births (+ gen 1) (tree-step tree board) report)))
+
+; Levels branch on the center cell first, then the eight neighbors. `center`
+; is #false until the first level is decided.
+(defun tree-build (rule remaining center count)
+    (cond
+        ((= remaining 0) (rule-next rule center count))
+        ((eq? center #false)
+            (cons (tree-build rule (- remaining 1) 0 0) (tree-build rule (- remaining 1) 1 0)))
+        (#true
+            (cons (tree-build rule (- remaining 1) center count)
+                (tree-build rule (- remaining 1) center (+ count 1))))))
+
+(defun tree-count (tree)
+    (if (pair? tree) (+ (tree-count (car tree)) (tree-count (cdr tree))) tree))
+
+(defun tree-lookup (tree cells)
+    (cond
+        ((nil? cells) tree)
+        ((= (car cells) 1) (tree-lookup (cdr tree) (cdr cells)))
+        (#true (tree-lookup (car tree) (cdr cells)))))
+
+(defun tree-step (tree board)
+    (board-from (board-width board) (board-height board)
+        (lambda (r c)
+            (tree-lookup tree
+                (cons (board-cell board r c)
+                    (map (lambda (p) (board-cell board (car p) (second p))) (board-neighbors board r c)))))))

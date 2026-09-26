@@ -1,0 +1,204 @@
+; Boards for the Life runner. Loaded after examples/life/lib/lists.slight.
+;
+; A board is (board width height rows): `rows` is a list of `height` rows,
+; each a list of `width` cells, 1 for alive and 0 for dead. The board is a
+; torus: the row above the first is the last.
+;
+; A rule is (rule text table): `table` has 18 entries, the next state of a
+; dead cell with 0..8 live neighbors followed by that of a live cell.
+
+; ---------------------------------------------------------------------------
+; Boards
+; ---------------------------------------------------------------------------
+
+(defun board-make (width height rows) `(board ,width ,height ,rows))
+(defun board-width (b) (second b))
+(defun board-height (b) (third b))
+(defun board-rows (b) (list-ref b 3))
+
+; (f row col) gives each cell.
+(defun board-from (width height f)
+    (board-make width height
+        (map (lambda (r) (map (lambda (c) (f r c)) (range 0 width))) (range 0 height))))
+
+(defun torus (i n) (% (+ (% i n) n) n))
+
+(defun board-cell (b row col)
+    (list-ref (list-ref (board-rows b) (torus row (board-height b))) (torus col (board-width b))))
+
+; The (row col) positions of a cell's eight neighbors.
+(defun board-neighbors (b row col)
+    (map (lambda (o) (list2 (torus (+ row (car o)) (board-height b)) (torus (+ col (second o)) (board-width b))))
+         '((-1 -1) (-1 0) (-1 1) (0 -1) (0 1) (1 -1) (1 0) (1 1))))
+
+(defun board-population (b)
+    (fold (lambda (n row) (+ n (sum row))) 0 (board-rows b)))
+
+(defun board-equal? (a b)
+    (all? (lambda (pair) (row-equal? (car pair) (second pair))) (zip (board-rows a) (board-rows b))))
+
+(defun row-equal? (xs ys)
+    (or (nil? xs) (and (= (car xs) (car ys)) (row-equal? (cdr xs) (cdr ys)))))
+
+(defun zip (xs ys) (map2 list2 xs ys))
+
+(defun map2 (f xs ys)
+    (reverse (map2-onto f xs ys ())))
+
+(defun map2-onto (f xs ys acc)
+    (if (nil? xs)
+        acc
+        (map2-onto f (cdr xs) (cdr ys) (cons (f (car xs) (car ys)) acc))))
+
+(defun map3 (f xs ys zs)
+    (map2 (lambda (x yz) (f x (car yz) (second yz))) xs (zip ys zs)))
+
+; ---------------------------------------------------------------------------
+; The step: a sweep over rows, O(cells)
+; ---------------------------------------------------------------------------
+
+; (rotate-left '(a b c)) is (b c a): element i becomes element i+1.
+(defun rotate-left (xs) (append (cdr xs) (cons (car xs) ())))
+(defun rotate-right (xs) (cons (last xs) (but-last xs)))
+(defun last (xs) (if (nil? (cdr xs)) (car xs) (last (cdr xs))))
+(defun but-last (xs) (if (nil? (cdr xs)) () (cons (car xs) (but-last (cdr xs)))))
+
+; Live-neighbor counts of every cell of `row`, given the rows around it.
+(defun row-counts (above row below)
+    (let v (map3 (lambda (a r b) (+ a (+ r b))) above row below))
+    (map3 (lambda (l c r) (+ l (+ c r))) (rotate-right v) v (rotate-left v)))
+
+(defun step-row (rule above row below)
+    (map2 (lambda (alive n) (rule-next rule alive (- n alive))) row (row-counts above row below)))
+
+(defun board-step (rule b)
+    (let rows (board-rows b))
+    (board-make (board-width b) (board-height b)
+        (map3 (lambda (a r d) (step-row rule a r d)) (rotate-right rows) rows (rotate-left rows))))
+
+; ---------------------------------------------------------------------------
+; Rules
+; ---------------------------------------------------------------------------
+
+(defun rule-text (rule) (second rule))
+(defun rule-next (rule alive count) (list-ref (third rule) (+ (* alive 9) count)))
+
+; "B36/S23": born with 3 or 6 neighbors, survives with 2 or 3.
+(defun rule-parse (text)
+    (let parsed (rule-scan text 0 :none () ()))
+    (let births (car parsed))
+    (let survivals (second parsed))
+    `(rule ,text ,(append (map (lambda (n) (if (member? n births) 1 0)) (range 0 9))
+                         (map (lambda (n) (if (member? n survivals) 1 0)) (range 0 9)))))
+
+(defun rule-scan (text i mode births survivals)
+    (if (= i (string-length text))
+        (list2 births survivals)
+        (do
+            (let c (string-ref text i))
+            (cond
+                ((or (= c 66) (= c 98)) (rule-scan text (+ i 1) :births births survivals))
+                ((or (= c 83) (= c 115)) (rule-scan text (+ i 1) :survivals births survivals))
+                ((= c 47) (rule-scan text (+ i 1) mode births survivals))
+                ((and (>= c 48) (<= c 56) (not (eq? mode :none)))
+                    (if (eq? mode :births)
+                        (rule-scan text (+ i 1) mode (cons (- c 48) births) survivals)
+                        (rule-scan text (+ i 1) mode births (cons (- c 48) survivals))))
+                (#true (throw (make-error :bad-rule "not a rulestring" text)))))))
+
+(const rules
+    '(("Conway" "B3/S23")
+      ("HighLife" "B36/S23")
+      ("Seeds" "B2/S")
+      ("Day & Night" "B3678/S34678")
+      ("Life without death" "B3/S012345678")))
+
+; ---------------------------------------------------------------------------
+; Presets: (name cells), cells as (row col) from the pattern's top left
+; ---------------------------------------------------------------------------
+
+(const presets
+    '(("R-pentomino" ((0 1) (0 2) (1 0) (1 1) (2 1)))
+      ("Glider" ((0 1) (1 2) (2 0) (2 1) (2 2)))
+      ("Gosper glider gun" ((0 24) (1 22) (1 24) (2 12) (2 13) (2 20) (2 21) (2 34) (2 35) (3 11) (3 15) (3 20) (3 21) (3 34) (3 35) (4 0) (4 1) (4 10) (4 16) (4 20) (4 21) (5 0) (5 1) (5 10) (5 14) (5 16) (5 17) (5 22) (5 24) (6 10) (6 16) (6 24) (7 11) (7 15) (8 12) (8 13)))
+      ("Pulsar" ((0 2) (0 3) (0 4) (0 8) (0 9) (0 10) (2 0) (2 5) (2 7) (2 12) (3 0) (3 5) (3 7) (3 12) (4 0) (4 5) (4 7) (4 12) (5 2) (5 3) (5 4) (5 8) (5 9) (5 10) (7 2) (7 3) (7 4) (7 8) (7 9) (7 10) (8 0) (8 5) (8 7) (8 12) (9 0) (9 5) (9 7) (9 12) (10 0) (10 5) (10 7) (10 12) (12 2) (12 3) (12 4) (12 8) (12 9) (12 10)))
+      ("Acorn" ((0 1) (1 3) (2 0) (2 1) (2 4) (2 5) (2 6)))
+      ("Diehard" ((0 6) (1 0) (1 1) (2 1) (2 5) (2 6) (2 7)))
+      ("Lightweight spaceship" ((0 1) (0 4) (1 0) (2 0) (2 4) (3 0) (3 1) (3 2) (3 3)))
+      ("Random" random)))
+
+; A preset placed in the middle of a width x height board. "Random" fills
+; about a third of the cells from a seeded generator, so it is repeatable.
+(defun preset-board (preset width height)
+    (if (eq? (second preset) 'random)
+        (random-board width height 42)
+        (do
+            (let cells (second preset))
+            (let top (/ (- height (+ 1 (fold (lambda (m c) (if (> (car c) m) (car c) m)) 0 cells))) 2))
+            (let left (/ (- width (+ 1 (fold (lambda (m c) (if (> (second c) m) (second c) m)) 0 cells))) 2))
+            (board-from width height
+                (lambda (r c) (if (any? (lambda (p) (and (= (+ (car p) top) r) (= (+ (second p) left) c))) cells) 1 0))))))
+
+; A linear congruential generator: small, and good enough for a board.
+(defun random-next (x) (% (+ (* x 1103515245) 12345) 2147483648))
+
+(defun random-board (width height seed)
+    (board-make width height (random-rows width height seed ())))
+
+(defun random-rows (width height seed acc)
+    (if (= height 0)
+        acc
+        (do
+            (let row (random-row width seed ()))
+            (random-rows width (- height 1) (car row) (cons (cdr row) acc)))))
+
+; Returns (seed . cells).
+(defun random-row (width seed acc)
+    (if (= width 0)
+        (cons seed acc)
+        (do
+            (let next (random-next seed))
+            (random-row (- width 1) next (cons (if (< (% (/ next 65536) 3) 1) 1 0) acc)))))
+
+; ---------------------------------------------------------------------------
+; Engines
+; ---------------------------------------------------------------------------
+;
+; An engine computes generations its own way:
+;
+;     (defun NAME-engine (config report) ...)
+;
+; `config` holds the starting board and the rule. The engine calls
+; `(report gen board notes)` with generation 0 first and then with each new
+; generation in order. `notes` is a list of (label value) pairs about how
+; the engine is working, e.g. (("processes" 64) ("messages" 512)); labels
+; are strings and values any value. `report` returns :continue or :stop.
+; On :stop the engine kills every process it spawned and returns.
+; Engines never print: what they want to say goes in the notes.
+
+(defun config-make (board rule) `(config ,board ,rule))
+(defun config-board (c) (second c))
+(defun config-rule (c) (third c))
+
+; ---------------------------------------------------------------------------
+; Cells: a mailbox holding exactly one message, as a mutable variable
+; ---------------------------------------------------------------------------
+;
+; The language has no mutable variables; state that must survive between
+; calls lives in a host structure. These run in the CPI (mailbox:: is
+; privileged).
+
+(defun cell-new (value)
+    (let m (mailbox::create #true 1))
+    (mailbox::send m value)
+    m)
+
+(defun cell-get (m)
+    (let value (mailbox::take m))
+    (mailbox::send m value)
+    value)
+
+(defun cell-put (m value)
+    (mailbox::take m)
+    (mailbox::send m value)
+    value)

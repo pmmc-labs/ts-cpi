@@ -1,0 +1,47 @@
+; Checks every loaded engine against the reference engine: the same boards,
+; generation by generation, for a few presets and rules. Prints one line per
+; engine and case.
+
+(const check-cases
+    '(("R-pentomino" "B3/S23" 24 16 12)
+      ("Glider" "B36/S23" 12 10 8)
+      ("Random" "B3/S23" 20 14 10)))
+
+(defun preset-named (name)
+    (car (filter (lambda (p) (eq? (car p) name)) presets)))
+
+; The boards an engine reports, generation 0 first, stopping after `gens`.
+; Also checks the generations arrive in order.
+(defun check-run (engine config gens)
+    (let cell (cell-new ()))
+    (engine config
+        (lambda (gen board notes)
+            (when (not (= gen (length (cell-get cell))))
+                (throw (make-error :out-of-order "report called out of order" gen)))
+            (cell-put cell (cons board (cell-get cell)))
+            (if (>= gen gens) :stop :continue)))
+    (reverse (cell-get cell)))
+
+(defun check-compare (expected actual gen)
+    (cond
+        ((and (nil? expected) (nil? actual)) 'agree)
+        ((or (nil? expected) (nil? actual)) `(wrong-number-of-generations at ,gen))
+        ((board-equal? (car expected) (car actual)) (check-compare (cdr expected) (cdr actual) (+ gen 1)))
+        (#true `(differs at generation ,gen))))
+
+(defun check-case (entry engine test)
+    (let config (config-make (preset-board (preset-named (car test)) (third test) (list-ref test 3))
+                             (rule-parse (second test))))
+    (let expected (check-run reference-engine config (list-ref test 4)))
+    (let t0 (host::now))
+    (let verdict (catch (check-compare expected (check-run engine config (list-ref test 4)) 0)
+                     e `(failed ,(value->string e))))
+    (IO::print (car entry) "|" (car test) (second test) "|" verdict "|" (- (host::now) t0) "ms"))
+
+(defun main ()
+    (for-each (lambda (entry)
+        (let engine (engine-function entry))
+        (if (eq? engine #false)
+            (IO::print (car entry) "| missing")
+            (for-each (lambda (test) (check-case entry engine test)) check-cases)))
+        engines))

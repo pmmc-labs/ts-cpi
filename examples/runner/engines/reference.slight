@@ -1,0 +1,9 @@
+; Reference: the row-sweep step from lib/board.slight, run in the CPI. Every
+; other engine is checked against it.
+
+(defun reference-engine (config report)
+    (reference-loop (config-rule config) 0 (config-board config) report))
+
+(defun reference-loop (rule gen board report)
+    (when (eq? (report gen board ()) :continue)
+        (reference-loop rule (+ gen 1) (board-step rule board) report)))

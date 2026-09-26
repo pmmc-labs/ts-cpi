@@ -1,0 +1,255 @@
+; The Life runner: pick an engine, a board size, a preset, a rule and a
+; speed, then watch it run with live stats.
+;
+;   examples/runner/run.sh
+;
+; The runner hands each engine a `report` function (lib/board.slight
+; describes the contract). The engine calls it once per generation, and
+; that call is the runner's only chance to draw, keep pace and read the
+; keyboard: while the engine computes a generation, nothing else happens.
+; The stats show how long that takes.
+
+; ---------------------------------------------------------------------------
+; Settings
+; ---------------------------------------------------------------------------
+
+(const rn-sizes '((24 16) (40 24) (64 32) (96 48) (128 64) fit))
+(const rn-speeds '(0 30 80 150 300 600))
+(const rn-bars '("▁" "▂" "▃" "▄" "▅" "▆" "▇" "█"))
+
+; The menu's choices: an index into each list, and the field with focus.
+(const rn-fields '("engine" "size" "preset" "rule" "speed"))
+
+(defun rn-options (field)
+    (list-ref `(,engines ,rn-sizes ,presets ,rules ,rn-speeds) field))
+
+(defun rn-set (xs i value)
+    (if (= i 0)
+        (cons value (cdr xs))
+        (cons (car xs) (rn-set (cdr xs) (- i 1) value))))
+
+(defun rn-size-text (size)
+    (if (eq? size 'fit) "fit the terminal" (string-append (value->string (car size)) (string-append " × " (value->string (second size))))))
+
+(defun rn-choice-text (field choice)
+    (let option (list-ref (rn-options field) choice))
+    (case field
+        (0 (car option))
+        (1 (rn-size-text option))
+        (2 (car option))
+        (3 (string-append (car option) (string-append "  " (second option))))
+        (else (string-append (value->string option) " ms per generation"))))
+
+; ---------------------------------------------------------------------------
+; The menu
+; ---------------------------------------------------------------------------
+
+(defun rn-menu-view (choices focus message)
+    (let engine (list-ref engines (car choices)))
+    `(Box (@ (flexDirection column) (paddingX 1))
+        (Box (@ (flexDirection column) (borderStyle round) (borderColor cyan) (paddingX 2) (paddingY 1) (width 72))
+            (Text (@ (bold #true) (color cyan)) "Life runner")
+            (Box (@ (height 1)))
+            ,@(map (lambda (field)
+                       `(Box
+                           (Box (@ (width 10)) (Text (@ (dimColor #true)) ,(list-ref rn-fields field)))
+                           (Text (@ (inverse ,(= field focus)))
+                               ,(string-append " ‹ " (string-append (rn-choice-text field (list-ref choices field)) " › ")))))
+                   (range 0 5))
+            (Box (@ (height 1)))
+            (Text (@ (dimColor #true))
+                ,(string-append (third engine) (if (eq? (engine-function engine) #false) "  (not loaded)" "")))
+            (Box (@ (height 1)))
+            (Text (@ (dimColor #true)) "↑↓ choose · ←→ change · enter run · q quit"))
+        ,(and (not (eq? message "")) `(Text (@ (color yellow)) ,message))))
+
+(defun rn-menu (choices focus message inbox)
+    (tui::render (rn-menu-view choices focus message))
+    (host::wait #false)
+    (rn-menu-keys choices focus message inbox))
+
+(defun rn-menu-keys (choices focus message inbox)
+    (let event (mailbox::take inbox))
+    (cond
+        ((eq? event #false) (rn-menu choices focus message inbox))
+        ((not (eq? (car event) :key)) (rn-menu-keys choices focus message inbox))
+        (#true
+            (let name (second event))
+            (let count (length (rn-options focus)))
+            (let choice (list-ref choices focus))
+            (case name
+                (:up (rn-menu-keys choices (% (+ focus 4) 5) message inbox))
+                (:down (rn-menu-keys choices (% (+ focus 1) 5) message inbox))
+                (:left (rn-menu-keys (rn-set choices focus (% (+ choice (- count 1)) count)) focus message inbox))
+                (:right (rn-menu-keys (rn-set choices focus (% (+ choice 1) count)) focus message inbox))
+                (:return (rn-menu choices focus (rn-start choices inbox) inbox))
+                ("q" :quit)
+                (:escape :quit)
+                ("c" (if (member? :ctrl (third event)) :quit (rn-menu-keys choices focus message inbox)))
+                (else (rn-menu-keys choices focus message inbox))))))
+
+; ---------------------------------------------------------------------------
+; Starting a run
+; ---------------------------------------------------------------------------
+
+; Runs the chosen engine; returns the message for the menu.
+(defun rn-start (choices inbox)
+    (let entry (list-ref engines (car choices)))
+    (let engine (engine-function entry))
+    (if (eq? engine #false)
+        (string-append (car entry) " is not loaded")
+        (do
+            (let size (rn-board-size (list-ref rn-sizes (second choices))))
+            (let preset (list-ref presets (third choices)))
+            (let rule-entry (list-ref rules (list-ref choices 3)))
+            (let board (preset-board preset (car size) (second size)))
+            (let info `(,(car entry) ,(car preset) ,(car rule-entry) ,(second rule-entry)))
+            (let cell (cell-new (rn-run-state (list-ref choices 4) (host::now))))
+            (catch
+                (do
+                    (engine (config-make board (rule-parse (second rule-entry))) (rn-report cell inbox info))
+                    (string-append (car entry)
+                        (string-append " stopped at generation "
+                            (value->string (- (length (rs-history (cell-get cell))) 1)))))
+                e
+                (string-append (car entry) (string-append " failed: " (value->string e)))))))
+
+(defun rn-board-size (size)
+    (if (eq? size 'fit)
+        (do
+            (let screen (tui::size))
+            (list2 (rn-max 16 (- (car screen) 44)) (rn-max 8 (* 2 (- (second screen) 8)))))
+        size))
+
+(defun rn-max (a b) (if (> a b) a b))
+
+; ---------------------------------------------------------------------------
+; A run: the report function, and the state it keeps between calls
+; ---------------------------------------------------------------------------
+
+; (history paused speed stop step last-return last-began draw-ms), where
+; history is the population of every generation so far, newest first.
+(defun rn-run-state (speed now) `(() #false ,speed #false #false ,now ,now 0))
+
+(defun rs-history (st) (car st))
+(defun rs-paused (st) (second st))
+(defun rs-speed (st) (third st))
+(defun rs-stop (st) (list-ref st 3))
+(defun rs-step (st) (list-ref st 4))
+(defun rs-last-return (st) (list-ref st 5))
+(defun rs-last-began (st) (list-ref st 6))
+(defun rs-draw-ms (st) (list-ref st 7))
+
+(defun rn-report (cell inbox info)
+    (lambda (gen board notes)
+        (let began (host::now))
+        (let before (cell-get cell))
+        (let engine-ms (- began (rs-last-return before)))
+        (let frame-ms (- began (rs-last-began before)))
+        (let st (rn-set (rn-set before 0 (cons (board-population board) (rs-history before))) 6 began))
+        (let draw (lambda (s) (tui::render (rn-run-view info gen board notes s engine-ms frame-ms))))
+        (draw st)
+        (let drawn (rn-set st 7 (- (host::now) began)))
+        (let outcome (rn-pace drawn inbox (+ began (list-ref rn-speeds (rs-speed drawn))) draw))
+        (cell-put cell (rn-set (cdr outcome) 5 (host::now)))
+        (car outcome)))
+
+; Waits out the rest of the frame, handling keys. Returns (verdict . state).
+(defun rn-pace (st inbox deadline draw)
+    (host::wait (if (rs-paused st) #false (rn-max 0 (- deadline (host::now)))))
+    (let next (rn-run-keys st inbox))
+    (when (not (eq? (rs-paused next) (rs-paused st)))
+        (draw next))
+    (cond
+        ((rs-stop next) (cons :stop next))
+        ((rs-step next) (cons :continue (rn-set next 4 #false)))
+        ((rs-paused next) (rn-pace next inbox deadline draw))
+        ((>= (host::now) deadline) (cons :continue next))
+        (#true (rn-pace next inbox deadline draw))))
+
+(defun rn-run-keys (st inbox)
+    (let event (mailbox::take inbox))
+    (cond
+        ((eq? event #false) st)
+        ((not (eq? (car event) :key)) (rn-run-keys st inbox))
+        (#true
+            (rn-run-keys
+                (case (second event)
+                    (" " (rn-set st 1 (not (rs-paused st))))
+                    ("s" (if (rs-paused st) (rn-set st 4 #true) st))
+                    ("+" (rn-set st 2 (rn-max 0 (- (rs-speed st) 1))))
+                    ("-" (rn-set st 2 (if (< (rs-speed st) 5) (+ (rs-speed st) 1) 5)))
+                    ("q" (rn-set st 3 #true))
+                    (:escape (rn-set st 3 #true))
+                    ("c" (if (member? :ctrl (third event)) (rn-set st 3 #true) st))
+                    (else st))
+                inbox))))
+
+; ---------------------------------------------------------------------------
+; The run view
+; ---------------------------------------------------------------------------
+
+; Two board rows per line of text, with half blocks.
+(defun rn-board-lines (rows)
+    (cond
+        ((nil? rows) ())
+        ((nil? (cdr rows)) (cons (rn-pair-line (car rows) (map (lambda (c) 0) (car rows))) ()))
+        (#true (cons (rn-pair-line (car rows) (second rows)) (rn-board-lines (cdr (cdr rows)))))))
+
+(defun rn-pair-line (top bottom)
+    (fold (lambda (s pair) (string-append s (rn-half (car pair) (second pair)))) "" (zip top bottom)))
+
+(defun rn-half (top bottom)
+    (if (= top 1)
+        (if (= bottom 1) "█" "▀")
+        (if (= bottom 1) "▄" " ")))
+
+(defun rn-sparkline (history)
+    (let recent (rn-take 32 history))
+    (let top (fold (lambda (m n) (if (> n m) n m)) 1 recent))
+    (fold (lambda (s n) (string-append s (list-ref rn-bars (/ (* n 7) top)))) "" (reverse recent)))
+
+(defun rn-take (n xs)
+    (if (or (= n 0) (nil? xs)) () (cons (car xs) (rn-take (- n 1) (cdr xs)))))
+
+(defun rn-stat (label value)
+    `(Box
+        (Box (@ (width 16) (flexShrink 0)) (Text (@ (dimColor #true)) ,label))
+        (Text (@ (wrap truncate)) ,(value->string value))))
+
+(defun rn-run-view (info gen board notes st engine-ms frame-ms)
+    `(Box (@ (flexDirection column) (paddingX 1))
+        (Text (@ (bold #true) (color cyan)) ,(car info)
+            (Text (@ (dimColor #true))
+                ,(string-append "  " (string-append (second info)
+                    (string-append " · " (string-append (third info)
+                        (string-append " " (string-append (list-ref info 3)
+                            (string-append " · " (rn-size-text (list2 (board-width board) (board-height board))))))))))))
+        (Box (@ (flexWrap wrap) (columnGap 2))
+            (Box (@ (borderStyle round) (borderColor ,(if (rs-paused st) "yellow" "green")) (flexShrink 0))
+                (Box (@ (flexDirection column))
+                    ,@(map (lambda (line) `(Text (@ (color yellow)) ,line)) (rn-board-lines (board-rows board)))))
+            (Box (@ (flexDirection column) (width 40) (paddingTop 1))
+                ,(rn-stat "generation" gen)
+                ,(rn-stat "population" (car (rs-history st)))
+                (Text (@ (color cyan)) ,(rn-sparkline (rs-history st)))
+                (Box (@ (height 1)))
+                ,(rn-stat "engine ms" engine-ms)
+                ,(rn-stat "draw ms" (rs-draw-ms st))
+                ,(rn-stat "frame ms" frame-ms)
+                ,(rn-stat "pace ms" (list-ref rn-speeds (rs-speed st)))
+                (Box (@ (height 1)))
+                ,@(map (lambda (note) (rn-stat (car note) (second note))) notes)))
+        (Text (@ (color ,(if (rs-paused st) "yellow" "gray")))
+            ,(if (rs-paused st)
+                "paused · space resume · s step · q back to menu"
+                "space pause · +/- speed · q back to menu"))))
+
+; ---------------------------------------------------------------------------
+
+(defun main ()
+    (tui::open 'fullscreen)
+    (let inbox (mailbox::create #true 64))
+    (tui::subscribe inbox)
+    (rn-menu '(0 0 0 0 2) 0 "" inbox)
+    (tui::close))

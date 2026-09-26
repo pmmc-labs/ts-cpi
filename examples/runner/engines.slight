@@ -1,0 +1,20 @@
+; The engines the runner offers: (name engine-symbol description). An engine
+; is looked up by name when chosen, so one whose file is missing is shown as
+; unavailable instead of breaking the load.
+
+(const engines
+    '(("Reference" reference-engine "the row sweep, in the CPI")
+      ("Decision tree" tree-engine "the rule compiled to a 512-leaf tree")
+      ("Actors" actors-engine "one actor per cell, trading states each generation")
+      ("Row workers" rows-engine "one process per row, the CPI as the barrier")
+      ("Trapped world" trapped-engine "cells talk; every send and recv traps to the CPI")
+      ("Mailboxes as memory" mailbox-engine "no processes: a live cell is a full mailbox")
+      ("Literal death" death-engine "a live cell is a process; death is process::kill")
+      ("Hibernation" hibernate-engine "quiet cells are parked, woken when news arrives")
+      ("Join dataflow" dataflow-engine "one process per cell per generation, joined")
+      ("Hourglass" hourglass-engine "neighbors counted by how long a process runs")
+      ("Hostile scheduler" hostile-engine "workers on a job queue, scheduled adversarially")))
+
+; The engine's function, or #false if it is not loaded.
+(defun engine-function (entry)
+    (catch (environment::lookup (environment::self) (second entry)) e #false))
