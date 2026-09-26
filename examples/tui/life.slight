@@ -1,0 +1,52 @@
+; Game of Life on the TUI: the reference run, animated, with the population
+; history drawn as a sparkline under the stats.
+;
+;   node bin/cpi.ts examples/life/lib/lists.slight examples/life/lib/life.slight examples/tui/life.slight
+;
+; load: examples/life/lib/lists.slight
+; load: examples/life/lib/life.slight
+
+(const dl-generations 32)
+(const dl-frame-ms 120)
+(const dl-bars '("▁" "▂" "▃" "▄" "▅" "▆" "▇" "█"))
+
+(defun dl-row (row)
+    `(Text (@ (color yellow)) ,(fold (lambda (s c) (string-append s (if (= c 1) "██" "··"))) "" row)))
+
+(defun dl-largest (xs)
+    (fold (lambda (m x) (if (> x m) x m)) 0 xs))
+
+; One bar per generation, oldest first, scaled to the largest population.
+(defun dl-sparkline (history)
+    (let top (dl-largest history))
+    (fold (lambda (s n) (string-append s (list-ref dl-bars (if (= top 0) 0 (/ (* n 7) top)))))
+        ""
+        (reverse history)))
+
+(defun dl-stat (name value)
+    `(Text (Text (@ (dimColor #true)) ,name " ") ,value))
+
+(defun dl-view (gen board history elapsed)
+    `(Box (@ (gap 2) (paddingX 1))
+        (Box (@ (flexDirection column) (borderStyle round) (borderColor green) (paddingX 1))
+            ,@(map dl-row board))
+        (Box (@ (flexDirection column) (paddingTop 1) (width 36))
+            (Text (@ (bold #true)) "Game of Life")
+            ,(dl-stat "generation" gen)
+            ,(dl-stat "live cells" (car history))
+            ,(dl-stat "elapsed ms" elapsed)
+            (Text (@ (dimColor #true)) "population")
+            (Text (@ (color cyan)) ,(dl-sparkline history)))))
+
+; `history` is the population of every generation so far, newest first.
+(defun dl-run (gen board history t0)
+    (let now-history (cons (length (live-cells board)) history))
+    (tui::render (dl-view gen board now-history (- (host::now) t0)))
+    (when (< gen dl-generations)
+        (timer::sleep dl-frame-ms)
+        (dl-run (+ gen 1) (step-board board) now-history t0)))
+
+(defun main ()
+    (tui::open 'inline)
+    (dl-run 0 (seed-board) () (host::now))
+    (tui::close))

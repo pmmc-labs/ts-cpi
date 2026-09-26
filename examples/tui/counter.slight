@@ -1,0 +1,39 @@
+; The smallest interactive TUI program: a number you change with the arrow
+; keys. q quits.
+;
+;   node bin/cpi.ts examples/tui/counter.slight
+
+; The outer Box is a row, so the bordered box inside is only as wide as it
+; needs to be.
+(defun view (n)
+    `(Box
+        (Box (@ (borderStyle round) (paddingX 1) (gap 2))
+            (Text (@ (bold #true)) "count " ,n)
+            (Text (@ (dimColor #true)) "↑/↓ change · q quit"))))
+
+; Draw, wait for the next event, then act on the keys that arrived.
+(defun loop (n inbox)
+    (tui::render (view n))
+    (host::wait #false)
+    (let next (keys n inbox))
+    (if (eq? next :quit) n (loop next inbox)))
+
+(defun keys (n inbox)
+    (let event (mailbox::take inbox))
+    (cond
+        ((eq? event #false) n)
+        ((not (eq? (car event) :key)) (keys n inbox))
+        (#true
+            (case (car (cdr event))
+                (:up (keys (+ n 1) inbox))
+                (:down (keys (- n 1) inbox))
+                ("q" :quit)
+                (else (keys n inbox))))))
+
+(defun main ()
+    (tui::open 'inline)
+    (let inbox (mailbox::create #true 16))
+    (tui::subscribe inbox)
+    (let final (loop 0 inbox))
+    (tui::close)
+    (IO::print "final count" final))

@@ -316,8 +316,8 @@ Scheduling is control plane code: a loop over stop reasons.
 ```
 
 Each round gives every `ready` process 20 ticks. When nothing is ready,
-`host::wait` suspends the image until something completes, which in this
-prototype means a timer. Changing the policy means changing this loop: give
+`host::wait` suspends the image until something happens: a timer fires, or a
+key is pressed (section 8). Changing the policy means changing this loop: give
 some processes bigger quotas, run the busiest first, or detect deadlock when
 nothing is ready and nothing is pending.
 
@@ -346,14 +346,75 @@ actor's `send`. `process::resume-throw` answers with an error instead.
 The unparked process continues inside the same `recv` it was waiting in, and
 `unpark` chooses which environment it resumes with.
 
-**Timers** (`tests/programs/timers.slight`) use virtual time.
-`(timer::sleep ms)` blocks a process with `(blocked host)`. `host::wait`
-advances the clock to the earliest deadline and returns the PIDs that woke,
-and `host::now` reads the clock. Actors sleeping 100 and 50 ms wake in the
-order `b` then `a`, at times 50 and 100, and the result is the same on every
-run.
+**Timers** (`tests/programs/timers.slight`) use the real clock.
+`(timer::sleep ms)` blocks a process with `(blocked host)`. `host::wait` waits
+until the earliest deadline and returns the PIDs that woke, and `host::now`
+reads the clock: milliseconds since the image started. Actors sleeping 100
+and 50 ms wake in the order `b` then `a`, at about 50 and 100 ms. Tests run
+on a virtual clock instead, where time moves only when `host::wait` jumps it
+to the next deadline, so they see exactly 50 and 100 on every run.
 
-## 8. Common mistakes
+## 8. Drawing on the terminal
+
+The CPI can draw on the terminal and read the keyboard with the privileged
+`tui::` namespace (`SPEC-TUI.md`). A screen is a **view**: plain data shaped
+like `(Tag (@ (prop value) ...) child ...)`, usually built with quasiquote.
+Here is the smallest interactive program:
+
+```lisp
+; examples/tui/counter.slight
+(defun view (n)
+    `(Box
+        (Box (@ (borderStyle round) (paddingX 1) (gap 2))
+            (Text (@ (bold #true)) "count " ,n)
+            (Text (@ (dimColor #true)) "↑/↓ change · q quit"))))
+
+(defun loop (n inbox)
+    (tui::render (view n))
+    (host::wait #false)
+    (let next (keys n inbox))
+    (if (eq? next :quit) n (loop next inbox)))
+
+(defun keys (n inbox)
+    (let event (mailbox::take inbox))
+    (cond
+        ((eq? event #false) n)
+        ((not (eq? (car event) :key)) (keys n inbox))
+        (#true
+            (case (car (cdr event))
+                (:up (keys (+ n 1) inbox))
+                (:down (keys (- n 1) inbox))
+                ("q" :quit)
+                (else (keys n inbox))))))
+
+(defun main ()
+    (tui::open 'inline)
+    (let inbox (mailbox::create #true 16))
+    (tui::subscribe inbox)
+    (let final (loop 0 inbox))
+    (tui::close)
+    (IO::print "final count" final))
+```
+
+```
+╭──────────────────────────────╮
+│ count 3  ↑/↓ change · q quit │
+╰──────────────────────────────╯
+final count 3
+```
+
+- **Components** are `Box` (flexbox layout), `Text`, `Newline` (inside `Text` only) and `Spacer`. Props follow CSS flexbox (`flexDirection`, `gap`, `padding`, `width`, `borderStyle`, ...) and text styles (`color`, `bold`, `dimColor`, ...). An unknown component or prop is a `type-error` naming it.
+- **`tui::render` draws before it returns.** Whatever you rendered is on screen, even if the CPI then gets busy. Render when something worth showing has changed.
+- **Keys are messages.** `(tui::subscribe inbox)` sends `(key name modifiers)` and `(resize columns rows)` to a mailbox. They are delivered only inside `host::wait`, so a loop draws, waits, then reads its mailbox. A key name is a string for a printable key and a symbol like `up` or `return` otherwise.
+- **`inline` or `fullscreen`.** Inline mode draws below your output, and `IO::print` lines appear above the view. Fullscreen mode takes the whole terminal and holds `IO::print` lines until `tui::close`.
+- **Ctrl-C** is an ordinary key while you are subscribed. Otherwise it ends the program, after restoring the terminal.
+- **A view shows strings and numbers.** To show a symbol, a list or an error, format it with `symbol->string`, `error-tag` and `error-message`. There is no way to turn an arbitrary value into a string yet.
+
+`examples/tui/life.slight` animates the Game of Life with a population
+sparkline, and `examples/tui/top.slight` is a live process monitor you can
+pause, step and steer from the keyboard.
+
+## 9. Common mistakes
 
 | Symptom | Cause |
 | --- | --- |
@@ -362,6 +423,7 @@ run.
 | `not-granted` in a process | The namespace isn't in the spawn's `grants`, or it's privileged (`process`, `mailbox`, `host`, `environment`), which processes can never have. |
 | `bad-state` from `process::run` | The process isn't `ready`. Check `process::state` first. |
 | A process never sees a message | Messages sent during a batch arrive when that batch ends, and a blocked process must be `run` again to receive. |
+| `bad-state: input is not a terminal` | `tui::subscribe` needs a real terminal; it fails when input is piped. |
 | `(quota)` on a loop you expected to finish | Quotas count evaluator steps, about 18 per iteration of a simple loop, not calls. |
 
 For the full semantics, see `../../design-xxx/SPEC-CPI.md`. For the choices

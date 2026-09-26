@@ -49,6 +49,28 @@ node bin/cpi.ts examples/actors/actors.slight examples/actors/ping-pong.slight
 `examples/life/` holds the Game of Life written 22 different ways, as a tour of
 what the CPI's builtins can do. See [`examples/life/README.md`](examples/life/README.md).
 
+## The terminal UI
+
+The CPI can draw on the terminal and read the keyboard through the privileged
+`tui::` namespace, specified in [`SPEC-TUI.md`](SPEC-TUI.md). A screen is a
+view: plain data in SXML's shape, built with quasiquote, and drawn by Ink:
+
+```lisp
+(tui::render `(Box (@ (borderStyle round) (paddingX 1))
+    (Text (@ (bold #true)) "generation " ,gen)
+    ,@(map row-view board)))
+```
+
+```sh
+node bin/cpi.ts examples/life/lib/lists.slight examples/life/lib/life.slight examples/tui/life.slight
+node bin/cpi.ts examples/life/lib/lists.slight examples/tui/top.slight   # interactive: q quits
+```
+
+`examples/tui/life.slight` animates the Life reference run with a population
+sparkline. `examples/tui/top.slight` is a live process monitor: it schedules
+six workers round robin and lets you pause, step, select, kill and change the
+quota from the keyboard.
+
 ## Modules
 
 | File | Contents |
@@ -64,13 +86,14 @@ what the CPI's builtins can do. See [`examples/life/README.md`](examples/life/RE
 | `src/expander.ts` | The base expander: derived forms to `cond`, eta-expansion, reserved names, placement and shape checks (section 4). |
 | `src/machine.ts` | The pure `step` function and its state: tail calls, local `defun` groups, catch/throw, host requests, the checkpoint slot (sections 6 to 8). |
 | `src/builtins.ts` | The namespace tables: `process::`, `mailbox::`, `host::`, `environment::`, `actor::`, `IO::print`, `timer::sleep`, with arities. |
-| `src/runtime.ts` | `Runtime`: boots the CPI, the process table, mailboxes, `process::run` batches, traps, parking, the virtual clock, dead letters (sections 10 to 12). |
+| `src/runtime.ts` | `Runtime`: boots the CPI, the process table, mailboxes, `process::run` batches, traps, parking, the clock, dead letters, the TUI (sections 10 to 12, and SPEC-TUI). |
+| `src/tui/` | The `tui::` namespace (`SPEC-TUI.md`): views as data (`views.ts`), input events (`events.ts`), and two backends, Ink on a terminal (`terminal.ts`) and headless for tests (`headless.ts`). |
 | `src/loader.ts` | Loads `.slight` files into an environment (section 9). |
 | `bin/cpi.ts` | The command line. |
 
 ## What the prototype does not do yet
 
-- **Time and I/O are virtual.** The clock starts at 0 and moves only through `timer::sleep` and `host::wait`. There is no real I/O or external event source, so `host::wait` never waits on anything but timers.
+- **Terminal input is the only external event source.** `host::wait` wakes on timers and on keys from the TUI; there is no other I/O, networking or event stream yet.
 - **Only the terminated lifecycle signal** exists, delivered as an ordinary message appended to the watcher's mailbox. Signals are not delivered ahead of messages.
 - **No acknowledgment** of messages, no selective receive support, and no reader for the dead-letter queue.
 - **Addresses are guessable** counters, not 128-bit random identifiers.

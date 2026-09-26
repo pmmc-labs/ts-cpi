@@ -60,6 +60,7 @@ function convert(v: Value, inText: boolean): Node {
     const tag = items[0]!.name;
     const component = COMPONENTS.get(tag);
     if (component === undefined) throw new ViewError(`unknown component ${tag}`, v);
+    if (tag === 'Newline' && !inText) throw new ViewError('Newline must be inside a Text', v);
 
     let rest = items.slice(1);
     let props: Record<string, unknown> = {};

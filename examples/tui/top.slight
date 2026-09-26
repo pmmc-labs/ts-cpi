@@ -1,0 +1,235 @@
+; CPI top: a live view of the processes a CPI is running, and a keyboard to
+; steer it. The CPI spawns six workers with different habits, schedules them
+; round robin, and draws the process table after every round.
+;
+;   node bin/cpi.ts examples/life/lib/lists.slight examples/tui/top.slight
+;
+; Keys: space pauses and resumes, s steps one round while paused, up and
+; down select a process, k kills it, + and - double and halve the quota,
+; q (or Ctrl-C) quits. Needs a terminal: input can't be read from a pipe.
+;
+; load: examples/life/lib/lists.slight
+
+; ---------------------------------------------------------------------------
+; The workers
+; ---------------------------------------------------------------------------
+
+; Never stops: always uses its whole quota.
+(defun counter (n)
+    (counter (+ n 1)))
+
+; Sleeps most of the time: shows (blocked host).
+(defun napper (naps)
+    (timer::sleep 400)
+    (napper (+ naps 1)))
+
+; Answers every message by sending its body back to the sender.
+(defun echo ()
+    (let msg (actor::recv))
+    (actor::send (car msg) (cdr msg))
+    (echo))
+
+; Calls the echo server over and over: the two take turns blocking in recv.
+(defun caller (server n)
+    (actor::send server (cons (actor::self) n))
+    (actor::recv)
+    (caller server (+ n 1)))
+
+; Throws after a while: shows (failed e).
+(defun doomed (n)
+    (if (= n 300)
+        (throw (make-error :boom "reached 300" n))
+        (doomed (+ n 1))))
+
+; Waits for a message that never comes.
+(defun waiter ()
+    (actor::recv))
+
+; ---------------------------------------------------------------------------
+; Process records and the state of the monitor
+; ---------------------------------------------------------------------------
+
+; A process record is (name pid last-stop-reason runs).
+(defun tp-spawn (name f args)
+    `(,name ,(process::spawn f args (environment::self) '(actor timer) #false) () 0))
+
+(defun tp-name (p) (car p))
+(defun tp-pid (p) (second p))
+(defun tp-last (p) (third p))
+(defun tp-runs (p) (list-ref p 3))
+
+; The monitor's state is (procs selected running quota round log). The log
+; holds lines of text, newest first; a line is a list of strings and numbers.
+(defun tp-state (procs selected running quota round log)
+    `(,procs ,selected ,running ,quota ,round ,log))
+
+(defun st-procs (st) (car st))
+(defun st-selected (st) (second st))
+(defun st-running (st) (third st))
+(defun st-quota (st) (list-ref st 3))
+(defun st-round (st) (list-ref st 4))
+(defun st-log (st) (list-ref st 5))
+
+(defun tp-max (a b) (if (> a b) a b))
+(defun tp-min (a b) (if (< a b) a b))
+
+(defun tp-take (n xs)
+    (if (or (= n 0) (nil? xs))
+        ()
+        (cons (car xs) (tp-take (- n 1) (cdr xs)))))
+
+(defun tp-note (st line)
+    (tp-state (st-procs st) (st-selected st) (st-running st) (st-quota st) (st-round st)
+        (tp-take 6 (cons line (st-log st)))))
+
+; ---------------------------------------------------------------------------
+; Scheduling
+; ---------------------------------------------------------------------------
+
+; One round: every ready process gets one batch of `quota` ticks.
+(defun tp-advance (st)
+    (let procs (map (lambda (p) (tp-turn p (st-quota st))) (st-procs st)))
+    (let ended (filter (lambda (p) (and (tp-ran? p) (tp-final? (tp-last p)))) procs))
+    (fold (lambda (s p) (tp-note s `(,(symbol->string (tp-name p)) " " ,@(tp-pieces (tp-last p)))))
+        (tp-state procs (st-selected st) (st-running st) (st-quota st) (+ (st-round st) 1) (st-log st))
+        ended))
+
+(defun tp-turn (p quota)
+    (if (eq? (car (process::state (tp-pid p))) :ready)
+        `(,(tp-name p) ,(tp-pid p) ,(process::run (tp-pid p) quota) ,(+ (tp-runs p) 1) ran)
+        `(,(tp-name p) ,(tp-pid p) ,(tp-last p) ,(tp-runs p))))
+
+; A record that ran this round carries a fifth element.
+(defun tp-ran? (p) (not (nil? (cdr (cdr (cdr (cdr p)))))))
+
+(defun tp-final? (reason)
+    (or (eq? (car reason) :exited) (eq? (car reason) :failed)))
+
+; ---------------------------------------------------------------------------
+; Keys
+; ---------------------------------------------------------------------------
+
+(defun tp-key (st key)
+    (case (second key)
+        ("q" :quit)
+        ("c" (if (member? :ctrl (third key)) :quit st))
+        (" " (tp-note (tp-state (st-procs st) (st-selected st) (not (st-running st)) (st-quota st) (st-round st) (st-log st))
+                 (if (st-running st) '("paused") '("resumed"))))
+        ("s" (if (st-running st) st (tp-advance st)))
+        ("k" (tp-kill st))
+        ("+" (tp-with-quota st (* (st-quota st) 2)))
+        ("-" (tp-with-quota st (tp-max 25 (/ (st-quota st) 2))))
+        (:up (tp-select st (tp-max 0 (- (st-selected st) 1))))
+        (:down (tp-select st (tp-min (- (length (st-procs st)) 1) (+ (st-selected st) 1))))
+        (else st)))
+
+(defun tp-with-quota (st quota)
+    (tp-note (tp-state (st-procs st) (st-selected st) (st-running st) quota (st-round st) (st-log st))
+        `("quota " ,quota " ticks")))
+
+(defun tp-select (st i)
+    (tp-state (st-procs st) i (st-running st) (st-quota st) (st-round st) (st-log st)))
+
+(defun tp-kill (st)
+    (let p (list-ref (st-procs st) (st-selected st)))
+    (catch (do (process::kill (tp-pid p) :killed-from-top)
+               (tp-note st `("killed " ,(symbol->string (tp-name p)))))
+        e
+        (tp-note st `(,(symbol->string (tp-name p)) " has already ended"))))
+
+; Takes every key that arrived, in order. Other events (resize) are ignored.
+(defun tp-drain (st inbox)
+    (let event (mailbox::take inbox))
+    (cond
+        ((eq? event #false) st)
+        ((not (eq? (car event) :key)) (tp-drain st inbox))
+        (#true
+            (let next (tp-key st event))
+            (if (eq? next :quit) :quit (tp-drain next inbox)))))
+
+; ---------------------------------------------------------------------------
+; The view
+; ---------------------------------------------------------------------------
+
+; A value as pieces of text (strings and numbers), for a Text element.
+(defun tp-pieces (v)
+    (cond
+        ((nil? v) '("-"))
+        ((symbol? v) (cons (symbol->string v) ()))
+        ((or (string? v) (integer? v)) (cons v ()))
+        ((error? v) `(,(symbol->string (error-tag v)) ": " ,(error-message v)))
+        ((pair? v) (tp-join (map tp-pieces v)))
+        (#true '("?"))))
+
+(defun tp-join (parts)
+    (cond
+        ((nil? parts) ())
+        ((nil? (cdr parts)) (car parts))
+        (#true (append (car parts) (cons " " (tp-join (cdr parts)))))))
+
+(defun tp-state-color (state)
+    (case (car state)
+        (:ready "green")
+        (:blocked "yellow")
+        (else "red")))
+
+(defun tp-cell (width body)
+    `(Box (@ (width ,width) (flexShrink 0) (paddingRight 1)) ,body))
+
+(defun tp-row (p i selected)
+    (let state (process::state (tp-pid p)))
+    `(Box
+        ,(tp-cell 2 `(Text (@ (color cyan)) ,(if (= i selected) ">" " ")))
+        ,(tp-cell 10 `(Text (@ (bold ,(= i selected))) ,(symbol->string (tp-name p))))
+        ,(tp-cell 16 `(Text (@ (color ,(tp-state-color state)) (wrap truncate)) ,@(tp-pieces state)))
+        ,(tp-cell 30 `(Text (@ (wrap truncate)) ,@(tp-pieces (tp-last p))))
+        ,(tp-cell 6 `(Text ,(tp-runs p)))))
+
+(defun tp-header ()
+    `(Box
+        ,@(map (lambda (col) (tp-cell (car col) `(Text (@ (dimColor #true)) ,(second col))))
+               '((2 "") (10 "name") (16 "state") (30 "last stop") (6 "runs")))))
+
+(defun tp-view (st)
+    `(Box (@ (flexDirection column) (borderStyle round) (borderColor cyan) (paddingX 1) (width 70))
+        (Text (@ (bold #true)) "CPI top  "
+            (Text (@ (dimColor #true)) "round " ,(st-round st) " · quota " ,(st-quota st) " ticks · ")
+            (Text (@ (color ,(if (st-running st) "green" "yellow"))) ,(if (st-running st) "running" "paused")))
+        (Box (@ (height 1)))
+        ,(tp-header)
+        ,@(map (lambda (i) (tp-row (list-ref (st-procs st) i) i (st-selected st)))
+               (range 0 (length (st-procs st))))
+        (Box (@ (height 1)))
+        ,@(map (lambda (line) `(Text (@ (dimColor #true)) ,@line)) (st-log st))
+        (Box (@ (height 1)))
+        (Text (@ (dimColor #true)) "space pause · s step · ↑↓ select · k kill · +/- quota · q quit")))
+
+; ---------------------------------------------------------------------------
+; The main loop
+; ---------------------------------------------------------------------------
+
+; Draw, wait (a round every 100 ms while running; only for keys while
+; paused), handle the keys, run a round.
+(defun tp-loop (st inbox)
+    (tui::render (tp-view st))
+    (host::wait (if (st-running st) 100 #false))
+    (let next (tp-drain st inbox))
+    (cond
+        ((eq? next :quit) (st-round st))
+        ((st-running next) (tp-loop (tp-advance next) inbox))
+        (#true (tp-loop next inbox))))
+
+(defun main ()
+    (tui::open 'fullscreen)
+    (let inbox (mailbox::create #true 100))
+    (tui::subscribe inbox)
+    (let server (tp-spawn :echo echo ()))
+    (let procs `(,(tp-spawn :counter counter '(0))
+                 ,(tp-spawn :napper napper '(0))
+                 ,server
+                 ,(tp-spawn :caller caller (cons (process::address (tp-pid server)) '(0)))
+                 ,(tp-spawn :doomed doomed '(0))
+                 ,(tp-spawn :waiter waiter ())))
+    (let rounds (tp-loop (tp-state procs 0 #true 200 0 '(("started 6 processes"))) inbox))
+    (tui::close)
+    (IO::print "top: quit after" rounds "rounds"))

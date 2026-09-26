@@ -10,7 +10,8 @@ choices in `prompt.md`, then the simplest consistent behavior.
 - Strings are JS strings; `string-length` and `string-ref` count Unicode scalar values.
 - Addresses come from a counter: unique, not unguessable.
 - Binding hash: SHA-256 over resolved names in sorted order with the printed form of each value.
-- Time is virtual (milliseconds from 0); `host::wait` returns `()` at once when nothing is pending.
+- Time is real (SPEC-TUI section 8): `host::now` is monotonic milliseconds since the image started, and `timer::sleep` and `host::wait` take real time. The virtual clock (milliseconds from 0, moved only by `host::wait`) is a `Runtime` option for tests only; no CPI code or CLI flag can select it. Every test uses it. *(Replaced "time is virtual", Sep 26, 2026.)*
+- `Runtime.boot` is asynchronous. `host::wait`, `timer::sleep` in the CPI, and the `tui::` requests that draw may take real time; every other request is answered at once, and a process's requests always are.
 - `IO::print` writes its arguments separated by spaces plus a newline, using `display`.
 - `process::`, `mailbox::`, `host::`, `environment::` are privileged; `actor::`, `IO::`, `timer::` are ordinary. Granting a privileged namespace to a process throws `not-granted`.
 - Every `step` in `process::run` is one tick; servicing a host request costs nothing.
@@ -28,9 +29,11 @@ choices in `prompt.md`, then the simplest consistent behavior.
 - A mailbox made by `process::spawn` with `#false` is non-durable with capacity 1000.
 - Sends by the CPI (`mailbox::send`) are delivered at once; the CPI is not in a batch. Sends by a process during `process::run` are buffered and delivered when the batch ends.
 - A terminated signal to a watcher is appended to its mailbox like any message (signals are not reordered ahead of messages yet). A PID watcher is sent to its process's mailbox.
-- `actor::` requests from the CPI throw `bad-state`: the CPI has no process layer (SPEC-CPI section 1). `timer::sleep` in the CPI advances the virtual clock at once.
-- `host::wait` with nothing pending returns `()` at once. With a timeout shorter than the earliest deadline, it advances the clock by the timeout and returns `()`.
+- `actor::` requests from the CPI throw `bad-state`: the CPI has no process layer (SPEC-CPI section 1). `timer::sleep` in the CPI suspends the whole image for that long (on the virtual clock, it advances the clock at once).
+- `host::wait` (SPEC-TUI section 9) wakes on a sleeper's deadline, a held input event, or its timeout. With nothing that can happen and no timeout, it returns `()` at once; with a timeout, the timeout passes.
 - PIDs are interned like symbols, so every PID value for one process is the same object and `eq?` holds (before, PIDs returned by `host::wait` were fresh objects).
+- `tui::` follows SPEC-TUI, accepted Sep 26, 2026 with every recommended decision (D1 to D8). The terminal backend is Ink (`src/tui/terminal.ts`); tests use the headless backend (`src/tui/headless.ts`), whose scripted input arrives in place of time passing under the virtual clock.
+- `examples/life/12-timer-wheel.slight` is a virtual-clock test fixture (SPEC-TUI decision D5); `examples/life/run.sh` refuses to run it. All other Life versions print the reference frames on the real clock.
 
 ## Worker decisions
 
@@ -105,4 +108,4 @@ Rationale: views are data (see `spike/tui/`), and building data without quasiquo
 - SPEC-CPI does not say what happens when several live processes receive on one address (spawning onto a live process's mailbox, or unparking one parked value twice). The prototype lets the newest process own it, and a non-durable mailbox dead-letters sends once that owner ends, even if others still wait on it.
 - The CPI has no way to wait for a particular process: `actor::join` and `actor::recv` are not available to it (SPEC-CPI section 1), and `host::wait` reports which PIDs woke but not why.
 - Nothing in SPEC-CPI reclaims ended processes or parked state: the process table and the park table only grow.
-
+- Views can show only strings and numbers, and the language has no way to turn an arbitrary value into a string (SPEC-TUI section 14). A CPI formats values by hand for display. A `value->string` core operation, or letting `Text` display any value, would fix it; both are language changes.

@@ -53,6 +53,8 @@ test('errors name the offending part of the view', () => {
     fails('(Box (@ (gap (1 2))) (Text "x"))', /a prop value must be/);
     fails('"just a string"', /text must be inside a Text/);
     fails('(1 2 3)', /expected \(Tag/);
+    fails('(Box (Newline))', /Newline must be inside a Text/);
+    fails('(Box (@ (colour red)))', /Box has no prop colour/);
 });
 
 test('a view built by CPI code renders', () => {

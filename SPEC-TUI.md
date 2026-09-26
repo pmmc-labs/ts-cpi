@@ -1,12 +1,11 @@
 # Specification: TUI namespace (draft)
 
-Sep 26, 2026 · Draft for review · Extends `../../design-xxx/SPEC-CPI.md`
+Sep 26, 2026 · Accepted and implemented · Extends `../../design-xxx/SPEC-CPI.md`
 
 This document specifies `tui::`, a privileged namespace through which the CPI
 presents what it is managing on a terminal and receives keyboard input. It
 also specifies the changes to time and to `host::wait` that interactive use
-requires. Section 13 lists the decisions this draft makes that need review.
-Until they are settled, the text is written with the recommended choice.
+requires. Section 13 records the decisions made in review.
 
 ## Conventions
 
@@ -57,6 +56,7 @@ A view is an **element**:
   - a list of children, which is spliced in place, so `(map row-view rows)` can be a child;
   - `()` or `#false`, which renders nothing, so `(and show? view)` can be a child.
 - Children are identified by position. A `key` prop may be given to an element whose position among its siblings changes between frames.
+- `Newline` may appear only inside a `Text`.
 
 The shape follows SXML, the conventional encoding of XML as s-expressions.
 With quasiquote, a view reads like the screen it describes:
@@ -151,7 +151,7 @@ Events are delivered as messages to the address given to `tui::subscribe`.
 
 `IO::print` from the CPI or from any process must not corrupt the screen.
 
-- In `inline` mode, each line is written above the view, which is redrawn below it. The log scrolls and the view stays at the bottom.
+- In `inline` mode, each line is written above the view, which is redrawn below it. The log scrolls and the view stays at the bottom. A line appears when the screen is next drawn: at the latest by the next `tui::render`, `host::wait` or `tui::close`.
 - In `fullscreen` mode, lines are held and written to the normal screen when the TUI closes (decision D3).
 
 ## 8. Time
@@ -201,8 +201,10 @@ DESIGN-001 open question 4 (decision D7).
 
 The host provides a **headless** TUI for tests, selected, like the virtual
 clock, only through the `Runtime` constructor. It renders each view to text
-with the same renderer and records it, and a test can inject input events. A
-test can therefore assert exact screens and drive a CPI's interaction
+with the same renderer and records it. Input comes from a script: under the
+virtual clock, when the CPI subscribes and calls `host::wait` with no input
+held, the next scripted event arrives instead of time passing. A test can
+therefore assert exact screens and drive a CPI's interaction
 deterministically.
 
 ## 12. What this changes elsewhere
@@ -221,9 +223,9 @@ deterministically.
 - Section 11 (external events as message streams) gains its first concrete stream: terminal input.
 - Nothing here pushes against the design. `tui::` is a privileged handler namespace, views are values, input is messages, and the native-code boundary is unchanged.
 
-## 13. Decisions for review
+## 13. Decisions
 
-| # | Decision | Recommendation | Alternative |
+| # | Decision | Decided (Sep 26, 2026) | Alternative considered |
 | --- | --- | --- | --- |
 | D1 | When a view is drawn. | Before `tui::render` returns (section 5). Busy CPIs stay visible, and pacing is the CPI's job. | Only during `host::wait`, as Tk does: automatic coalescing, but a busy CPI shows nothing. |
 | D2 | When input events enter mailboxes. | Only during `host::wait` (section 6), so external events have one entry point. | Whenever the host gets control (e.g. during `tui::render`): lower latency, but a CPI's mailboxes could change during a render. |
@@ -240,3 +242,8 @@ deterministically.
 - Ink options: `exitOnCtrlC: false` (Ctrl-C is routed by the host), `patchConsole: false`, `alternateScreen` for `fullscreen`, and `waitUntilRenderFlush()` after each `rerender` for section 5. Inline `IO::print` output can use Ink's `Static` region.
 - Input: a small host-side component using Ink's `useInput` pushes events into a host buffer, which `host::wait` delivers.
 - Headless: Ink's `renderToString`, with no terminal needed.
+
+## 14. Open issues
+
+- **Views can show only strings and numbers.** The language has no way to turn an arbitrary value into a string: no number-to-string, and no `display`-to-string. A CPI that wants to show a process state like `(blocked recv)`, a PID or an error must format it by hand from `symbol->string`, `error-tag` and `error-message`; `examples/tui/top.slight` does this in `tp-pieces`. Options: allow any value as a `Text` child, shown as `IO::print` would show it (but a list child already means "splice these views", so a datum list would need wrapping); or a core operation such as `(value->string v)`. Either is a language change.
+
