@@ -94,6 +94,16 @@ for SPEC-CPI. `../../design-xxx` is not edited from here.
 
 Rationale: views are data (see `spike/tui/`), and building data without quasiquote means long chains of `cons` calls. Splicing needs `append`, and a derived form may expand only to core operations, so `append` joins the core, marked † like `string-append`. Nested quasiquote is left out until a real use appears.
 
+### `value->string` (2026-09-26)
+
+**Section 5.6, Strings.** Add a row:
+
+| Signature | Result | Errors |
+| --- | --- | --- |
+| `(value->string v)` † | The text `IO::print` shows for `v`: a string is returned unchanged, and any other value in its printed form, e.g. `"(blocked recv)"`, `"#<pid 3>"`, `"#<error boom \"reached 300\">"`. | None. |
+
+Rationale: a CPI that shows its state in a view (SPEC-TUI) needs values as text, and before this the language had no way to turn a number, list or error into a string. The printed form of an address, PID or env ref describes it and cannot be turned back into it: nothing converts a string to an address, so the result grants no authority.
+
 ## Spec issues
 
 - SPEC-CPI section 1 says the CPI "is granted the privileged namespaces in section 8"; they are listed in section 10. Editorial.
@@ -108,4 +118,4 @@ Rationale: views are data (see `spike/tui/`), and building data without quasiquo
 - SPEC-CPI does not say what happens when several live processes receive on one address (spawning onto a live process's mailbox, or unparking one parked value twice). The prototype lets the newest process own it, and a non-durable mailbox dead-letters sends once that owner ends, even if others still wait on it.
 - The CPI has no way to wait for a particular process: `actor::join` and `actor::recv` are not available to it (SPEC-CPI section 1), and `host::wait` reports which PIDs woke but not why.
 - Nothing in SPEC-CPI reclaims ended processes or parked state: the process table and the park table only grow.
-- Views can show only strings and numbers, and the language has no way to turn an arbitrary value into a string (SPEC-TUI section 14). A CPI formats values by hand for display. A `value->string` core operation, or letting `Text` display any value, would fix it; both are language changes.
+- Views can show only strings and numbers. *Resolved Sep 26, 2026:* the `value->string` core operation (see Spec changes) turns any value into the text `IO::print` shows.

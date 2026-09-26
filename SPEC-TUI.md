@@ -245,5 +245,5 @@ deterministically.
 
 ## 14. Open issues
 
-- **Views can show only strings and numbers.** The language has no way to turn an arbitrary value into a string: no number-to-string, and no `display`-to-string. A CPI that wants to show a process state like `(blocked recv)`, a PID or an error must format it by hand from `symbol->string`, `error-tag` and `error-message`; `examples/tui/top.slight` does this in `tp-pieces`. Options: allow any value as a `Text` child, shown as `IO::print` would show it (but a list child already means "splice these views", so a datum list would need wrapping); or a core operation such as `(value->string v)`. Either is a language change.
+- ~~**Views can show only strings and numbers.**~~ *Resolved Sep 26, 2026* by the core operation `(value->string v)`, which returns the text `IO::print` shows for any value (proposed SPEC-CPI §5.6 text in the prototype's `DECISIONS.md`). A view shows a value as `(Text ,(value->string v))`.
 

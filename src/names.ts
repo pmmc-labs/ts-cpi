@@ -12,7 +12,7 @@ export const CORE_ARITY: ReadonlyMap<string, number> = new Map<string, number>([
     // 5.5 pairs
     ['cons', 2], ['car', 1], ['cdr', 1], ['append', 2], ['apply', 2],
     // 5.6 strings
-    ['string-length', 1], ['string-ref', 2], ['string-append', 2], ['symbol->string', 1], ['string->symbol', 1],
+    ['string-length', 1], ['string-ref', 2], ['string-append', 2], ['symbol->string', 1], ['string->symbol', 1], ['value->string', 1],
     // 5.7 conversions
     ['integer->float', 1], ['float->integer', 1],
     // 5.8 errors

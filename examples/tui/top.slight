@@ -90,7 +90,7 @@
 (defun tp-advance (st)
     (let procs (map (lambda (p) (tp-turn p (st-quota st))) (st-procs st)))
     (let ended (filter (lambda (p) (and (tp-ran? p) (tp-final? (tp-last p)))) procs))
-    (fold (lambda (s p) (tp-note s `(,(symbol->string (tp-name p)) " " ,@(tp-pieces (tp-last p)))))
+    (fold (lambda (s p) (tp-note s `(,(symbol->string (tp-name p)) " " ,(value->string (tp-last p)))))
         (tp-state procs (st-selected st) (st-running st) (st-quota st) (+ (st-round st) 1) (st-log st))
         ended))
 
@@ -151,22 +151,6 @@
 ; The view
 ; ---------------------------------------------------------------------------
 
-; A value as pieces of text (strings and numbers), for a Text element.
-(defun tp-pieces (v)
-    (cond
-        ((nil? v) '("-"))
-        ((symbol? v) (cons (symbol->string v) ()))
-        ((or (string? v) (integer? v)) (cons v ()))
-        ((error? v) `(,(symbol->string (error-tag v)) ": " ,(error-message v)))
-        ((pair? v) (tp-join (map tp-pieces v)))
-        (#true '("?"))))
-
-(defun tp-join (parts)
-    (cond
-        ((nil? parts) ())
-        ((nil? (cdr parts)) (car parts))
-        (#true (append (car parts) (cons " " (tp-join (cdr parts)))))))
-
 (defun tp-state-color (state)
     (case (car state)
         (:ready "green")
@@ -181,8 +165,8 @@
     `(Box
         ,(tp-cell 2 `(Text (@ (color cyan)) ,(if (= i selected) ">" " ")))
         ,(tp-cell 10 `(Text (@ (bold ,(= i selected))) ,(symbol->string (tp-name p))))
-        ,(tp-cell 16 `(Text (@ (color ,(tp-state-color state)) (wrap truncate)) ,@(tp-pieces state)))
-        ,(tp-cell 30 `(Text (@ (wrap truncate)) ,@(tp-pieces (tp-last p))))
+        ,(tp-cell 16 `(Text (@ (color ,(tp-state-color state)) (wrap truncate)) ,(value->string state)))
+        ,(tp-cell 30 `(Text (@ (wrap truncate)) ,(value->string (tp-last p))))
         ,(tp-cell 6 `(Text ,(tp-runs p)))))
 
 (defun tp-header ()

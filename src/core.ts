@@ -7,6 +7,7 @@ import {
     INT_MIN, INT_MAX, fitsInt, isFalse
 } from './values.ts';
 import { ok, fail, makeError } from './errors.ts';
+import { display } from './printer.ts';
 import { CORE_ARITY } from './names.ts';
 
 // Helper: check if two values are equal according to eq? rules
@@ -475,6 +476,14 @@ ops.set('string->symbol', {
         if (s.t !== 'str') return fail('type-error', 'string->symbol requires a string');
         return ok(sym((s as any).v));
     },
+});
+
+// (value->string v): the text IO::print shows for v. A string is returned
+// unchanged. Never fails. Work is proportional to the size of v (a † op).
+ops.set('value->string', {
+    name: 'value->string',
+    arity: 1,
+    fn: (args) => ok(str(display(args[0]!))),
 });
 
 // 5.7 Conversions

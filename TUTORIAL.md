@@ -408,7 +408,7 @@ final count 3
 - **Keys are messages.** `(tui::subscribe inbox)` sends `(key name modifiers)` and `(resize columns rows)` to a mailbox. They are delivered only inside `host::wait`, so a loop draws, waits, then reads its mailbox. A key name is a string for a printable key and a symbol like `up` or `return` otherwise.
 - **`inline` or `fullscreen`.** Inline mode draws below your output, and `IO::print` lines appear above the view. Fullscreen mode takes the whole terminal and holds `IO::print` lines until `tui::close`.
 - **Ctrl-C** is an ordinary key while you are subscribed. Otherwise it ends the program, after restoring the terminal.
-- **A view shows strings and numbers.** To show a symbol, a list or an error, format it with `symbol->string`, `error-tag` and `error-message`. There is no way to turn an arbitrary value into a string yet.
+- **A view shows strings and numbers.** To show any other value, turn it into text with `value->string`, which gives what `IO::print` would show: `(Text ,(value->string (process::state p)))` shows `(blocked recv)`.
 
 `examples/tui/life.slight` animates the Game of Life with a population
 sparkline, and `examples/tui/top.slight` is a live process monitor you can

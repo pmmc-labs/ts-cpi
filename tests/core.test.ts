@@ -490,3 +490,21 @@ test('all core operations are in CORE map', () => {
         assert.equal(op.arity, expectedArity, `operation ${name} has wrong arity`);
     }
 });
+
+test('value->string: the text IO::print shows, and a string unchanged', () => {
+    const show = (v: any) => {
+        const r = callOp('value->string', [v]);
+        assert.ok(r.ok);
+        assert.equal(r.v.t, 'str');
+        return (r.v as any).v;
+    };
+    assert.equal(show(str('hi')), 'hi');
+    assert.equal(show(int(42)), '42');
+    assert.equal(show(float(1.5)), '1.5');
+    assert.equal(show(list(sym('blocked'), sym('recv'))), '(blocked recv)');
+    assert.equal(show(list(str('a'), int(1))), '(a 1)');
+    assert.equal(show(makeError('boom', 'reached 300', int(1))), '#<error boom "reached 300">');
+    assert.equal(show(FALSE), '#false');
+    assert.equal(show(NIL), '()');
+    assert.equal(CORE_ARITY.get('value->string'), 1);
+});
