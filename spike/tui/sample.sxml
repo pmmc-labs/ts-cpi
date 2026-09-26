@@ -1,0 +1,19 @@
+; A few views written by hand, in the shape CPI code will build them.
+
+(Box (@ (flexDirection column) (borderStyle round) (paddingX 1))
+    (Text (@ (bold #true) (color green)) "life · generation " 4)
+    (Box (@ (gap 2))
+        (Text "#.#.....")
+        (Text (@ (dimColor #true)) "8 live")))
+
+(Box (@ (gap 1))
+    (Box (@ (flexDirection column) (borderStyle single) (width 24) (flexShrink 0))
+        (Text (@ (bold #true)) "processes")
+        ((Text "#<pid 1>  ready")
+         (Text "#<pid 2>  blocked recv")
+         (Text (@ (color red)) "#<pid 3>  failed")))
+    (Box (@ (flexDirection column) (borderStyle single) (flexGrow 1))
+        (Text (@ (bold #true)) "events")
+        (Text (@ (wrap truncate)) "spawned 3 processes; pid 3 threw :boom while handling a message")
+        #false
+        ()))

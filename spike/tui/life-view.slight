@@ -1,0 +1,39 @@
+; Views for the live demo, built by CPI code. There is no quasiquote yet,
+; so views are assembled with cons, list2 and list3; compare the sample
+; views in sample.sxml to see what quasiquote would buy.
+
+; Two characters per cell, so cells look square in a terminal.
+(defun lv-cell (c)
+    (if (= c 1) "██" "··"))
+
+(defun lv-row (row)
+    (list3 'Text '(@ (color yellow)) (fold (lambda (s c) (string-append s (lv-cell c))) "" row)))
+
+(defun lv-board (board)
+    (list3 'Box '(@ (flexDirection column) (borderStyle round) (borderColor green) (paddingX 1))
+        (map lv-row board)))
+
+(defun lv-label (name value)
+    (list3 'Text (list3 'Text '(@ (dimColor #true)) (string-append name " ")) value))
+
+(defun lv-side (gen board)
+    (cons 'Box
+        (cons '(@ (flexDirection column) (paddingTop 1))
+            (list3
+                (list3 'Text '(@ (bold #true)) "Game of Life")
+                (lv-label "generation" gen)
+                (lv-label "live cells" (length (live-cells board)))))))
+
+(defun lv-view (gen board)
+    (cons 'Box
+        (cons '(@ (gap 2))
+            (list2 (lv-board board) (lv-side gen board)))))
+
+; Every frame of the reference run, as a list of views.
+(defun lv-views ()
+    (lv-collect 0 (seed-board) ()))
+
+(defun lv-collect (gen board acc)
+    (if (> gen life-generations)
+        (reverse acc)
+        (lv-collect (+ gen 1) (step-board board) (cons (lv-view gen board) acc))))
