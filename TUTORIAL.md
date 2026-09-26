@@ -84,6 +84,17 @@ The things to notice:
 - **Tail calls run in constant space.** `sum-to` calls itself in tail
   position, so it could count to a billion without growing the stack.
   `tests/programs/tailcalls.slight` runs a 1,000,000-iteration loop.
+- **Quasiquote builds data.** `` `(a ,b ,@c) `` is a list with the value of
+  `b` in place of `,b` and the elements of the list `c` spliced in place of
+  `,@c`. Everything else in the template is taken literally:
+
+  ```lisp
+  (let gen 4)
+  (let rows '((Text "a") (Text "b")))
+  `(Box (Text "generation " ,gen) ,@rows)   ; (Box (Text "generation " 4) (Text "a") (Text "b"))
+  ```
+
+  A quasiquote inside another quasiquote is not supported.
 - **Only `#false` is false.** `()`, `0` and `""` are all true.
 - **Integers and floats don't mix.** `(+ 1 2.0)` is a `type-error`; convert
   with `integer->float` or `float->integer`. Integers are 64-bit, and overflow

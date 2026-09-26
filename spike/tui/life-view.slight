@@ -1,33 +1,25 @@
-; Views for the live demo, built by CPI code. There is no quasiquote yet,
-; so views are assembled with cons, list2 and list3; compare the sample
-; views in sample.sxml to see what quasiquote would buy.
+; Views for the live demo, built by CPI code with quasiquote: a view reads
+; like the screen it describes, with `,` for a value and `,@` to splice a
+; list in.
 
 ; Two characters per cell, so cells look square in a terminal.
 (defun lv-cell (c)
     (if (= c 1) "██" "··"))
 
 (defun lv-row (row)
-    (list3 'Text '(@ (color yellow)) (fold (lambda (s c) (string-append s (lv-cell c))) "" row)))
-
-(defun lv-board (board)
-    (list3 'Box '(@ (flexDirection column) (borderStyle round) (borderColor green) (paddingX 1))
-        (map lv-row board)))
+    `(Text (@ (color yellow)) ,(fold (lambda (s c) (string-append s (lv-cell c))) "" row)))
 
 (defun lv-label (name value)
-    (list3 'Text (list3 'Text '(@ (dimColor #true)) (string-append name " ")) value))
-
-(defun lv-side (gen board)
-    (cons 'Box
-        (cons '(@ (flexDirection column) (paddingTop 1))
-            (list3
-                (list3 'Text '(@ (bold #true)) "Game of Life")
-                (lv-label "generation" gen)
-                (lv-label "live cells" (length (live-cells board)))))))
+    `(Text (Text (@ (dimColor #true)) ,name " ") ,value))
 
 (defun lv-view (gen board)
-    (cons 'Box
-        (cons '(@ (gap 2))
-            (list2 (lv-board board) (lv-side gen board)))))
+    `(Box (@ (gap 2))
+        (Box (@ (flexDirection column) (borderStyle round) (borderColor green) (paddingX 1))
+            ,@(map lv-row board))
+        (Box (@ (flexDirection column) (paddingTop 1))
+            (Text (@ (bold #true)) "Game of Life")
+            ,(lv-label "generation" gen)
+            ,(lv-label "live cells" (length (live-cells board))))))
 
 ; Every frame of the reference run, as a list of views.
 (defun lv-views ()

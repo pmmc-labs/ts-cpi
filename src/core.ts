@@ -386,6 +386,20 @@ ops.set('cdr', {
     },
 });
 
+// (append a b): the elements of the list `a` followed by `b`. Work is
+// proportional to the length of `a` (a † operation, like string-append).
+ops.set('append', {
+    name: 'append',
+    arity: 2,
+    fn: (args) => {
+        const items = listToArray(args[0]!);
+        if (items === null) return fail('type-error', 'append requires a proper list as its first argument', args[0]!);
+        let out = args[1]!;
+        for (let i = items.length - 1; i >= 0; i--) out = cons(items[i]!, out);
+        return ok(out);
+    },
+});
+
 ops.set('apply', {
     name: 'apply',
     arity: 2,

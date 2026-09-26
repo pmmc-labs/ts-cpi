@@ -10,7 +10,7 @@ export const CORE_ARITY: ReadonlyMap<string, number> = new Map<string, number>([
     ['nil?', 1], ['pair?', 1], ['boolean?', 1], ['integer?', 1], ['float?', 1], ['string?', 1],
     ['symbol?', 1], ['procedure?', 1], ['error?', 1], ['address?', 1], ['pid?', 1], ['env?', 1],
     // 5.5 pairs
-    ['cons', 2], ['car', 1], ['cdr', 1], ['apply', 2],
+    ['cons', 2], ['car', 1], ['cdr', 1], ['append', 2], ['apply', 2],
     // 5.6 strings
     ['string-length', 1], ['string-ref', 2], ['string-append', 2], ['symbol->string', 1], ['string->symbol', 1],
     // 5.7 conversions
@@ -26,7 +26,7 @@ export const SPECIAL_FORMS: ReadonlySet<string> = new Set([
 ]);
 
 // Rewritten into cond by the expander; the machine never sees them.
-export const DERIVED_FORMS: ReadonlySet<string> = new Set(['if', 'when', 'case']);
+export const DERIVED_FORMS: ReadonlySet<string> = new Set(['if', 'when', 'case', 'quasiquote', 'unquote', 'unquote-splicing']);
 
 export const isCoreName = (name: string): boolean => CORE_ARITY.has(name);
 export const isHostName = (name: string): boolean => name.includes('::');

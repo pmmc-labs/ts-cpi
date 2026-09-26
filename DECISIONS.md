@@ -64,6 +64,33 @@ choices in `prompt.md`, then the simplest consistent behavior.
 - `tests/programs/parking.slight`: the address is read with `process::address` before parking (it is `bad-state` afterwards).
 - `tests/programs/traps.slight`: the CPI resumes a trapped send with `#true`, what `actor::send` returns.
 
+## Spec changes
+
+Changes to the language agreed during the prototype, written as proposed text
+for SPEC-CPI. `../../design-xxx` is not edited from here.
+
+### Quasiquote and `append` (2026-09-26)
+
+**Section 3, Reader.** Add:
+
+- **Quasiquote**: `` `x `` reads as `(quasiquote x)`, `,x` as `(unquote x)` and `,@x` as `(unquote-splicing x)`. `` ` `` and `,` end a symbol.
+
+**Section 4.1, Derived forms.** Add a row:
+
+| Form | Expands to |
+| --- | --- |
+| `` `template `` | Constructor calls that build `template`, with each `,x` replaced by the value of `x` and each `,@x` by the elements of the list `x`: `` `(a ,b ,@c d) `` is `(cons 'a (cons b (append c (cons 'd ()))))`. Parts with no unquote stay quoted. A `,@x` at the end of a list becomes the tail itself, without a copy. `unquote` or `unquote-splicing` outside a quasiquote, `,@` not directly inside a list, and a nested quasiquote are each a `load-error`. |
+
+`quasiquote`, `unquote` and `unquote-splicing` are reserved like the other derived forms.
+
+**Section 5.5, Pairs.** Add a row:
+
+| Signature | Result | Errors |
+| --- | --- | --- |
+| `(append a b)` † | A list of the elements of `a` followed by `b`. `b` is not copied. | `type-error` if `a` is not a proper list. |
+
+Rationale: views are data (see `spike/tui/`), and building data without quasiquote means long chains of `cons` calls. Splicing needs `append`, and a derived form may expand only to core operations, so `append` joins the core, marked † like `string-append`. Nested quasiquote is left out until a real use appears.
+
 ## Spec issues
 
 - SPEC-CPI section 1 says the CPI "is granted the privileged namespaces in section 8"; they are listed in section 10. Editorial.

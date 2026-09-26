@@ -28,9 +28,6 @@
         acc
         (reverse-onto (cdr xs) (cons (car xs) acc))))
 
-(defun append (xs ys)
-    (reverse-onto (reverse xs) ys))
-
 ; (range 0 3) is (0 1 2).
 (defun range (from to)
     (range-down from (- to 1) ()))

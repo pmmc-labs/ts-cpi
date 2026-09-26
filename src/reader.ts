@@ -144,11 +144,15 @@ function tokenize(source: string, file: string): Token[] {
             continue;
         }
 
-        // Quote
-        if (ch === "'") {
-            tokens.push({ kind: 'quote', value: "'", pos: getPos() });
-            col += 1;
-            i += 1;
+        // Quote and quasiquote: 'x, `x, ,x and ,@x. The token's value is the
+        // name of the form the next datum is wrapped in.
+        if (ch === "'" || ch === '`' || ch === ',') {
+            const splicing = ch === ',' && source[i + 1] === '@';
+            const form = ch === "'" ? 'quote' : ch === '`' ? 'quasiquote' : splicing ? 'unquote-splicing' : 'unquote';
+            tokens.push({ kind: 'quote', value: form, pos: getPos() });
+            const width = splicing ? 2 : 1;
+            col += width;
+            i += width;
             continue;
         }
 
@@ -160,7 +164,7 @@ function tokenize(source: string, file: string): Token[] {
 
             // Read the symbol following :
             const startSymbol = i;
-            while (i < source.length && !/[\s()';"]/.test(source[i]!)) {
+            while (i < source.length && !/[\s()';"`,]/.test(source[i]!)) {
                 i += 1;
                 col += 1;
             }
@@ -190,7 +194,7 @@ function tokenize(source: string, file: string): Token[] {
             col += 1;
             i += 1;
             const rest = [];
-            while (i < source.length && !/[\s()';"]/.test(source[i]!)) {
+            while (i < source.length && !/[\s()';"`,]/.test(source[i]!)) {
                 rest.push(source[i]!);
                 col += 1;
                 i += 1;
@@ -209,7 +213,7 @@ function tokenize(source: string, file: string): Token[] {
 
         // Read the whole token first, then determine its type
         let tokenEnd = i;
-        while (tokenEnd < source.length && !/[\s()';"]/.test(source[tokenEnd]!)) {
+        while (tokenEnd < source.length && !/[\s()';"`,]/.test(source[tokenEnd]!)) {
             tokenEnd += 1;
         }
 
@@ -279,9 +283,13 @@ function parseValue(state: ParseState): Value {
         case 'quote': {
             const pos = token.pos;
             state.index += 1;
+            if (state.index >= state.tokens.length) {
+                throw new LoadError(`Expected a datum after ${token.value} at ${state.file}:${pos.line}:${pos.col}`, NIL);
+            }
             const quoted = parseValue(state);
-            // (quote quoted) pair with position of '
-            return cons(sym('quote'), cons(quoted, NIL), pos);
+            // (quote x), (quasiquote x), (unquote x) or (unquote-splicing x),
+            // with the position of the ', `, , or ,@
+            return cons(sym(token.value), cons(quoted, NIL), pos);
         }
 
         case 'tag': {

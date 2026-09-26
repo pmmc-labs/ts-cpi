@@ -157,6 +157,12 @@ function expandExpr(form: Value, ctx: Ctx): Value {
             return expandWhen(elements, p);
         case 'case':
             return expandCase(elements, p);
+        case 'quasiquote':
+            if (elements.length !== 2) throw new LoadError('quasiquote requires exactly one template', form);
+            return expandTemplate(elements[1]!);
+        case 'unquote':
+        case 'unquote-splicing':
+            throw new LoadError(`${head.name} may appear only inside a quasiquote`, form);
         default: {
             // An ordinary application, a core-operation call, or a host request:
             // the head stays put (this is the one position eta-expansion and the
@@ -295,4 +301,51 @@ function expandCase(elements: readonly Value[], p: Pos | null): Value {
     const condForm = mkList([sym('cond'), ...condClauses], p);
     const letForm = mkList([sym('let'), t, topic], p);
     return mkList([sym('do'), letForm, condForm], p);
+}
+
+// `(a ,b ,@c d)` becomes (cons 'a (cons b (append c (cons 'd ())))). Parts
+// with no unquote in them stay quoted, so constant structure is shared. A
+// splice at the end of a list needs no copy: `(a ,@c)` is (cons 'a c).
+// Nested quasiquote is not supported.
+function expandTemplate(t: Value): Value {
+    if (!hasUnquote(t)) return quoted(t);
+    const items = listToArray(t)!;
+    const head = items[0]!;
+    if (head.t === 'sym' && (head.name === 'unquote' || head.name === 'unquote-splicing')) {
+        if (items.length !== 2) throw new LoadError(`${head.name} requires exactly one expression`, t);
+        if (head.name === 'unquote-splicing') throw new LoadError('unquote-splicing must be an element of a list', t);
+        return expandExpr(items[1]!, 'value');
+    }
+    const p = posOf(t);
+    let out: Value = NIL;
+    let tail = true;
+    for (let i = items.length - 1; i >= 0; i--) {
+        const item = items[i]!;
+        if (isForm(item, 'unquote-splicing')) {
+            const parts = listToArray(item)!;
+            if (parts.length !== 2) throw new LoadError('unquote-splicing requires exactly one expression', item);
+            const spliced = expandExpr(parts[1]!, 'value');
+            out = tail ? spliced : mkList([sym('append'), spliced, out], p);
+        } else {
+            out = mkList([sym('cons'), expandTemplate(item), tail ? NIL : out], p);
+        }
+        tail = false;
+    }
+    return out;
+}
+
+// True if the template contains an unquote. A nested quasiquote is an error.
+function hasUnquote(t: Value): boolean {
+    if (t.t !== 'pair') return false;
+    if (isForm(t, 'quasiquote')) throw new LoadError('nested quasiquote is not supported', t);
+    if (isForm(t, 'unquote') || isForm(t, 'unquote-splicing')) return true;
+    return (listToArray(t) ?? []).some(hasUnquote);
+}
+
+function isForm(v: Value, name: string): boolean {
+    return v.t === 'pair' && v.car.t === 'sym' && v.car.name === name;
+}
+
+function quoted(v: Value): Value {
+    return v.t === 'pair' || v.t === 'sym' ? mkList([sym('quote'), v], posOf(v)) : v;
 }
