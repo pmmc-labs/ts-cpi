@@ -13,7 +13,7 @@ import { listToArray } from '../../src/values.ts';
 import type { State, Value } from '../../src/types.ts';
 import { print } from '../../src/printer.ts';
 import { traceEntries } from '../../src/core.ts';
-import { toElement } from './sxml.ts';
+import { toElement } from '../../src/tui/views.ts';
 
 function evaluate(source: string, files: string[]): Value {
     const [x] = expand(read(source, 'live'), 'expr');

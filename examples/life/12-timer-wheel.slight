@@ -1,5 +1,12 @@
 ; 12 · The board lives in the timer queue
 ;
+; clock: virtual
+;
+; A test fixture, not a program: it decodes cells from exact wake times, so
+; it is correct only under the virtual clock that tests use (SPEC-TUI section
+; 8). On the real clock a timer that fires a millisecond late reads as the
+; wrong cell. Run it with `node --test --test-name-pattern 12- tests/life.test.ts`.
+;
 ; Between generations the board is stored nowhere but in virtual time. For
 ; every live cell of generation g the CPI spawns a sleeper process that does
 ; nothing except `timer::sleep` until the moment

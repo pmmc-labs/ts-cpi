@@ -24,16 +24,16 @@ function programPath(name: string): string {
 // Loads and boots a program, returning its printed output lines and the
 // boot result. Fails the test immediately (with the error printed) if the
 // CPI itself fails, unless `allowFailure` is set.
-function runProgram(name: string): { output: string[]; result: { ok: true; v: Value } | { ok: false; e: ErrorValue } } {
+async function runProgram(name: string): Promise<{ output: string[]; result: { ok: true; v: Value } | { ok: false; e: ErrorValue } }> {
     const env = loadFiles([programPath(name)]);
     const output: string[] = [];
-    const rt = new Runtime({ out: (line) => output.push(line) });
-    const result = rt.boot(env);
+    const rt = new Runtime({ out: (line) => output.push(line), clock: 'virtual' });
+    const result = await rt.boot(env);
     return { output, result };
 }
 
-function expectOk(name: string): { output: string[]; v: Value } {
-    const { output, result } = runProgram(name);
+async function expectOk(name: string): Promise<{ output: string[]; v: Value }> {
+    const { output, result } = await runProgram(name);
     assert.equal(result.ok, true, result.ok ? '' : `CPI failed: ${print((result as { ok: false; e: ErrorValue }).e)}`);
     return { output, v: (result as { ok: true; v: Value }).v };
 }
@@ -42,8 +42,8 @@ function expectOk(name: string): { output: string[]; v: Value } {
 // Scenario 1: scheduler
 // ---------------------------------------------------------------------------
 
-test('scenario 1: round-robin scheduler over two ping-pong actors', () => {
-    const { output, v } = expectOk('scheduler.slight');
+test('scenario 1: round-robin scheduler over two ping-pong actors', async () => {
+    const { output, v } = await expectOk('scheduler.slight');
     assert.deepEqual(output, [
         'stop (blocked recv)',
         'stop (quota)',
@@ -90,9 +90,9 @@ test('scenario 1: round-robin scheduler over two ping-pong actors', () => {
 // Scenario 2: tail calls
 // ---------------------------------------------------------------------------
 
-test('scenario 2: a 1,000,000-iteration tail loop runs in constant space, both in the CPI and in a process', () => {
+test('scenario 2: a 1,000,000-iteration tail loop runs in constant space, both in the CPI and in a process', async () => {
     const before = process.memoryUsage().heapUsed;
-    const { output } = expectOk('tailcalls.slight');
+    const { output } = await expectOk('tailcalls.slight');
     const after = process.memoryUsage().heapUsed;
     assert.deepEqual(output, ['cpi done', 'process (exited done)']);
     // A loose bound: a million-deep non-tail recursion would balloon the heap
@@ -105,8 +105,8 @@ test('scenario 2: a 1,000,000-iteration tail loop runs in constant space, both i
 // Scenario 3: errors
 // ---------------------------------------------------------------------------
 
-test('scenario 3: catch, wrap-error, error-cause, stack-trace-for, already-thrown, error-pad', () => {
-    const { output, v } = expectOk('errors.slight');
+test('scenario 3: catch, wrap-error, error-cause, stack-trace-for, already-thrown, error-pad', async () => {
+    const { output, v } = await expectOk('errors.slight');
     const file = programPath('errors.slight');
     assert.deepEqual(output, [
         'tag wrapped',
@@ -128,8 +128,8 @@ test('scenario 3: catch, wrap-error, error-cause, stack-trace-for, already-throw
 // Scenario 4: restart from checkpoint
 // ---------------------------------------------------------------------------
 
-test('scenario 4: an actor restarts from its checkpoint after failing, on the same durable mailbox', () => {
-    const { output, v } = expectOk('restart.slight');
+test('scenario 4: an actor restarts from its checkpoint after failing, on the same durable mailbox', async () => {
+    const { output, v } = await expectOk('restart.slight');
     assert.deepEqual(output, [
         'count 1',
         'count 2',
@@ -146,8 +146,8 @@ test('scenario 4: an actor restarts from its checkpoint after failing, on the sa
 // Scenario 5: traps
 // ---------------------------------------------------------------------------
 
-test('scenario 5: a trapped send effect is performed by the CPI and the actor is resumed', () => {
-    const { output } = expectOk('traps.slight');
+test('scenario 5: a trapped send effect is performed by the CPI and the actor is resumed', async () => {
+    const { output } = await expectOk('traps.slight');
     assert.deepEqual(output, [
         'stop trap',
         'effect send',
@@ -160,8 +160,8 @@ test('scenario 5: a trapped send effect is performed by the CPI and the actor is
 // Scenario 6: parking
 // ---------------------------------------------------------------------------
 
-test('scenario 6: a blocked actor is parked, unparked into (environment::self), and wakes on a message', () => {
-    const { output } = expectOk('parking.slight');
+test('scenario 6: a blocked actor is parked, unparked into (environment::self), and wakes on a message', async () => {
+    const { output } = await expectOk('parking.slight');
     assert.deepEqual(output, [
         'r1 blocked',
         'parked-tag parked',
@@ -174,8 +174,8 @@ test('scenario 6: a blocked actor is parked, unparked into (environment::self), 
 // Scenario 7: timers
 // ---------------------------------------------------------------------------
 
-test('scenario 7: two actors sleeping for different virtual durations wake in virtual-time order', () => {
-    const { output } = expectOk('timers.slight');
+test('scenario 7: two actors sleeping for different virtual durations wake in virtual-time order', async () => {
+    const { output } = await expectOk('timers.slight');
     assert.deepEqual(output, [
         'time 50',
         'b woke',

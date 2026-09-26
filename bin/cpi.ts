@@ -12,7 +12,7 @@ import { traceEntries } from '../src/core.ts';
 import { listToArray } from '../src/values.ts';
 import { Runtime } from '../src/runtime.ts';
 
-function main(): number {
+async function main(): Promise<number> {
     const paths = process.argv.slice(2);
     if (paths.length === 0) {
         console.error('usage: cpi file.slight ...');
@@ -29,7 +29,7 @@ function main(): number {
     }
 
     const runtime = new Runtime({ out: (line) => process.stdout.write(line + '\n') });
-    const result = runtime.boot(env);
+    const result = await runtime.boot(env);
     if (!result.ok) {
         printError(result.e);
         return 1;
@@ -61,4 +61,4 @@ process.stdout.on('error', (e: NodeJS.ErrnoException) => {
     throw e;
 });
 
-process.exitCode = main();
+process.exitCode = await main();

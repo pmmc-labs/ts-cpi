@@ -31,22 +31,22 @@ function buildEnv(src: string, extra: ReadonlyArray<readonly [string, Value]> = 
     return fromBindings([...bindings, ...extra]);
 }
 
-function boot(src: string, extra: ReadonlyArray<readonly [string, Value]> = []) {
+async function boot(src: string, extra: ReadonlyArray<readonly [string, Value]> = []) {
     const output: string[] = [];
-    const rt = new Runtime({ out: (line) => output.push(line) });
+    const rt = new Runtime({ out: (line) => output.push(line), clock: 'virtual' });
     const env = buildEnv(src, extra);
-    const result = rt.boot(env);
+    const result = await rt.boot(env);
     return { rt, result, output };
 }
 
-function ok(src: string, extra: ReadonlyArray<readonly [string, Value]> = []): Value {
-    const { result } = boot(src, extra);
+async function ok(src: string, extra: ReadonlyArray<readonly [string, Value]> = []): Promise<Value> {
+    const { result } = await boot(src, extra);
     assert.equal(result.ok, true, result.ok ? '' : print((result as { e: ErrorValue }).e));
     return (result as { ok: true; v: Value }).v;
 }
 
-function failedBoot(src: string): ErrorValue {
-    const { result } = boot(src);
+async function failedBoot(src: string): Promise<ErrorValue> {
+    const { result } = await boot(src);
     assert.equal(result.ok, false);
     return (result as { ok: false; e: ErrorValue }).e;
 }
@@ -62,8 +62,8 @@ function arr(v: Value): Value[] {
 // Spawn and run to exit
 // ---------------------------------------------------------------------------
 
-test('spawn and run to exit', () => {
-    const v = ok(`
+test('spawn and run to exit', async () => {
+    const v = await ok(`
         (defun worker (x) (+ x 1))
         (defun main ()
             (let p (process::spawn worker (cons 41 ()) (environment::self) '() #false))
@@ -76,8 +76,8 @@ test('spawn and run to exit', () => {
 // Quota preemption and resuming
 // ---------------------------------------------------------------------------
 
-test('quota: preemption at n ticks, then resuming to completion', () => {
-    const v = ok(`
+test('quota: preemption at n ticks, then resuming to completion', async () => {
+    const v = await ok(`
         (defun loop (n) (if (eq? n 0) :done (loop (- n 1))))
         (defun main ()
             (let p (process::spawn loop (cons 10 ()) (environment::self) '() #false))
@@ -94,8 +94,8 @@ test('quota: preemption at n ticks, then resuming to completion', () => {
 // Send and recv between two processes, delivery at the batch boundary
 // ---------------------------------------------------------------------------
 
-test('send and recv between two processes: delivery at the batch boundary', () => {
-    const v = ok(`
+test('send and recv between two processes: delivery at the batch boundary', async () => {
+    const v = await ok(`
         (defun receiver () (actor::recv))
         (defun sender (addr) (actor::send addr :hello))
         (defun main ()
@@ -117,8 +117,8 @@ test('send and recv between two processes: delivery at the batch boundary', () =
 // (blocked recv) becoming ready when a message arrives (a direct CPI send)
 // ---------------------------------------------------------------------------
 
-test('a blocked-recv process becomes ready when a message arrives', () => {
-    const v = ok(`
+test('a blocked-recv process becomes ready when a message arrives', async () => {
+    const v = await ok(`
         (defun receiver () (actor::recv))
         (defun main ()
             (let b (process::spawn receiver () (environment::self) '(actor) #false))
@@ -140,8 +140,8 @@ test('a blocked-recv process becomes ready when a message arrives', () => {
 // Join
 // ---------------------------------------------------------------------------
 
-test('join: blocks until the target ends, then reports its detail', () => {
-    const v = ok(`
+test('join: blocks until the target ends, then reports its detail', async () => {
+    const v = await ok(`
         (defun worker () 99)
         (defun joiner (target) (actor::join target))
         (defun main ()
@@ -162,8 +162,8 @@ test('join: blocks until the target ends, then reports its detail', () => {
 // Traps, with process::resume and process::resume-throw
 // ---------------------------------------------------------------------------
 
-test('traps: process::resume answers a trapped send', () => {
-    const v = ok(`
+test('traps: process::resume answers a trapped send', async () => {
+    const v = await ok(`
         (defun sender (addr) (actor::send addr :hi))
         (defun main ()
             (host::set-traps '(send))
@@ -183,8 +183,8 @@ test('traps: process::resume answers a trapped send', () => {
     assert.equal(print(r2!), '(exited #true)');
 });
 
-test('traps: process::resume-throw answers a trapped send by throwing', () => {
-    const v = ok(`
+test('traps: process::resume-throw answers a trapped send by throwing', async () => {
+    const v = await ok(`
         (defun sender (addr) (actor::send addr :hi))
         (defun main ()
             (host::set-traps '(send))
@@ -204,8 +204,8 @@ test('traps: process::resume-throw answers a trapped send by throwing', () => {
 // process::checkpoint after a failure
 // ---------------------------------------------------------------------------
 
-test('process::checkpoint reads the most recent call after a failure', () => {
-    const v = ok(`
+test('process::checkpoint reads the most recent call after a failure', async () => {
+    const v = await ok(`
         (defun looper (n) (if (eq? n 0) (throw (make-error :boom "die" n)) (looper (- n 1))))
         (defun main ()
             (let p (process::spawn looper (cons 3 ()) (environment::self) '() #false))
@@ -222,8 +222,8 @@ test('process::checkpoint reads the most recent call after a failure', () => {
 // Park, then unpark and continue
 // ---------------------------------------------------------------------------
 
-test('park then unpark: the unparked process re-attempts recv and continues', () => {
-    const v = ok(`
+test('park then unpark: the unparked process re-attempts recv and continues', async () => {
+    const v = await ok(`
         (defun receiver () (let m (actor::recv)) (+ m 1))
         (defun main ()
             (let p (process::spawn receiver () (environment::self) '(actor) #false))
@@ -251,9 +251,9 @@ test('park then unpark: the unparked process re-attempts recv and continues', ()
 // set-env: a pending call reaches the new code
 // ---------------------------------------------------------------------------
 
-test('process::set-env: a call pending in a blocked process reaches the new code', () => {
+test('process::set-env: a call pending in a blocked process reaches the new code', async () => {
     const otherEnv = buildEnv('(defun helper () :new)');
-    const v = ok(
+    const v = await ok(
         `
             (defun helper () :old)
             (defun waiter () (let m (actor::recv)) (helper))
@@ -276,8 +276,8 @@ test('process::set-env: a call pending in a blocked process reaches the new code
 // not-granted for a process calling process::
 // ---------------------------------------------------------------------------
 
-test('not-granted: a process calling process:: without that grant fails', () => {
-    const v = ok(`
+test('not-granted: a process calling process:: without that grant fails', async () => {
+    const v = await ok(`
         (defun bad () (process::state 0))
         (defun main ()
             (let p (process::spawn bad () (environment::self) '() #false))
@@ -293,8 +293,8 @@ test('not-granted: a process calling process:: without that grant fails', () => 
 // environment::error-pad and environment::error-env
 // ---------------------------------------------------------------------------
 
-test('environment::error-pad and environment::error-env', () => {
-    const v = ok(`
+test('environment::error-pad and environment::error-env', async () => {
+    const v = await ok(`
         (defun thrower (x)
             (let y (+ x 1))
             (throw (make-error :oops "boom" y)))
@@ -318,8 +318,8 @@ test('environment::error-pad and environment::error-env', () => {
     assert.ok((hash as { v: string }).v.length > 0);
 });
 
-test('environment::closure-pad reads a closure\'s captured local scope', () => {
-    const v = ok(`
+test('environment::closure-pad reads a closure\'s captured local scope', async () => {
+    const v = await ok(`
         (defun main ()
             (let x 7)
             (let f (lambda () x))
@@ -335,8 +335,8 @@ test('environment::closure-pad reads a closure\'s captured local scope', () => {
 // timer::sleep with host::wait advancing the virtual clock
 // ---------------------------------------------------------------------------
 
-test('timer::sleep blocks a process; host::wait advances the virtual clock', () => {
-    const v = ok(`
+test('timer::sleep blocks a process; host::wait advances the virtual clock', async () => {
+    const v = await ok(`
         (defun sleeper (ms) (timer::sleep ms) :awake)
         (defun main ()
             (let p (process::spawn sleeper (cons 100 ()) (environment::self) '(timer) #false))
@@ -359,8 +359,8 @@ test('timer::sleep blocks a process; host::wait advances the virtual clock', () 
     assert.equal(print(ready2!), '()'); // nothing pending: returns at once
 });
 
-test('host::wait with a timeout shorter than the earliest deadline advances only to the timeout', () => {
-    const v = ok(`
+test('host::wait with a timeout shorter than the earliest deadline advances only to the timeout', async () => {
+    const v = await ok(`
         (defun sleeper (ms) (timer::sleep ms) :awake)
         (defun main ()
             (let p (process::spawn sleeper (cons 100 ()) (environment::self) '(timer) #false))
@@ -378,8 +378,8 @@ test('host::wait with a timeout shorter than the earliest deadline advances only
 // A failing main
 // ---------------------------------------------------------------------------
 
-test('a failing main reports the error through boot\'s return value', () => {
-    const e = failedBoot(`
+test('a failing main reports the error through boot\'s return value', async () => {
+    const e = await failedBoot(`
         (defun main () (throw (make-error :oops "boom" 42)))
     `);
     assert.equal(e.tag.name, 'oops');
@@ -390,8 +390,8 @@ test('a failing main reports the error through boot\'s return value', () => {
 // Extra coverage: watchers/lifecycle signals, dead letters, IO::print
 // ---------------------------------------------------------------------------
 
-test('process::watch: an address watcher gets a terminated signal, appended like any message', () => {
-    const v = ok(`
+test('process::watch: an address watcher gets a terminated signal, appended like any message', async () => {
+    const v = await ok(`
         (defun worker () 5)
         (defun main ()
             (let w (process::spawn worker () (environment::self) '() #false))
@@ -407,9 +407,9 @@ test('process::watch: an address watcher gets a terminated signal, appended like
     assert.equal(print(sigArr[3]!), '(exited 5)');
 });
 
-test('dead letters: a send to a non-durable mailbox whose process has ended is recorded', () => {
+test('dead letters: a send to a non-durable mailbox whose process has ended is recorded', async () => {
     const output: string[] = [];
-    const rt = new Runtime({ out: (line) => output.push(line) });
+    const rt = new Runtime({ out: (line) => output.push(line), clock: 'virtual' });
     const env = buildEnv(`
         (defun worker () 1)
         (defun main ()
@@ -419,21 +419,21 @@ test('dead letters: a send to a non-durable mailbox whose process has ended is r
             (mailbox::send addr :too-late)
             addr)
     `);
-    const result = rt.boot(env);
+    const result = await rt.boot(env);
     assert.equal(result.ok, true);
     assert.equal(rt.deadLetters.length, 1);
     assert.equal(print(rt.deadLetters[0]!.msg), 'too-late');
 });
 
-test('IO::print writes space-separated, newline-terminated, strings unquoted', () => {
-    const { output } = boot(`
+test('IO::print writes space-separated, newline-terminated, strings unquoted', async () => {
+    const { output } = await boot(`
         (defun main () (IO::print "hi" 42 :tag))
     `);
     assert.deepEqual(output, ['hi 42 tag']);
 });
 
-test('a PID returned by host::wait is eq? to the one process::spawn returned', () => {
-    const v = ok(`
+test('a PID returned by host::wait is eq? to the one process::spawn returned', async () => {
+    const v = await ok(`
         (defun napper () (timer::sleep 10))
         (defun main ()
             (let p (process::spawn napper () (environment::self) '(timer) #false))

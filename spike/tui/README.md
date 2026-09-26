@@ -26,7 +26,7 @@ SXML's shape: `(Tag (@ (prop value) ...) child ...)`.
 - A child that is a list of views is spliced in, so `(map row-view board)` works as a child. `()` and `#false` render nothing, so `(and show? view)` works.
 - Children are positional, so React needs no keys.
 
-`sxml.ts` is the whole binding, about 100 lines: it walks the view and calls
+`src/tui/views.ts` (it began here as `sxml.ts`) is the whole binding, about 100 lines: it walks the view and calls
 `React.createElement(tag, props, ...children)`, which is already
 s-expression shaped. JSX is not involved (Node's type stripping could not
 run `.tsx` anyway).

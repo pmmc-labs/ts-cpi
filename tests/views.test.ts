@@ -1,4 +1,4 @@
-// The TUI spike: SXML-style views, built as slight values, rendered through
+// Views as data (SPEC-TUI section 3): SXML-style views, built as slight values, rendered through
 // Ink to a string with no terminal (renderToString).
 
 import { test } from 'node:test';
@@ -10,7 +10,7 @@ import { expand } from '../src/expander.ts';
 import { loadFiles } from '../src/loader.ts';
 import { startExpr, run } from '../src/machine.ts';
 import type { State, Value } from '../src/types.ts';
-import { toElement, ViewError } from '../spike/tui/sxml.ts';
+import { toElement, ViewError } from '../src/tui/views.ts';
 
 const view = (source: string): Value => read(source, 'view')[0]!;
 const show = (source: string, columns = 30): string => renderToString(toElement(view(source)), { columns });

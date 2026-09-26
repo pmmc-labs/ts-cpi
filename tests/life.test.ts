@@ -28,9 +28,9 @@ export function filesFor(version: string): string[] {
     return [...lib, ...extra, path.join(lifeDir, version)];
 }
 
-function run(version: string): string[] {
+async function run(version: string): Promise<string[]> {
     const output: string[] = [];
-    const result = new Runtime({ out: (line) => output.push(line) }).boot(loadFiles(filesFor(version)));
+    const result = await new Runtime({ out: (line) => output.push(line), clock: 'virtual' }).boot(loadFiles(filesFor(version)));
     assert.equal(result.ok, true, result.ok ? '' : `${version} failed: ${print(result.e)}`);
     return output;
 }
@@ -44,14 +44,14 @@ function frames(output: string[]): string[][] {
 }
 
 const versions = readdirSync(lifeDir).filter((f) => /^\d\d-.*\.slight$/.test(f)).sort();
-const reference = frames(run('01-reference.slight'));
+const reference = frames(await run('01-reference.slight'));
 
-test('the reference prints 9 frames', () => {
+test('the reference prints 9 frames', async () => {
     assert.equal(reference.length, 9);
 });
 
 for (const version of versions.filter((v) => v !== '01-reference.slight')) {
-    test(version, () => {
-        assert.deepEqual(frames(run(version)), reference);
+    test(version, async () => {
+        assert.deepEqual(frames(await run(version)), reference);
     });
 }

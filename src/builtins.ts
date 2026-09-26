@@ -3,8 +3,8 @@
 //
 // A namespace table only declares shape: each action's arity and a `run`
 // function that forwards to a method on `Handlers`, which `Runtime`
-// implements. All state (the process table, mailboxes, the virtual clock,
-// the trap set, dead letters) lives in runtime.ts; this file has none.
+// implements. All state (the process table, mailboxes, the clock, the trap
+// set, dead letters, the TUI) lives in runtime.ts; this file has none.
 
 import type { Addr, ErrorValue, Value } from './types.ts';
 
@@ -34,9 +34,14 @@ export type RunCtx = {
     readonly outbox: { addr: Addr; msg: Value }[] | null;
 };
 
+// Only requests the CPI makes can take real time and return a promise:
+// `host::wait`, `timer::sleep` in the CPI, and the `tui::` actions that draw.
+// A process's requests are always answered at once (SPEC-CPI section 11).
+export type Answer = ActionResult | Promise<ActionResult>;
+
 export type ActionSpec = {
     readonly arity: number | 'any';
-    readonly run: (h: Handlers, ctx: RunCtx, args: readonly Value[]) => ActionResult;
+    readonly run: (h: Handlers, ctx: RunCtx, args: readonly Value[]) => Answer;
 };
 
 // ---------------------------------------------------------------------------
@@ -66,7 +71,7 @@ export interface Handlers {
     mailboxTake(addrV: Value): ActionResult;
 
     // 10.3 host::
-    hostWait(timeoutV: Value): ActionResult;
+    hostWait(timeoutV: Value): Answer;
     hostSetTraps(effectsV: Value): ActionResult;
     hostNow(): ActionResult;
 
@@ -88,7 +93,15 @@ export interface Handlers {
 
     // IO:: and timer:: (ordinary; usable by the CPI too)
     ioPrint(args: readonly Value[]): ActionResult;
-    timerSleep(ctx: RunCtx, msV: Value): ActionResult;
+    timerSleep(ctx: RunCtx, msV: Value): Answer;
+
+    // tui:: (SPEC-TUI; privileged, the CPI only)
+    tuiOpen(modeV: Value): Answer;
+    tuiRender(viewV: Value): Answer;
+    tuiSize(): ActionResult;
+    tuiSubscribe(addrV: Value): ActionResult;
+    tuiUnsubscribe(): ActionResult;
+    tuiClose(): Answer;
 }
 
 // ---------------------------------------------------------------------------
@@ -150,5 +163,13 @@ export const NAMESPACES: ReadonlyMap<string, ReadonlyMap<string, ActionSpec>> = 
     })],
     ['timer', ns({
         'sleep': { arity: 1, run: (h, c, a) => h.timerSleep(c, a[0]!) },
+    })],
+    ['tui', ns({
+        'open': { arity: 1, run: (h, _c, a) => h.tuiOpen(a[0]!) },
+        'render': { arity: 1, run: (h, _c, a) => h.tuiRender(a[0]!) },
+        'size': { arity: 0, run: (h) => h.tuiSize() },
+        'subscribe': { arity: 1, run: (h, _c, a) => h.tuiSubscribe(a[0]!) },
+        'unsubscribe': { arity: 0, run: (h) => h.tuiUnsubscribe() },
+        'close': { arity: 0, run: (h) => h.tuiClose() },
     })],
 ]);

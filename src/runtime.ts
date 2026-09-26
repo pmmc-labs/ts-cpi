@@ -1,5 +1,5 @@
-// The CPI's runtime: process table, mailboxes, the virtual clock, dead
-// letters, and `Runtime.boot` (SPEC-CPI sections 8, 9, 10, 11, 12).
+// The CPI's runtime: process table, mailboxes, the clock, dead
+// letters, the TUI, and `Runtime.boot` (SPEC-CPI sections 8, 9, 10, 11, 12).
 //
 // `Runtime` implements `Handlers` from builtins.ts: each method there is one
 // builtin action. All mutable state lives here; builtins.ts only declares
@@ -15,7 +15,9 @@ import { makeError } from './errors.ts';
 import { start, startExpr, step, resumeValue, resumeThrow } from './machine.ts';
 import { compose, conflicts, lookup, bindingHash } from './env.ts';
 import { print, display } from './printer.ts';
-import type { ActionResult, Handlers, RunCtx } from './builtins.ts';
+import type { ActionResult, Answer, Handlers, RunCtx } from './builtins.ts';
+import type { TuiBackend, TuiMode } from './tui/backend.ts';
+import { toElement, ViewError } from './tui/views.ts';
 import { NAMESPACES } from './builtins.ts';
 
 // ---------------------------------------------------------------------------
@@ -29,7 +31,7 @@ const BLOCK = (reason: 'recv' | 'join' | 'host'): ActionResult => ({ kind: 'bloc
 const TRAP = (effect: string, args: Value): ActionResult => ({ kind: 'trap', effect, args });
 
 const ORDINARY_NAMESPACES = new Set(['actor', 'IO', 'timer']);
-const ALL_NAMESPACES = new Set(['process', 'mailbox', 'host', 'environment', 'actor', 'IO', 'timer']);
+const ALL_NAMESPACES = new Set(['process', 'mailbox', 'host', 'environment', 'actor', 'IO', 'timer', 'tui']);
 const TRAPPABLE_EFFECTS = new Set(['recv', 'send', 'self', 'join']);
 
 // ---------------------------------------------------------------------------
@@ -119,10 +121,32 @@ type DeadLetter = { readonly from: Addr | null; readonly to: Addr; readonly msg:
 // Runtime
 // ---------------------------------------------------------------------------
 
+export type RuntimeOptions = {
+    // Where `IO::print` lines go while no TUI is open.
+    readonly out: (line: string) => void;
+    // SPEC-TUI section 8. 'real' (the default) is milliseconds since the
+    // image started. 'virtual' is for tests only: time starts at 0 and moves
+    // only when `host::wait` jumps it to the next deadline.
+    readonly clock?: 'real' | 'virtual';
+    // Makes the backend `tui::open` draws with. Defaults to the terminal;
+    // tests pass a HeadlessTui.
+    readonly tui?: () => TuiBackend | Promise<TuiBackend>;
+};
+
 export class Runtime implements Handlers {
     private readonly out: (line: string) => void;
+    private readonly virtualClock: boolean;
+    private readonly started = performance.now();
+    private virtualNow = 0;
+    private readonly makeTui: () => TuiBackend | Promise<TuiBackend>;
 
-    private clock = 0;
+    // The TUI, while open (SPEC-TUI).
+    private tui: TuiBackend | null = null;
+    private tuiMode: TuiMode = 'inline';
+    private inputAddr: Addr | null = null;
+    private inputQueue: Value[] = [];
+    private heldLines: string[] = [];
+    private wakeWaiter: (() => void) | null = null;
     private nextPid = 1;
     private nextParkKey = 1;
     private cpiEnv: Env | null = null;
@@ -133,8 +157,14 @@ export class Runtime implements Handlers {
     private readonly deadLettersList: DeadLetter[] = [];
     private traps = new Set<string>();
 
-    constructor(opts: { out: (line: string) => void }) {
+    constructor(opts: RuntimeOptions) {
         this.out = opts.out;
+        this.virtualClock = opts.clock === 'virtual';
+        this.makeTui = opts.tui ?? (async () => new (await import('./tui/terminal.ts')).TerminalTui());
+    }
+
+    private now(): number {
+        return this.virtualClock ? this.virtualNow : Math.floor(performance.now() - this.started);
     }
 
     // For tests: nothing in the language reads dead letters (SPEC-CPI's
@@ -147,7 +177,19 @@ export class Runtime implements Handlers {
     // Boot (SPEC-CPI sections 9, 12)
     // -------------------------------------------------------------------------
 
-    boot(env: Env): { ok: true; v: Value } | { ok: false; e: ErrorValue } {
+    // Runs (main) as the CPI. Asynchronous because `host::wait`, `timer::sleep`
+    // and drawing take real time; every other request is answered at once. A
+    // TUI left open is closed, and the terminal restored, before this returns
+    // (SPEC-TUI section 10).
+    async boot(env: Env): Promise<{ ok: true; v: Value } | { ok: false; e: ErrorValue }> {
+        try {
+            return await this.runCpi(env);
+        } finally {
+            await this.closeTui();
+        }
+    }
+
+    private async runCpi(env: Env): Promise<{ ok: true; v: Value } | { ok: false; e: ErrorValue }> {
         this.cpiEnv = env;
         const mainCall = cons(sym('main'), NIL, null);
         let state = startExpr(mainCall, env);
@@ -165,9 +207,10 @@ export class Runtime implements Handlers {
                 return { ok: false, e: state.mode.e };
             }
             if (state.mode.m === 'host') {
-                const result = this.dispatchHost(
+                const answer = this.dispatchHost(
                     state.mode.ns, state.mode.action, state.mode.args, ALL_NAMESPACES, { pid: null, outbox: null }
                 );
+                const result = answer instanceof Promise ? await answer : answer;
                 if (result.kind === 'value') { state = resumeValue(state, result.v); continue; }
                 if (result.kind === 'throw') { state = resumeThrow(state, result.e); continue; }
                 // actor:: from the CPI always throws bad-state, and host::wait always
@@ -186,7 +229,7 @@ export class Runtime implements Handlers {
 
     private dispatchHost(
         nsName: string, action: string, args: readonly Value[], granted: ReadonlySet<string>, ctx: RunCtx
-    ): ActionResult {
+    ): Answer {
         if (!granted.has(nsName)) return T('not-granted', `not granted: ${nsName}`, sym(nsName));
         const table = NAMESPACES.get(nsName);
         if (table === undefined) return T('unknown-action', `unknown namespace: ${nsName}`, sym(nsName));
@@ -209,6 +252,9 @@ export class Runtime implements Handlers {
             const mode = entry.state.mode;
             if (mode.m === 'host') {
                 const result = this.dispatchHost(mode.ns, mode.action, mode.args, entry.grants, { pid: entry.pid, outbox });
+                // A process can't reach the requests that take real time: they are
+                // the CPI's (host::, tui::) or answered at once for a process.
+                if (result instanceof Promise) throw new Error(`internal: ${mode.ns}::${mode.action} answered a process asynchronously`);
                 if (result.kind === 'value') { entry.state = resumeValue(entry.state, result.v); continue; }
                 if (result.kind === 'throw') { entry.state = resumeThrow(entry.state, result.e); continue; }
                 if (result.kind === 'trap') {
@@ -534,33 +580,89 @@ export class Runtime implements Handlers {
     // 10.3 host::
     // ===========================================================================
 
-    hostWait(timeoutV: Value): ActionResult {
+    // SPEC-TUI section 9: suspends the image until a sleeper's deadline
+    // passes, an input event is waiting, or `timeout` ms pass. Then wakes
+    // every due sleeper, delivers every held input event, and returns the
+    // PIDs that became ready. If nothing can happen, returns () at once.
+    hostWait(timeoutV: Value): Answer {
         let timeoutMs: number | null;
         if (timeoutV.t === 'bool' && timeoutV.v === false) timeoutMs = null;
-        else if (timeoutV.t === 'int') timeoutMs = Number(timeoutV.v);
-        else return T('type-error', 'host::wait requires an integer timeout or #false', timeoutV);
+        else if (timeoutV.t === 'int' && timeoutV.v >= 0n) timeoutMs = Number(timeoutV.v);
+        else return T('type-error', 'host::wait requires a non-negative integer timeout or #false', timeoutV);
+        return this.virtualClock ? this.waitVirtual(timeoutMs) : this.waitReal(timeoutMs);
+    }
 
+    private async waitReal(timeoutMs: number | null): Promise<ActionResult> {
+        const until = timeoutMs === null ? null : this.now() + timeoutMs;
+        for (;;) {
+            const earliest = this.earliestDeadline();
+            if (this.inputQueue.length > 0 || (earliest !== null && earliest <= this.now())) break;
+            if (until !== null && this.now() >= until) break;
+            if (earliest === null && until === null && this.inputAddr === null) break;
+            const limits = [earliest, until].filter((t): t is number => t !== null).map((t) => t - this.now());
+            await this.sleepUntilWoken(limits.length > 0 ? Math.max(1, Math.min(...limits)) : null);
+        }
+        return V(this.settle());
+    }
+
+    // Resolves after `ms` (or never, if null), or as soon as input arrives.
+    private sleepUntilWoken(ms: number | null): Promise<void> {
+        return new Promise((resolve) => {
+            const timer = ms === null ? null : setTimeout(done, ms);
+            const self = this;
+            function done(): void {
+                if (timer !== null) clearTimeout(timer);
+                self.wakeWaiter = null;
+                resolve();
+            }
+            this.wakeWaiter = done;
+        });
+    }
+
+    private waitVirtual(timeoutMs: number | null): ActionResult {
+        // Scripted input arrives when the image would otherwise idle.
+        if (this.inputQueue.length === 0 && this.inputAddr !== null) {
+            const next = this.tui?.nextScripted?.() ?? null;
+            if (next !== null) this.inputQueue.push(next);
+        }
+        if (this.inputQueue.length > 0) return V(this.settle());
+        const earliest = this.earliestDeadline();
+        if (earliest === null || (timeoutMs !== null && this.virtualNow + timeoutMs < earliest)) {
+            if (timeoutMs !== null) this.virtualNow += timeoutMs;
+            return V(NIL);
+        }
+        this.virtualNow = Math.max(this.virtualNow, earliest); // never move time backward
+        return V(this.settle());
+    }
+
+    private earliestDeadline(): number | null {
         let earliest: number | null = null;
         for (const e of this.procs.values()) {
             if (e.status === 'blocked-host' && e.sleepDeadline !== undefined) {
                 if (earliest === null || e.sleepDeadline < earliest) earliest = e.sleepDeadline;
             }
         }
-        if (earliest === null) return V(NIL);
+        return earliest;
+    }
 
-        if (timeoutMs !== null && this.clock + timeoutMs < earliest) {
-            this.clock += timeoutMs;
-            return V(NIL);
+    // Delivers held input events and wakes due sleepers; returns their PIDs.
+    private settle(): Value {
+        const events = this.inputQueue;
+        this.inputQueue = [];
+        for (const event of events) {
+            if (this.inputAddr === null) break;
+            const r = this.deliverNow(null, this.inputAddr, event);
+            if (r.kind === 'throw') this.deadLettersList.push({ from: null, to: this.inputAddr, msg: event });
         }
-        this.clock = Math.max(this.clock, earliest); // never move time backward
+        const now = this.now();
         const ready: Value[] = [];
         for (const [pidNum, e] of this.procs) {
-            if (e.status === 'blocked-host' && e.sleepDeadline !== undefined && e.sleepDeadline <= this.clock) {
+            if (e.status === 'blocked-host' && e.sleepDeadline !== undefined && e.sleepDeadline <= now) {
                 e.status = 'ready';
                 ready.push(pid(pidNum));
             }
         }
-        return V(list(...ready));
+        return list(...ready);
     }
 
     hostSetTraps(effectsV: Value): ActionResult {
@@ -577,7 +679,7 @@ export class Runtime implements Handlers {
     }
 
     hostNow(): ActionResult {
-        return V(int(this.clock));
+        return V(int(this.now()));
     }
 
     // ===========================================================================
@@ -684,24 +786,104 @@ export class Runtime implements Handlers {
     // IO:: and timer::
     // ===========================================================================
 
+    // While a TUI is open, output must not corrupt the screen (SPEC-TUI
+    // section 7): inline mode shows it above the view, fullscreen mode holds
+    // it until the TUI closes.
     ioPrint(args: readonly Value[]): ActionResult {
-        this.out(args.map((a) => display(a)).join(' '));
+        const line = args.map((a) => display(a)).join(' ');
+        if (this.tui === null) this.out(line);
+        else if (this.tuiMode === 'inline') this.tui.print(line);
+        else this.heldLines.push(line);
         return V(NIL);
     }
 
-    timerSleep(ctx: RunCtx, msV: Value): ActionResult {
-        if (msV.t !== 'int') return T('type-error', 'timer::sleep requires an integer', msV);
+    timerSleep(ctx: RunCtx, msV: Value): Answer {
+        if (msV.t !== 'int' || msV.v < 0n) return T('type-error', 'timer::sleep requires a non-negative integer', msV);
         const ms = Number(msV.v);
         if (ctx.pid === null) {
-            this.clock += ms;
-            return V(NIL);
+            if (this.virtualClock) {
+                this.virtualNow += ms;
+                return V(NIL);
+            }
+            return new Promise((resolve) => setTimeout(() => resolve(V(NIL)), ms));
         }
         const entry = this.procs.get(ctx.pid)!;
-        if (entry.sleepDeadline === undefined) entry.sleepDeadline = this.clock + ms;
-        if (this.clock >= entry.sleepDeadline) {
+        if (entry.sleepDeadline === undefined) entry.sleepDeadline = this.now() + ms;
+        if (this.now() >= entry.sleepDeadline) {
             entry.sleepDeadline = undefined;
             return V(NIL);
         }
         return BLOCK('host');
+    }
+
+    // ===========================================================================
+    // tui:: (SPEC-TUI section 4)
+    // ===========================================================================
+
+    async tuiOpen(modeV: Value): Promise<ActionResult> {
+        if (this.tui !== null) return T('bad-state', 'the TUI is already open');
+        if (modeV.t !== 'sym' || (modeV.name !== 'inline' && modeV.name !== 'fullscreen')) {
+            return T('type-error', 'tui::open requires the mode inline or fullscreen', modeV);
+        }
+        const backend = await this.makeTui();
+        await backend.open(modeV.name, (event) => {
+            this.inputQueue.push(event);
+            this.wakeWaiter?.();
+        });
+        this.tui = backend;
+        this.tuiMode = modeV.name;
+        return V(TRUE);
+    }
+
+    tuiRender(viewV: Value): Answer {
+        if (this.tui === null) return T('bad-state', 'the TUI is not open');
+        let element;
+        try {
+            element = toElement(viewV);
+        } catch (e) {
+            if (e instanceof ViewError) return T('type-error', e.message, e.at);
+            throw e;
+        }
+        return this.tui.render(element).then(() => V(TRUE));
+    }
+
+    tuiSize(): ActionResult {
+        if (this.tui === null) return T('bad-state', 'the TUI is not open');
+        const [columns, rows] = this.tui.size();
+        return V(list(int(columns), int(rows)));
+    }
+
+    tuiSubscribe(addrV: Value): ActionResult {
+        if (this.tui === null) return T('bad-state', 'the TUI is not open');
+        if (addrV.t !== 'addr' || !this.mailboxes.has(addrV.id)) return T('type-error', 'tui::subscribe requires a mailbox address', addrV);
+        if (!this.tui.canSubscribe()) return T('bad-state', 'input is not a terminal');
+        this.inputAddr = addrV;
+        this.tui.setSubscribed(true);
+        return V(TRUE);
+    }
+
+    tuiUnsubscribe(): ActionResult {
+        if (this.tui === null) return T('bad-state', 'the TUI is not open');
+        this.inputAddr = null;
+        this.inputQueue = [];
+        this.tui.setSubscribed(false);
+        return V(TRUE);
+    }
+
+    async tuiClose(): Promise<ActionResult> {
+        if (this.tui === null) return T('bad-state', 'the TUI is not open');
+        await this.closeTui();
+        return V(TRUE);
+    }
+
+    private async closeTui(): Promise<void> {
+        if (this.tui === null) return;
+        const tui = this.tui;
+        this.tui = null;
+        this.inputAddr = null;
+        this.inputQueue = [];
+        await tui.close();
+        for (const line of this.heldLines) this.out(line);
+        this.heldLines = [];
     }
 }

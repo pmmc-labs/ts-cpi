@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { renderToString } from 'ink';
 import { read } from '../../src/reader.ts';
-import { toElement } from './sxml.ts';
+import { toElement } from '../../src/tui/views.ts';
 
 const [file, columns] = process.argv.slice(2);
 if (file === undefined) {

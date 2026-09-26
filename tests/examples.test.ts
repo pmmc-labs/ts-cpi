@@ -13,19 +13,19 @@ import { print } from '../src/printer.ts';
 
 const examples = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'examples');
 
-function run(...files: string[]): { output: string[]; failure: string | null } {
+async function run(...files: string[]): Promise<{ output: string[]; failure: string | null }> {
     const env = loadFiles(files.map((f) => path.join(examples, f)));
     const output: string[] = [];
-    const result = new Runtime({ out: (line) => output.push(line) }).boot(env);
+    const result = await new Runtime({ out: (line) => output.push(line), clock: 'virtual' }).boot(env);
     return { output, failure: result.ok ? null : print(result.e) };
 }
 
-test('hello.slight', () => {
-    assert.deepEqual(run('hello.slight'), { output: ['hello, world 42'], failure: null });
+test('hello.slight', async () => {
+    assert.deepEqual(await run('hello.slight'), { output: ['hello, world 42'], failure: null });
 });
 
-test('tour.slight', () => {
-    assert.deepEqual(run('tour.slight'), {
+test('tour.slight', async () => {
+    assert.deepEqual(await run('tour.slight'), {
         output: [
             'counting down',
             'sum 5050',
@@ -37,9 +37,9 @@ test('tour.slight', () => {
     });
 });
 
-test('errors.slight: a caught chain, then an uncaught error', () => {
+test('errors.slight: a caught chain, then an uncaught error', async () => {
     const file = path.join(examples, 'errors.slight');
-    assert.deepEqual(run('errors.slight'), {
+    assert.deepEqual(await run('errors.slight'), {
         output: [
             'tag bad-user cause bad-age',
             `trace ((parse-age ${file} 3 9) (load-user ${file} 7 5) (main ${file} 12 12) (main ${file} 12 12))`,
@@ -48,8 +48,8 @@ test('errors.slight: a caught chain, then an uncaught error', () => {
     });
 });
 
-test('processes.slight', () => {
-    assert.deepEqual(run('processes.slight'), {
+test('processes.slight', async () => {
+    assert.deepEqual(await run('processes.slight'), {
         output: [
             'state (ready)',
             'run1 (blocked recv)',
@@ -65,8 +65,8 @@ test('processes.slight', () => {
     });
 });
 
-test('actors/ping-pong.slight on the actors.slight system', () => {
-    assert.deepEqual(run('actors/actors.slight', 'actors/ping-pong.slight'), {
+test('actors/ping-pong.slight on the actors.slight system', async () => {
+    assert.deepEqual(await run('actors/actors.slight', 'actors/ping-pong.slight'), {
         output: [
             '[system] spawned pong',
             '[system] spawned ping',

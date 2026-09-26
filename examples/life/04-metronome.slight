@@ -1,11 +1,11 @@
 ; 04 · Metronome
 ;
-; Generations are driven by the virtual clock: one beat every 100 ms, and one
+; Generations are driven by the clock: one beat every 100 ms, and one
 ; generation per beat. Eight row "players" sit with their music (the three
 ; rows around their own) and `timer::sleep` until the next beat. When the
 ; beat comes they play (compute their next row), hand it in, and wait for
-; new music. The CPI is the conductor: it loops on `host::wait`, which jumps
-; the virtual clock straight to the next deadline, collects the rows, and
+; new music. The CPI is the conductor: it loops on `host::wait`, which waits for
+; the next deadline, collects the rows, and
 ; prints each frame with the time it was completed (`host::now`).
 ;
 ; One player drags. On beat 3 the player of row 5 oversleeps by 30 ms. The
@@ -167,7 +167,7 @@
     (let players (map (lambda (row)
                 (process::spawn mt-player (list2 row results) (environment::self) '(actor timer) #false))
             (range 0 life-height)))
-    (IO::print "[conductor]" (length players) "players, one beat every" mt-beat "ms of virtual time")
+    (IO::print "[conductor]" (length players) "players, one beat every" mt-beat "ms")
     (mt-perform players results 0 (seed-board))
     (for-each (lambda (p) (mailbox::send (process::address p) :stop)) players)
     (for-each (lambda (p) (process::run p 1000)) players)
