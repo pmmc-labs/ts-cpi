@@ -66,6 +66,11 @@ node bin/cpi.ts examples/life/lib/lists.slight examples/life/lib/life.slight exa
 node bin/cpi.ts examples/life/lib/lists.slight examples/tui/top.slight   # interactive: q quits
 ```
 
+`examples/runner/` is a Life runner: pick one of eleven engines, a board
+size, a preset and a rule, and watch it run with live stats
+(`examples/runner/run.sh`). Its README has measurements of how the TUI and the
+CPI work together.
+
 `examples/tui/life.slight` animates the Life reference run with a population
 sparkline. `examples/tui/top.slight` is a live process monitor: it schedules
 six workers round robin and lets you pause, step, select, kill and change the
