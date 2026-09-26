@@ -1,0 +1,79 @@
+; Mailboxes as memory: no processes at all. The board lives in mailboxes, one
+; per cell, used as one-bit memory:
+;
+;   a live cell   is a mailbox holding one message, its token (born g);
+;   a dead cell   is an empty mailbox.
+;
+; Reading the board is `mailbox::size`. Each mailbox has capacity 1, so the
+; runtime itself refuses to make a cell more than alive. The memory is
+; double-buffered: each generation reads bank `now` and writes bank `next`.
+; A surviving cell's token is taken from `now` and sent into `next`, so it
+; travels through the generations and the memory remembers how old every
+; live cell is; a dying cell's token is taken and dropped; a newborn's is
+; minted. Afterwards `now` is blank, and the banks swap roles.
+
+(defun mailbox-engine (config report)
+    (let board (config-board config))
+    (let now (mailbox-bank board))
+    (let next (mailbox-bank board))
+    (map2 (lambda (brow row)
+            (map2 (lambda (box alive) (when (= alive 1) (mailbox::send box (list2 :born 0)))) brow row))
+        now (board-rows board))
+    (mailbox-loop 0 (board-width board) (board-height board) (config-rule config) now next
+        (cons 0 (list3 (board-population board) 0 (if (= (board-population board) 0) #false 0)))
+        report))
+
+; A bank of one-message mailboxes, one per cell of `board`.
+(defun mailbox-bank (board)
+    (map (lambda (row) (map (lambda (c) (mailbox::create #true 1)) row)) (board-rows board)))
+
+; The board, read back out of memory.
+(defun mailbox-read (bank)
+    (map (lambda (row) (map (lambda (box) (mailbox::size box)) row)) bank))
+
+; `tally` is (moved minted dropped oldest): what the last step did to the
+; tokens, and the birth generation of the oldest live one (#false if none).
+(defun mailbox-loop (gen width height rule now next tally report)
+    (let rows (mailbox-read now))
+    (let notes
+        `(("mailboxes" ,(* 2 (* width height)))
+          ("tokens moved, minted, dropped" ,(list3 (car tally) (second tally) (third tally)))
+          ("oldest token minted in generation" ,(list-ref tally 3))))
+    (when (eq? (report gen (board-make width height rows) notes) :continue)
+        (let counts (map3 row-counts (rotate-right rows) rows (rotate-left rows)))
+        (let written
+            (fold (lambda (t q) (mailbox-write-row rule (+ gen 1) (car q) (second q) (third q) (list-ref q 3) t))
+                (cons 0 (list3 0 0 #false))
+                (map3 (lambda (n x rc) (cons n (cons x rc))) now next (zip rows counts))))
+        (mailbox-loop (+ gen 1) width height rule next now written report)))
+
+(defun mailbox-write-row (rule born nows nexts alives counts tally)
+    (if (nil? nows)
+        tally
+        (mailbox-write-row rule born (cdr nows) (cdr nexts) (cdr alives) (cdr counts)
+            (mailbox-write rule born (car nows) (car nexts) (car alives) (car counts) tally))))
+
+; Writes one cell's next state into `there`, erasing `here`. `count`
+; includes the cell itself.
+(defun mailbox-write (rule born here there alive count tally)
+    (let next (rule-next rule alive (- count alive)))
+    (cond
+        ((= next 0)
+            (when (= alive 1) (mailbox::take here))
+            (if (= alive 1) (mailbox-tally tally 0 0 1 #false) tally))
+        ((= alive 1)
+            (let token (mailbox::take here))
+            (mailbox::send there token)
+            (mailbox-tally tally 1 0 0 (second token)))
+        (#true
+            (mailbox::send there (list2 :born born))
+            (mailbox-tally tally 0 1 0 born))))
+
+(defun mailbox-tally (tally moved minted dropped birth)
+    (let oldest (list-ref tally 3))
+    `(,(+ (car tally) moved) ,(+ (second tally) minted) ,(+ (third tally) dropped)
+      ,(cond
+            ((eq? birth #false) oldest)
+            ((eq? oldest #false) birth)
+            ((< birth oldest) birth)
+            (#true oldest))))

@@ -1,0 +1,245 @@
+; Hibernation: one process per cell. A cell knows its own state, a count of
+; its live neighbors, and its eight neighbors. It spends its life blocked in
+; `actor::recv`, waiting to be told something:
+;
+;     (delta d)   a neighbor was born (+1) or died (-1)
+;     tick        work out your next state; report to the CPI if it changes
+;     commit      you changed: tell your neighbors
+;
+; Life only changes next to a change: a cell whose state and count did not
+; move will not move. So after each generation the CPI keeps awake only the
+; cells that changed and their neighbors (the ones holding fresh deltas), and
+; parks the rest with `process::park`: the continuation is set aside, the PID
+; ends, and the mailbox keeps its address and keeps collecting news. When a
+; neighbor changes, the CPI unparks the cell and it carries on from inside the
+; very `recv` it was parked in.
+;
+; A cell nothing has touched is not even spawned: its mailbox exists and
+; collects deltas, and its process is created the first time it must run.
+; The first step runs the live cells and their neighbors, which is every cell
+; that could change; under a B0 rule a lonely dead cell is born, so then it
+; runs every cell. On a big, sparse board most cells never become processes.
+;
+; A generation has two phases, so every cell computes from the old counts:
+; tick the awake cells (changed ones report to the CPI's mailbox), then tell
+; the changed ones to commit (their deltas wait in mailboxes until next time).
+;
+; The CPI finds cells without searching: an info is (row col addr box), where
+; `box` is a one-message mailbox holding the CPI's handle on the cell and a
+; stamp: (handle stamp), the handle being (awake pid), (asleep parked-data)
+; or (unborn rule alive nbrs cpi), the spawn arguments. A changed cell's
+; report carries its own info and its neighbors', so waking them is O(1) each.
+; The stamp is the generation a cell was last scheduled for, which dedupes
+; the wake list.
+
+(const hibernate-quota 5000)
+
+; ---------------------------------------------------------------------------
+; The cell process (granted only `actor`)
+; ---------------------------------------------------------------------------
+
+(defun hibernate-cell (rule me alive count nbrs cpi)
+    (let msg (actor::recv))
+    (cond
+        ((pair? msg)
+            (hibernate-cell rule me alive (+ count (second msg)) nbrs cpi))
+        ((eq? msg :tick)
+            (do
+                (let next (rule-next rule alive count))
+                (when (not (= next alive))
+                    (actor::send cpi (list3 me next nbrs)))
+                (hibernate-cell rule me next count nbrs cpi)))
+        ((eq? msg :commit)
+            (do
+                (let d (if (= alive 1) 1 -1))
+                (for-each (lambda (info) (actor::send (third info) (list2 :delta d))) nbrs)
+                (hibernate-cell rule me alive count nbrs cpi)))
+        (#true (hibernate-cell rule me alive count nbrs cpi))))
+
+; ---------------------------------------------------------------------------
+; Infos and handles
+; ---------------------------------------------------------------------------
+
+(defun hibernate-addr (info) (third info))
+(defun hibernate-box (info) (list-ref info 3))
+(defun hibernate-handle (info) (car (cell-get (hibernate-box info))))
+(defun hibernate-stamp (info) (second (cell-get (hibernate-box info))))
+(defun hibernate-pid (info) (second (hibernate-handle info)))
+
+(defun hibernate-set (info handle stamp)
+    (cell-put (hibernate-box info) (list2 handle stamp)))
+
+; Run a process until it blocks in recv again.
+(defun hibernate-settle (pid)
+    (let r (process::run pid hibernate-quota))
+    (case (car r)
+        (:quota (hibernate-settle pid))
+        (:blocked r)
+        (else (throw (make-error :hibernate-surprise "a cell stopped" r)))))
+
+(defun hibernate-poke (infos msg)
+    (for-each (lambda (info) (mailbox::send (hibernate-addr info) msg)) infos)
+    (for-each (lambda (info) (hibernate-settle (hibernate-pid info))) infos))
+
+; For each element of each row, the list (self n1 .. n8) of it and its
+; neighbors on the torus.
+(defun hibernate-triples (xs) (map3 list3 (rotate-right xs) xs (rotate-left xs)))
+
+(defun hibernate-neighborhoods (rows)
+    (let ts (map hibernate-triples rows))
+    (map3 (lambda (above row below)
+            (map3 (lambda (a r b) (cons (second r) (append a (cons (car r) (cons (third r) b)))))
+                above row below))
+        (rotate-right ts) ts (rotate-left ts)))
+
+(defun hibernate-flatten (rows) (fold append () (reverse rows)))
+
+; ---------------------------------------------------------------------------
+; The engine
+; ---------------------------------------------------------------------------
+
+(defun hibernate-engine (config report)
+    (let rule (config-rule config))
+    (let board (config-board config))
+    (let width (board-width board))
+    (let height (board-height board))
+    (let cells (* width height))
+    (let cpi (mailbox::create #true (+ cells 16)))
+    (let info-board (board-from width height
+            (lambda (r c) `(,r ,c ,(mailbox::create #true 64) ,(cell-new ())))))
+    (let hoods (hibernate-flatten (hibernate-neighborhoods (board-rows info-board))))
+    (let states (hibernate-flatten (board-rows board)))
+    ; No cell is a process yet: each box holds what it needs to become one.
+    (map2 (lambda (hood alive) (hibernate-set (car hood) `(unborn ,rule ,alive ,(cdr hood) ,cpi) -1))
+        hoods states)
+    ; Counts start at 0: the live cells are born and announce themselves.
+    (let live-hoods (map car (filter (lambda (p) (= (second p) 1)) (zip hoods states))))
+    (let live (map car live-hoods))
+    (hibernate-wake live 0)
+    (hibernate-poke live :commit)
+    ; The first step runs every cell whose state or count is not what a
+    ; cell that never runs would have: the live cells and their neighbors.
+    ; Under a B0 rule even a lonely dead cell is born, so then it is every cell.
+    (let candidates
+        (if (= (rule-next rule 0 0) 1)
+            (hibernate-mark (map car hoods) 0 ())
+            (fold (lambda (acc hood) (hibernate-mark hood 0 acc)) () live-hoods)))
+    (let born (+ (length live) (hibernate-wake candidates 0)))
+    (hibernate-loop cells cpi report 0 board candidates
+        (hibernate-notes cells (length candidates) (- cells born) 0 0 0 born 0)
+        (list3 born 0 (- cells born))))
+
+; `awake` are the infos scheduled for this step: all awake, all stamped
+; `gen`. `stats` is (created ticked unborn): processes created so far (each
+; unpark makes a new PID), cell ticks so far, and cells never spawned.
+(defun hibernate-loop (cells cpi report gen board awake notes stats)
+    (if (eq? (report gen board notes) :continue)
+        (hibernate-step cells cpi report gen board awake stats)
+        (for-each (lambda (info) (process::kill (hibernate-pid info) :stop)) awake)))
+
+(defun hibernate-step (cells cpi report gen board awake stats)
+    ; Phase 1: tick. Phase 2: the changed cells commit.
+    (hibernate-poke awake :tick)
+    (let reports (hibernate-drain cpi ()))
+    (hibernate-poke (map car reports) :commit)
+    ; Next step: the changed cells and their neighbors.
+    (let next (+ gen 1))
+    (let candidates (fold (lambda (acc r) (hibernate-mark (cons (car r) (third r)) next acc)) () reports))
+    (let parked (hibernate-park-unmarked awake next 0))
+    (let unborn-before (length (filter hibernate-unborn? candidates)))
+    (let woke (hibernate-wake candidates 0))
+    (let created (+ (car stats) woke))
+    (let ticked (+ (second stats) (length awake)))
+    (let unborn (- (third stats) unborn-before))
+    (hibernate-loop cells cpi report next
+        (board-make (board-width board) (board-height board) (hibernate-apply (board-rows board) reports))
+        candidates
+        (hibernate-notes cells (length candidates) unborn (length reports) woke parked created
+            (hibernate-share ticked (* cells next)))
+        (list3 created ticked unborn)))
+
+(defun hibernate-notes (cells awake unborn changed woke parked created ticks)
+    `(("awake" ,awake)
+      ("hibernating" ,(- cells (+ awake unborn)))
+      ("never spawned" ,unborn)
+      ("changed / woke / parked" ,(hibernate-slashed changed woke parked))
+      ("processes created" ,created)
+      ("cell ticks so far" ,ticks)))
+
+(defun hibernate-slashed (a b c)
+    (hibernate-text `(,a " / " ,b " / " ,c)))
+
+(defun hibernate-share (part whole)
+    (hibernate-text `(,part " of " ,whole " (" ,(/ (* 100 part) whole) "%)")))
+
+; string-append takes two arguments; this takes a list of values.
+(defun hibernate-text (xs)
+    (fold (lambda (s x) (string-append s (if (string? x) x (value->string x)))) "" xs))
+
+; Adds each unstamped info to `acc`, stamping it.
+(defun hibernate-mark (infos stamp acc)
+    (cond
+        ((nil? infos) acc)
+        ((= (hibernate-stamp (car infos)) stamp) (hibernate-mark (cdr infos) stamp acc))
+        (#true
+            (do
+                (let info (car infos))
+                (hibernate-set info (hibernate-handle info) stamp)
+                (hibernate-mark (cdr infos) stamp (cons info acc))))))
+
+; Parks the awake infos not stamped `stamp`; returns how many.
+(defun hibernate-park-unmarked (infos stamp n)
+    (cond
+        ((nil? infos) n)
+        ((= (hibernate-stamp (car infos)) stamp) (hibernate-park-unmarked (cdr infos) stamp n))
+        (#true
+            (do
+                (let info (car infos))
+                (hibernate-set info (list2 :asleep (process::park (hibernate-pid info))) (hibernate-stamp info))
+                (hibernate-park-unmarked (cdr infos) stamp (+ n 1))))))
+
+(defun hibernate-unborn? (info) (eq? (car (hibernate-handle info)) :unborn))
+
+; Makes every info awake: unparks the sleeping, spawns the unborn. Returns
+; how many processes it created.
+(defun hibernate-wake (infos n)
+    (if (nil? infos)
+        n
+        (do
+            (let info (car infos))
+            (let handle (hibernate-handle info))
+            (case (car handle)
+                (:awake (hibernate-wake (cdr infos) n))
+                (:asleep
+                    (do
+                        (hibernate-set info (list2 :awake (process::unpark (second handle) (environment::self)))
+                            (hibernate-stamp info))
+                        (hibernate-wake (cdr infos) (+ n 1))))
+                (else
+                    (do
+                        ; (unborn rule alive nbrs cpi)
+                        (let pid (process::spawn hibernate-cell
+                                `(,(second handle) ,info ,(third handle) 0 ,(list-ref handle 3) ,(list-ref handle 4))
+                                (environment::self) '(actor) (hibernate-addr info)))
+                        (hibernate-set info (list2 :awake pid) (hibernate-stamp info))
+                        (hibernate-wake (cdr infos) (+ n 1))))))))
+
+(defun hibernate-drain (addr acc)
+    (let m (mailbox::take addr))
+    (if (eq? m #false)
+        acc
+        (hibernate-drain addr (cons m acc))))
+
+; Applies reports (info next nbrs) to the rows; untouched rows are shared.
+(defun hibernate-apply (rows reports)
+    (if (nil? reports)
+        rows
+        (map2 (lambda (row r)
+                (let here (filter (lambda (rep) (= (car (car rep)) r)) reports))
+                (if (nil? here)
+                    row
+                    (map2 (lambda (alive c)
+                            (let hit (filter (lambda (rep) (= (second (car rep)) c)) here))
+                            (if (nil? hit) alive (second (car hit))))
+                        row (range 0 (length row)))))
+            rows (range 0 (length rows)))))

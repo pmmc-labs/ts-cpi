@@ -1,0 +1,255 @@
+; Hostile scheduler: the CPI plays against its own workers. Four worker
+; processes share ONE job queue (they are all spawned on the same mailbox),
+; so whichever of them happens to be running takes the next job. A job is
+; "compute cell i of generation g from this neighborhood"; each answer goes
+; to a results mailbox that the CPI drains.
+;
+; The scheduler is an adversary. Every time slice it rolls deterministic dice
+; (a pure hash of the generation and slice number, so every run is the same
+; run) to pick which ready worker runs and for how long: from a tenth of a
+; job to more than two jobs, sized by timing one job when the run starts. So
+; almost every slice ends mid-job. It also cheats:
+;
+;   - it posts the jobs in a shuffled order (a stride coprime with the cell
+;     count, from a random offset);
+;   - it forges a stale job from the previous generation, and posts one
+;     current job twice;
+;   - it picks a victim worker each generation and runs it only when nobody
+;     else is ready;
+;   - it declares a generation over the moment every cell has an answer, even
+;     with workers mid-job, so late answers leak into the next generation.
+;
+; None of it changes the boards, because correctness lives in the protocol,
+; not in the schedule: each job carries its own inputs (the cell and its
+; eight neighbors, immutable values), and every answer is tagged
+; (generation cell value worker). The collector keeps the first answer for
+; each cell of the current generation and drops stale and duplicate ones.
+
+(const hostile-worker-count 4)
+
+(defun hostile-engine (config report)
+    (let board (config-board config))
+    (let n (* (board-width board) (board-height board)))
+    (let rule (config-rule config))
+    (let jobs (mailbox::create #true (+ (* 2 n) 16)))
+    (let results (mailbox::create #true 1000))
+    (let cost (hostile-job-cost rule))
+    (let workers (map (lambda (id)
+                     (list2 id (process::spawn hostile-worker (list3 id rule results) (environment::self) '(actor) jobs)))
+                    (range 0 hostile-worker-count)))
+    (let state `(,jobs ,results ,workers ,cost ,(hostile-depth n 0)))
+    (hostile-loop state 0 board board
+        `(("workers" "4 on one shared job queue")
+          ("one job costs" ,(hostile-text `(,cost " ticks")))
+          ("slice sizes" ,(hostile-text `(,(hostile-quota-min cost) " to "
+                                     ,(+ (hostile-quota-min cost) (hostile-quota-span cost)) " ticks"))))
+        report))
+
+(defun hostile-loop (state gen board prev notes report)
+    (if (eq? (report gen board notes) :continue)
+        (do
+            (let out (hostile-generation state (+ gen 1) board prev))
+            (hostile-loop state (+ gen 1) (car out) board (second out) report))
+        (for-each (lambda (w) (process::kill (second w) :stop)) (third state))))
+
+; ---------------------------------------------------------------------------
+; Inside a worker (granted only actor)
+; ---------------------------------------------------------------------------
+
+; A job is (gen index center neighbors). The answer is (gen index value id).
+(defun hostile-worker (id rule results)
+    (let job (actor::recv))
+    (let value (rule-next rule (third job) (sum (list-ref job 3))))
+    (actor::send results `(,(car job) ,(second job) ,value ,id))
+    (hostile-worker id rule results))
+
+; ---------------------------------------------------------------------------
+; The dice: a pure hash of (gen slice salt), so the chaos is reproducible.
+; An LCG step mod 2^31 never overflows 64 bits, nor does squaring below 2^31.
+; ---------------------------------------------------------------------------
+
+(defun hostile-lcg (x) (% (+ (* x 1103515245) 12345) 2147483648))
+
+; Squaring makes the mix nonlinear, so nearby inputs give unrelated dice.
+(defun hostile-mix (x) (hostile-lcg (% (+ (/ (* x x) 65536) x) 2147483648)))
+
+(defun hostile-rand (gen slice salt n)
+    (% (/ (hostile-mix (+ salt (hostile-mix (+ slice (hostile-mix (+ gen 977)))))) 65536) n))
+
+(defun hostile-gcd (a b) (if (= b 0) a (hostile-gcd b (% a b))))
+
+; ---------------------------------------------------------------------------
+; Slice sizes, from the measured cost of one job
+; ---------------------------------------------------------------------------
+
+; Times one job with a stopwatch of one-tick runs, on a spare worker.
+(defun hostile-job-cost (rule)
+    (let q (mailbox::create #true 4))
+    (let sink (mailbox::create #true 4))
+    (let p (process::spawn hostile-worker (list3 9 rule sink) (environment::self) '(actor) q))
+    (process::run p 1000)
+    (mailbox::send q '(0 0 1 (1 1 0 0 1 0 0 0)))
+    (let ticks (hostile-stopwatch p 1))
+    (process::kill p :timed)
+    ticks)
+
+(defun hostile-stopwatch (p ticks)
+    (if (eq? (car (process::run p 1)) :blocked)
+        ticks
+        (hostile-stopwatch p (+ ticks 1))))
+
+(defun hostile-quota-min (cost) (+ 1 (/ cost 10)))
+(defun hostile-quota-span (cost) (* cost 2))
+
+; ---------------------------------------------------------------------------
+; A persistent array: a binary trie of depth d over the index bits
+; ---------------------------------------------------------------------------
+
+(defun hostile-depth (n d) (if (<= (hostile-pow2 d) n) (hostile-depth n (+ d 1)) d))
+(defun hostile-pow2 (d) (if (= d 0) 1 (* 2 (hostile-pow2 (- d 1)))))
+
+(defun hostile-trie-empty (d)
+    (if (= d 0)
+        #false
+        (do
+            (let t (hostile-trie-empty (- d 1)))
+            (cons t t))))
+
+(defun hostile-trie-ref (t d i)
+    (cond
+        ((= d 0) t)
+        ((= (% i 2) 0) (hostile-trie-ref (car t) (- d 1) (/ i 2)))
+        (#true (hostile-trie-ref (cdr t) (- d 1) (/ i 2)))))
+
+(defun hostile-trie-set (t d i v)
+    (cond
+        ((= d 0) v)
+        ((= (% i 2) 0) (cons (hostile-trie-set (car t) (- d 1) (/ i 2) v) (cdr t)))
+        (#true (cons (car t) (hostile-trie-set (cdr t) (- d 1) (/ i 2) v)))))
+
+; ---------------------------------------------------------------------------
+; Jobs
+; ---------------------------------------------------------------------------
+
+; Every cell's (center neighbors), row by row, by a sweep over the rows.
+(defun hostile-row-jobs (above row below)
+    (map2 list2 row
+        (fold (lambda (acc xs) (map2 cons xs acc))
+            (map (lambda (x) ()) row)
+            `(,(rotate-right above) ,above ,(rotate-left above)
+              ,(rotate-right row) ,(rotate-left row)
+              ,(rotate-right below) ,below ,(rotate-left below)))))
+
+; A trie from cell index to (center neighbors).
+(defun hostile-job-trie (board d)
+    (let rows (board-rows board))
+    (car (fold (lambda (acc job) (cons (hostile-trie-set (car acc) d (cdr acc) job) (+ (cdr acc) 1)))
+             (cons (hostile-trie-empty d) 0)
+             (fold (lambda (acc row) (append row acc)) ()
+                 (reverse (map3 hostile-row-jobs (rotate-right rows) rows (rotate-left rows)))))))
+
+(defun hostile-post (jobs gen index job)
+    (mailbox::send jobs (cons gen (cons index job))))
+
+; A stride coprime with n, so the order visits every cell once.
+(defun hostile-stride (n s)
+    (if (= (hostile-gcd s n) 1) s (hostile-stride n (+ s 1))))
+
+; Posts a forged job from the previous generation, every real job in
+; shuffled order, and a duplicate of the first. Returns the first index.
+(defun hostile-post-all (state gen board prev)
+    (let jobs (car state))
+    (let d (list-ref state 4))
+    (let w (board-width board))
+    (let n (* w (board-height board)))
+    (let stride (hostile-stride n (+ 1 (hostile-rand gen 0 11 n))))
+    (let offset (hostile-rand gen 0 12 n))
+    (let trie (hostile-job-trie board d))
+    (let forged (hostile-rand gen 0 13 n))
+    (let fr (/ forged w))
+    (let fc (% forged w))
+    (hostile-post jobs (- gen 1) forged
+        (list2 (board-cell prev fr fc)
+            (map (lambda (p) (board-cell prev (car p) (second p))) (board-neighbors prev fr fc))))
+    (for-each (lambda (i)
+            (let index (% (+ offset (* i stride)) n))
+            (hostile-post jobs gen index (hostile-trie-ref trie d index)))
+        (range 0 n))
+    (hostile-post jobs gen offset (hostile-trie-ref trie d offset))
+    offset)
+
+; ---------------------------------------------------------------------------
+; The collector and the adversarial schedule
+; ---------------------------------------------------------------------------
+
+; The tally is (got count stale duplicates per-worker): `got` a trie from
+; cell index to its value, #false while unanswered.
+(defun hostile-drain (state gen tally)
+    (let msg (mailbox::take (second state)))
+    (let got (car tally))
+    (let d (list-ref state 4))
+    (cond
+        ((eq? msg #false) tally)
+        ((not (= (car msg) gen))
+            (hostile-drain state gen (hostile-tally-set tally 2 (+ 1 (list-ref tally 2)))))
+        ((not (eq? (hostile-trie-ref got d (second msg)) #false))
+            (hostile-drain state gen (hostile-tally-set tally 3 (+ 1 (list-ref tally 3)))))
+        (#true
+            (hostile-drain state gen
+                `(,(hostile-trie-set got d (second msg) (third msg))
+                  ,(+ 1 (second tally))
+                  ,(third tally)
+                  ,(list-ref tally 3)
+                  ,(hostile-bump (list-ref tally 4) (list-ref msg 3)))))))
+
+(defun hostile-tally-set (tally k v)
+    (if (= k 0) (cons v (cdr tally)) (cons (car tally) (hostile-tally-set (cdr tally) (- k 1) v))))
+
+(defun hostile-bump (counts i) (hostile-tally-set counts i (+ 1 (list-ref counts i))))
+
+(defun hostile-ready? (w)
+    (eq? (car (process::state (second w))) :ready))
+
+; One slice after another until every cell has an answer. Returns
+; (tally slices preempted).
+(defun hostile-schedule (state gen n victim tally slices preempted)
+    (let t (hostile-drain state gen tally))
+    (if (= (second t) n)
+        (list3 t slices preempted)
+        (do
+            (let ready (filter hostile-ready? (third state)))
+            (when (nil? ready)
+                (throw (make-error :deadlock "no worker is ready and answers are missing" gen)))
+            (let others (filter (lambda (w) (not (= (car w) victim))) ready))
+            (let pool (if (nil? others) ready others))
+            (let w (list-ref pool (hostile-rand gen slices 1 (length pool))))
+            (let cost (list-ref state 3))
+            (let quota (+ (hostile-quota-min cost) (hostile-rand gen slices 2 (hostile-quota-span cost))))
+            (let r (process::run (second w) quota))
+            (hostile-schedule state gen n victim t (+ slices 1)
+                (if (eq? (car r) :quota) (+ preempted 1) preempted)))))
+
+; Computes generation `gen` from `board`. Returns (next-board notes).
+(defun hostile-generation (state gen board prev)
+    (let d (list-ref state 4))
+    (let w (board-width board))
+    (let h (board-height board))
+    (let n (* w h))
+    (let first (hostile-post-all state gen board prev))
+    (let victim (hostile-rand gen 0 14 hostile-worker-count))
+    (let out (hostile-schedule state gen n victim
+                 `(,(hostile-trie-empty d) 0 0 0 ,(map (lambda (i) 0) (range 0 hostile-worker-count)))
+                 0 0))
+    (let tally (car out))
+    (let got (car tally))
+    (list2
+        (board-from w h (lambda (r c) (hostile-trie-ref got d (+ (* r w) c))))
+        `(("victim of the week" ,(hostile-text `("worker " ,victim)))
+          ("jobs posted" ,(hostile-text `(,(+ n 2) ": shuffled, a forged one, cell " ,first " twice")))
+          ("slices" ,(hostile-text `(,(second out) ", " ,(third out) " ended mid-job")))
+          ("answers dropped" ,(hostile-text `(,(third tally) " stale, " ,(list-ref tally 3) " duplicate")))
+          ("cells per worker" ,(list-ref tally 4)))))
+
+; The parts of a note, as one string.
+(defun hostile-text (parts)
+    (fold (lambda (s x) (string-append s (value->string x))) "" parts))

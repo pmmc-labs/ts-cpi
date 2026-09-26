@@ -1,0 +1,134 @@
+; Literal death: a live cell is a running process, a dead cell is no process
+; at all. The board exists only in the process table: the registry maps each
+; position to the PID last spawned there, and whether that cell is alive is
+; asked of `process::state`. A PID whose process has ended is a ghost.
+;
+; Each generation the CPI plays the part of fate. It reads the board from the
+; process table and decides for the whole board at once who dies and who is
+; born. A dying cell is killed with `process::kill` and a reason saying why;
+; a newborn is a fresh `process::spawn`, registered in place of the ghost.
+; An undertaker mailbox watches every cell, and the deaths shown in the notes
+; are counted from the terminated signals it receives, not from the CPI's
+; own decisions.
+
+(defun death-engine (config report)
+    (let board (config-board config))
+    (let rule (config-rule config))
+    (let undertaker (mailbox::create #true (+ 1 (* (board-width board) (board-height board)))))
+    (let registry
+        (map (lambda (row) (map (lambda (alive) (if (= alive 1) (death-spawn undertaker) #false)) row))
+            (board-rows board)))
+    (let born (board-population board))
+    (death-loop 0 (board-width board) (board-height board) rule (death-survival rule) registry undertaker
+        born () born report))
+
+; A cell does nothing but live: it waits for a message that never comes.
+(defun death-cell ()
+    (actor::recv)
+    (death-cell))
+
+; A newborn: spawned, watched by the undertaker, and run until it waits.
+(defun death-spawn (undertaker)
+    (let p (process::spawn death-cell () (environment::self) '(actor) #false))
+    (process::watch p undertaker)
+    (process::run p 100)
+    p)
+
+(defun death-alive? (p)
+    (and (pid? p) (not (eq? (car (process::state p)) :ended))))
+
+; The board, read from the process table.
+(defun death-read (registry)
+    (map (lambda (row) (map (lambda (p) (if (death-alive? p) 1 0)) row)) registry))
+
+; `births` and `deaths` are what the step to this generation did: deaths as
+; ((reason count) ...) from the undertaker. `spawned` counts every process
+; the engine ever spawned.
+(defun death-loop (gen width height rule survival registry undertaker births deaths spawned report)
+    (let rows (death-read registry))
+    (let notes
+        `(("living processes" ,(fold (lambda (n row) (+ n (sum row))) 0 rows))
+          ("births (spawns)" ,births)
+          ("deaths (process::kill)" ,(death-describe deaths))
+          ("processes ever spawned" ,spawned)))
+    (if (eq? (report gen (board-make width height rows) notes) :continue)
+        (do
+            (let counts (map3 row-counts (rotate-right rows) rows (rotate-left rows)))
+            (let fates
+                (map2 (lambda (arow crow)
+                        (map2 (lambda (alive count) (death-fate rule survival alive (- count alive))) arow crow))
+                    rows counts))
+            (let next
+                (map2 (lambda (prow frow)
+                        (map2 (lambda (p fate) (death-act p fate undertaker)) prow frow))
+                    registry fates))
+            (let born (fold (lambda (n row) (+ n (length (filter (lambda (f) (eq? f :born)) row)))) 0 fates))
+            (death-loop (+ gen 1) width height rule survival next undertaker
+                born (death-obituaries undertaker ()) (+ spawned born) report))
+        (death-stop registry)))
+
+; What fate has in store for one cell: :born, :stays, :empty, or the reason
+; it dies.
+(defun death-fate (rule survival alive n)
+    (let next (rule-next rule alive n))
+    (cond
+        ((= alive 0) (if (= next 1) :born :empty))
+        ((= next 1) :stays)
+        (#true (death-reason survival n))))
+
+; DECISION: the reason for a death under any rule compares the neighbor count
+; with the counts the rule lets a cell survive with: below all of them is
+; loneliness, above all of them overcrowding, in a gap between them
+; misfortune, and a rule with no survival counts (Seeds) has cells die of
+; exhaustion after one generation.
+(defun death-reason (survival n)
+    (cond
+        ((nil? survival) :exhaustion)
+        ((< n (car survival)) :loneliness)
+        ((> n (second survival)) :overcrowding)
+        (#true :misfortune)))
+
+; (fewest most) neighbor counts a live cell survives with, or () if none.
+(defun death-survival (rule)
+    (let counts (filter (lambda (n) (= (rule-next rule 1 n) 1)) (range 0 9)))
+    (if (nil? counts)
+        ()
+        (list2 (car counts) (car (reverse counts)))))
+
+(defun death-act (p fate undertaker)
+    (cond
+        ((eq? fate :born) (death-spawn undertaker))
+        ((or (eq? fate :stays) (eq? fate :empty)) p)
+        (#true
+            (process::kill p fate)
+            p)))
+
+; Drains the undertaker: each (signal terminated <pid> (killed <reason>)) is
+; one death. Returns ((reason count) ...).
+(defun death-obituaries (undertaker tally)
+    (let signal (mailbox::take undertaker))
+    (if (eq? signal #false)
+        tally
+        (death-obituaries undertaker (death-count tally (second (list-ref signal 3))))))
+
+; "loneliness 9, overcrowding 52", or "none".
+(defun death-describe (tally)
+    (if (nil? tally)
+        "none"
+        (fold (lambda (text entry)
+                (string-append text
+                    (string-append ", " (string-append (value->string (car entry)) (string-append " " (value->string (second entry)))))))
+            (string-append (value->string (car (car tally))) (string-append " " (value->string (second (car tally)))))
+            (cdr tally))))
+
+(defun death-count (tally reason)
+    (cond
+        ((nil? tally) (cons (list2 reason 1) ()))
+        ((eq? (car (car tally)) reason)
+            (cons (list2 reason (+ 1 (second (car tally)))) (cdr tally)))
+        (#true (cons (car tally) (death-count (cdr tally) reason)))))
+
+(defun death-stop (registry)
+    (for-each (lambda (row)
+            (for-each (lambda (p) (when (death-alive? p) (process::kill p :end-of-the-world))) row))
+        registry))

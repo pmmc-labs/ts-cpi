@@ -1,0 +1,149 @@
+; Trapped world: the control plane as the laws of physics. Every cell is a
+; process that believes it lives in a message-passing world: each generation
+; it tells its eight neighbors its state (`actor::send`), listens to eight
+; answers (`actor::recv`), applies the rule, and goes round again. It knows
+; its neighbors' mailbox addresses and nothing else.
+;
+; None of those messages is ever delivered. The engine calls
+; `(host::set-traps '(send recv))`, so every send and recv stops the cell
+; with a trap and the CPI, which is the world, carries the effect out:
+;
+;   send   the world notes the announced state in the new board, and answers
+;          #true, what a real send returns;
+;   recv   the world answers with a neighbor's state from the old board, a
+;          message nobody sent.
+;
+; Between generations every cell is frozen inside a trapped recv with no
+; answer yet. The traps are global to the image, so the engine clears them
+; when it stops.
+
+; Ticks per run. A cell traps long before this runs out.
+(const trapped-quota 10000)
+
+; ---------------------------------------------------------------------------
+; Inside a cell (granted actor only)
+; ---------------------------------------------------------------------------
+
+(defun trapped-cell (rule neighbors state)
+    (for-each (lambda (n) (actor::send n (list2 :state state))) neighbors)
+    (trapped-cell rule neighbors (rule-next rule state (trapped-listen 8 0))))
+
+; Receives `k` messages (state s) and sums the states.
+(defun trapped-listen (k total)
+    (if (= k 0)
+        total
+        (trapped-listen (- k 1) (+ total (second (actor::recv))))))
+
+; ---------------------------------------------------------------------------
+; The world (the CPI)
+; ---------------------------------------------------------------------------
+
+(defun trapped-engine (config report)
+    (host::set-traps '(send recv))
+    (let rule (config-rule config))
+    (let board (config-board config))
+    (let width (board-width board))
+    (let height (board-height board))
+    ; Every cell gets a real mailbox, so its neighbors can name it. Nothing
+    ; is ever put in one.
+    (let boxes (map (lambda (row) (map (lambda (c) (mailbox::create #true 8)) row)) (board-rows board)))
+    (let pids
+        (map2 (lambda (brow nrow)
+                (map2 (lambda (box pair)
+                        (process::spawn trapped-cell (list3 rule (cdr pair) (car pair))
+                            (environment::self) '(actor) box))
+                    brow nrow))
+            boxes
+            (trapped-map-grid cons (board-rows board) (trapped-neighbor-grid boxes))))
+    ; The traps are global: if anything fails, clear them before passing
+    ; the error on, or every other engine's sends and recvs would trap too.
+    (catch
+        (do
+            ; Generation 0: each cell announces its seed state and stops to
+            ; listen. The world reads the first board from what they said.
+            (let results (trapped-map-grid (lambda (pid _) (trapped-drive pid () #false 0)) pids pids))
+            (trapped-loop 0 width height pids boxes (trapped-said results) (trapped-traps results) report))
+        e
+        (do
+            (trapped-stop pids)
+            (throw (wrap-error e :trapped-failed "the trapped world failed" ())))))
+
+(defun trapped-loop (gen width height pids boxes rows effects report)
+    (let notes
+        `(("processes" ,(* width height))
+          ("effects trapped this generation" ,effects)
+          ("messages in real mailboxes" ,(trapped-mail boxes))))
+    (if (eq? (report gen (board-make width height rows) notes) :continue)
+        (do
+            (let results
+                (trapped-map-grid (lambda (pid states) (trapped-step pid states))
+                    pids (trapped-neighbor-grid rows)))
+            (trapped-loop (+ gen 1) width height pids boxes (trapped-said results) (trapped-traps results) report))
+        (trapped-stop pids)))
+
+(defun trapped-stop (pids)
+    (for-each (lambda (row) (for-each (lambda (p) (process::kill p :end-of-the-world)) row)) pids)
+    (host::set-traps '()))
+
+; The messages a cell can hear: a neighbor's state, 0 or 1.
+(const trapped-said-0 '(state 0))
+(const trapped-said-1 '(state 1))
+
+(defun trapped-message (s) (if (= s 1) trapped-said-1 trapped-said-0))
+
+; One generation for one cell, given its neighbors' old states. The cell is
+; frozen in the recv where the last generation left it, so the first answer
+; is a resume, not a run.
+(defun trapped-step (pid states)
+    (process::resume pid (trapped-message (car states)))
+    (trapped-drive pid (map trapped-message (cdr states)) #false 1))
+
+; Runs a cell until it asks for news the world has no answer for yet.
+; `answers` are the messages still owed to it this generation. Returns
+; (said traps): the state it announced, and how many effects the world
+; carried out for it.
+(defun trapped-drive (pid answers said traps)
+    (let r (process::run pid trapped-quota))
+    (case (car r)
+        (:quota (trapped-drive pid answers said traps))
+        (:trap
+            (cond
+                ((eq? (second r) :send)
+                    (process::resume pid #true)
+                    (trapped-drive pid answers (second (second (third r))) (+ traps 1)))
+                ((nil? answers) (list2 said traps))
+                (#true
+                    (process::resume pid (car answers))
+                    (trapped-drive pid (cdr answers) said (+ traps 1)))))
+        (else (throw (make-error :trapped-escaped "a cell left the world" r)))))
+
+(defun trapped-said (results)
+    (map (lambda (row) (map car row)) results))
+
+(defun trapped-traps (results)
+    (fold (lambda (n row) (fold (lambda (m r) (+ m (second r))) n row)) 0 results))
+
+(defun trapped-mail (boxes)
+    (fold (lambda (n row) (fold (lambda (m b) (+ m (mailbox::size b))) n row)) 0 boxes))
+
+; ---------------------------------------------------------------------------
+; Grids: lists of rows, on a torus
+; ---------------------------------------------------------------------------
+
+(defun trapped-map-grid (f xs ys)
+    (map2 (lambda (xrow yrow) (map2 f xrow yrow)) xs ys))
+
+; For each cell, the list of its eight neighbors' values, in a row sweep.
+(defun trapped-neighbor-grid (rows)
+    (map3 trapped-neighbor-row (rotate-right rows) rows (rotate-left rows)))
+
+(defun trapped-neighbor-row (above row below)
+    (trapped-transpose
+        `(,(rotate-right above) ,above ,(rotate-left above)
+          ,(rotate-right row) ,(rotate-left row)
+          ,(rotate-right below) ,below ,(rotate-left below))))
+
+(defun trapped-transpose (rows)
+    (if (nil? (car rows))
+        ()
+        (cons (map car rows) (trapped-transpose (map cdr rows)))))

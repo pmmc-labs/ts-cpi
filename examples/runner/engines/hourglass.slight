@@ -1,0 +1,125 @@
+; Hourglass: nobody ever counts the neighbors. Every cell has an hourglass, a
+; process that is handed its eight neighbors' states and pours one grain of
+; sand for each live one. It computes nothing and answers nothing; the only
+; thing it produces is *duration*: more live neighbors, more evaluator ticks
+; before it runs dry and blocks, waiting to be turned over again.
+;
+; The CPI reads that duration with the quota of `process::run`, used as a
+; measuring instrument rather than a scheduling knob:
+;
+; 1. Calibration. Tick costs are implementation-defined, so the CPI first
+;    times a spare hourglass with 0 to 8 grains using a stopwatch of
+;    one-tick runs. That gives nine tick marks T0 < T1 < ... < T8.
+;
+; 2. Reading. Each generation the CPI turns every hourglass over (sends it
+;    the neighbor states) and runs it in slices that end exactly at T0, T1,
+;    ... The slice it runs dry in (`(blocked recv)` instead of `(quota)`) is
+;    the neighbor count, exactly 0 to 8, so any rule can use it.
+;
+; The hourglasses live for the whole run; only the sand changes.
+
+(defun hourglass-engine (config report)
+    (let board (config-board config))
+    (let marks (hourglass-calibrate))
+    (let glasses (map (lambda (row) (map (lambda (cell) (hourglass-new)) row)) (board-rows board)))
+    (let base `(("hourglasses" ,(* (board-width board) (board-height board)))
+                ("tick marks T0..T8" ,(value->string marks))))
+    (hourglass-loop (config-rule config) marks glasses base 0 board base report))
+
+(defun hourglass-loop (rule marks glasses base gen board notes report)
+    (if (eq? (report gen board notes) :continue)
+        (do
+            (let counts (hourglass-read-board marks glasses board))
+            (let next (board-make (board-width board) (board-height board)
+                          (map2 (lambda (row crow) (map2 (lambda (alive n) (rule-next rule alive n)) row crow))
+                              (board-rows board) counts)))
+            (hourglass-loop rule marks glasses base (+ gen 1) next (hourglass-notes base marks counts) report))
+        (for-each (lambda (row) (for-each (lambda (p) (process::kill p :stop)) row)) glasses)))
+
+; ---------------------------------------------------------------------------
+; Inside an hourglass (granted only actor, to wait for its sand)
+; ---------------------------------------------------------------------------
+
+(defun hourglass-glass ()
+    (hourglass-pour (actor::recv))
+    (hourglass-glass))
+
+; One grain per live neighbor: a loop whose running time depends on the data.
+(defun hourglass-pour (states)
+    (if (nil? states)
+        :empty
+        (do
+            (hourglass-grain (car states))
+            (hourglass-pour (cdr states)))))
+
+(defun hourglass-grain (n)
+    (if (= n 0)
+        ()
+        (hourglass-grain (- n 1))))
+
+; A new hourglass, run until it waits for its first sand.
+(defun hourglass-new ()
+    (let p (process::spawn hourglass-glass () (environment::self) '(actor) #false))
+    (process::run p 1000)
+    p)
+
+(defun hourglass-turn (p states)
+    (mailbox::send (process::address p) states))
+
+; ---------------------------------------------------------------------------
+; Calibration: a stopwatch made of one-tick runs
+; ---------------------------------------------------------------------------
+
+(defun hourglass-stopwatch (p ticks)
+    (if (eq? (car (process::run p 1)) :blocked)
+        ticks
+        (hourglass-stopwatch p (+ ticks 1))))
+
+; The tick marks T0..T8: when a glass with k grains runs dry.
+(defun hourglass-calibrate ()
+    (let p (hourglass-new))
+    (let marks (map (lambda (k)
+                    (hourglass-turn p (map (lambda (i) (if (< i k) 1 0)) (range 0 8)))
+                    (hourglass-stopwatch p 1))
+                   (range 0 9)))
+    (process::kill p :calibrated)
+    marks)
+
+; ---------------------------------------------------------------------------
+; Reading the glasses
+; ---------------------------------------------------------------------------
+
+; Runs a turned glass slice by slice, each slice ending at the next mark.
+; `spent` is the ticks already given, `k` the mark the slice ends at.
+(defun hourglass-read (p marks spent k)
+    (when (nil? marks)
+        (throw (make-error :bad-calibration "an hourglass poured past T8" p)))
+    (if (eq? (car (process::run p (- (car marks) spent))) :blocked)
+        k
+        (hourglass-read p (cdr marks) (car marks) (+ k 1))))
+
+; The eight neighbor states of every cell of `row`, by a sweep over the rows
+; around it (the order does not matter to the sand).
+(defun hourglass-row-states (above row below)
+    (fold (lambda (acc xs) (map2 cons xs acc))
+        (map (lambda (x) ()) row)
+        `(,(rotate-right above) ,above ,(rotate-left above)
+          ,(rotate-right row) ,(rotate-left row)
+          ,(rotate-right below) ,below ,(rotate-left below))))
+
+; The neighbor count of every cell, as rows, read from the hourglasses.
+(defun hourglass-read-board (marks glasses board)
+    (let rows (board-rows board))
+    (map2 (lambda (grow states)
+              (map2 (lambda (p s)
+                        (hourglass-turn p s)
+                        (hourglass-read p marks 0 0))
+                  grow states))
+        glasses
+        (map3 hourglass-row-states (rotate-right rows) rows (rotate-left rows))))
+
+(defun hourglass-notes (base marks counts)
+    (let flat (fold (lambda (acc row) (append row acc)) () counts))
+    (append base
+        `(("ran dry at T0..T8" ,(value->string (map (lambda (k) (length (filter (lambda (n) (= n k)) flat))) (range 0 9))))
+          ("ticks poured" ,(fold (lambda (t n) (+ t (list-ref marks n))) 0 flat)))))

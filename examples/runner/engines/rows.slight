@@ -1,0 +1,129 @@
+; Row workers, bulk-synchronous: one worker process per row, and the CPI as
+; the barrier. Each generation is a superstep of three phases:
+;
+;   1. scatter  the CPI sends every worker (gen above own below), the three
+;               rows it needs, with `mailbox::send`;
+;   2. compute  the CPI runs the workers round robin, in a different order
+;               each superstep and with uneven quotas, so they interleave
+;               and finish in an order nobody planned;
+;   3. barrier  the CPI drains one shared result mailbox, which nobody
+;               receives on, with `mailbox::take` until it holds a new row
+;               from every worker.
+;
+; Nothing crosses the barrier early: a worker can only start generation g+1
+; once the CPI has seen every row of generation g and scattered them again.
+; Results arrive in whatever order the workers finished, so each is tagged
+; with its row and put back in place by the CPI.
+
+; ---------------------------------------------------------------------------
+; Inside a worker (granted actor only)
+; ---------------------------------------------------------------------------
+
+; Each work order is (gen above own below); the answer, sent to the shared
+; result mailbox, is (row gen+1 new-row).
+(defun rows-worker (row rule results)
+    (let order (actor::recv))
+    (let rows (cdr order))
+    (actor::send results
+        (list3 row (+ (car order) 1) (step-row rule (car rows) (second rows) (third rows))))
+    (rows-worker row rule results))
+
+; ---------------------------------------------------------------------------
+; The CPI: supersteps
+; ---------------------------------------------------------------------------
+
+; Phase 1. Every worker gets the rows around its own, wrapped on the torus.
+(defun rows-scatter (workers gen rows)
+    (for-each (lambda (pair) (mailbox::send (process::address (car (car pair))) (cons gen (second pair))))
+        (zip workers (map3 list3 (rotate-right rows) rows (rotate-left rows)))))
+
+; Ticks a worker may run before it is preempted: a different quota for each
+; row and superstep, 100 to 500 ticks per cell of the row. A row takes about
+; 650 ticks per cell, so a worker needs two to seven turns, some rows race
+; ahead and others lag, and the arrival order is scrambled.
+(defun rows-quota (row gen width)
+    (* width (+ 100 (* 100 (% (+ (* row 7) (* gen 11)) 5)))))
+
+; The order workers run in: rotated by a different amount each superstep.
+(defun rows-order (workers gen)
+    (let k (% (* gen 5) (length workers)))
+    (let split (rows-split workers k ()))
+    (append (cdr split) (car split)))
+
+; Returns (first-k . rest).
+(defun rows-split (xs k acc)
+    (if (= k 0)
+        (cons (reverse acc) xs)
+        (rows-split (cdr xs) (- k 1) (cons (car xs) acc))))
+
+; Phase 2. Round robin over the ready workers until every one has blocked
+; in recv again. `workers` are (pid row) pairs. Returns the number of rounds.
+(defun rows-compute (workers gen width rounds)
+    (let ready (filter (lambda (w) (eq? (car (process::state (car w))) :ready)) workers))
+    (if (nil? ready)
+        rounds
+        (do
+            (for-each (lambda (w)
+                    (do
+                        (let reason (process::run (car w) (rows-quota (second w) gen width)))
+                        (when (not (or (eq? (car reason) :quota) (eq? (car reason) :blocked)))
+                            (throw (make-error :worker-died "a row worker stopped" (list2 (second w) reason))))))
+                ready)
+            (rows-compute workers gen width (+ rounds 1)))))
+
+; Phase 3, the barrier. Takes results until every row is in. Returns the
+; (row gen new-row) results in arrival order.
+(defun rows-gather (results gen need got)
+    (if (= need 0)
+        (reverse got)
+        (do
+            (let r (mailbox::take results))
+            (when (eq? r #false)
+                (throw (make-error :barrier-short "a row never arrived" gen)))
+            (when (not (= (second r) gen))
+                (throw (make-error :stale-result "a result from the wrong superstep" r)))
+            (rows-gather results gen (- need 1) (cons r got)))))
+
+; Puts the tagged rows back in order: an insertion sort on the row number.
+(defun rows-assemble (arrived)
+    (map third (fold rows-insert () arrived)))
+
+(defun rows-insert (sorted r)
+    (cond
+        ((nil? sorted) (cons r ()))
+        ((< (car r) (car (car sorted))) (cons r sorted))
+        (#true (cons (car sorted) (rows-insert (cdr sorted) r)))))
+
+(defun rows-loop (workers results rule gen board report)
+    (let h (board-height board))
+    (let w (board-width board))
+    (rows-scatter workers gen (board-rows board))
+    (let rounds (rows-compute (rows-order workers gen) gen w 0))
+    (let arrived (rows-gather results (+ gen 1) h ()))
+    (let next (board-make w h (rows-assemble arrived)))
+    (let notes `(("row workers" ,h)
+                 ("messages per generation" ,(* 2 h))
+                 ("rounds to the barrier" ,rounds)
+                 ("first and last rows in" (,(car (car arrived)) ,(car (last arrived))))))
+    (if (eq? (report (+ gen 1) next notes) :stop)
+        (rows-kill workers)
+        (rows-loop workers results rule (+ gen 1) next report)))
+
+(defun rows-kill (workers)
+    (for-each (lambda (w)
+            (when (not (eq? (car (process::state (car w))) :ended))
+                (process::kill (car w) :stopped)))
+        workers))
+
+(defun rows-engine (config report)
+    (let board (config-board config))
+    (let h (board-height board))
+    (let rule (config-rule config))
+    ; One shared result mailbox. Nobody receives on it: only the CPI takes.
+    (let results (mailbox::create #true h))
+    (let workers (map (lambda (row)
+                (list2 (process::spawn rows-worker (list3 row rule results) (environment::self) '(actor) #false) row))
+            (range 0 h)))
+    (if (eq? (report 0 board `(("row workers" ,h))) :stop)
+        (rows-kill workers)
+        (rows-loop workers results rule 0 board report)))

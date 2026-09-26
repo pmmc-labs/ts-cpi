@@ -1,0 +1,224 @@
+; Actors: one process per cell. Each cell knows only its own state, the rule,
+; and the addresses of its eight neighbors. Every generation it tells its
+; neighbors (gen state), listens for theirs, and applies the rule. There is
+; no global clock: the CPI never tells a cell what generation it is.
+;
+; Cells run at different speeds (uneven quotas, a different order each
+; round), so a cell can hear a neighbor's state for the next generation
+; before it has heard all of this one. Messages are tagged with their
+; generation and a message from the future is buffered. A neighbor is never
+; more than one generation ahead (it cannot compute g+1 without our state
+; for g), so one buffer is enough.
+;
+; The CPI observes the board through a collector mailbox that nobody
+; receives on. Each cell reports (gen index state early) there every
+; generation; the CPI drains it with `mailbox::take` after every round, and
+; reports a generation as soon as every cell has reported it, even while
+; fast cells are already further on.
+
+; ---------------------------------------------------------------------------
+; Inside a cell (granted actor only)
+; ---------------------------------------------------------------------------
+
+; A cell's first message is the list of its neighbors' addresses.
+(defun actors-cell (index rule collector state)
+    (let neighbors (actor::recv))
+    (actors-live index rule collector neighbors 0 state () 0))
+
+; One generation. `early` holds the (gen state) messages for `gen` that
+; arrived while the cell was still gathering the generation before.
+(defun actors-live (index rule collector neighbors gen state early buffered)
+    (actor::send collector `(,index ,gen ,state ,buffered))
+    (for-each (lambda (n) (actor::send n (list2 gen state))) neighbors)
+    (let heard (actors-gather gen (- 8 buffered) (sum (map second early)) ()))
+    (let later (second heard))
+    (actors-live index rule collector neighbors (+ gen 1) (rule-next rule state (car heard))
+        later (length later)))
+
+; Receives until `need` more states for generation `gen` have arrived.
+; Returns (live-count early), `early` being the states for gen+1 that came
+; in the meantime.
+(defun actors-gather (gen need count early)
+    (if (= need 0)
+        (list2 count early)
+        (do
+            (let m (actor::recv))
+            (let g (car m))
+            (cond
+                ((= g gen) (actors-gather gen (- need 1) (+ count (second m)) early))
+                ((= g (+ gen 1)) (actors-gather gen need count (cons m early)))
+                (#true (throw (make-error :time-travel "a state from too far away in time" (list2 gen m))))))))
+
+; ---------------------------------------------------------------------------
+; The CPI: spawning, introductions, scheduling, observing
+; ---------------------------------------------------------------------------
+
+; A cell record is (index pid quota).
+(defun actors-spawn (board rule collector)
+    (let w (board-width board))
+    (map2 (lambda (r row)
+            (map2 (lambda (c state)
+                    (do
+                        (let index (+ (* r w) c))
+                        (list3 index
+                            (process::spawn actors-cell `(,index ,rule ,collector ,state)
+                                (environment::self) '(actor) #false)
+                            (actors-quota index))))
+                (range 0 w) row))
+        (range 0 (board-height board)) (board-rows board)))
+
+; The grid shifted so that position (r c) holds grid[r+dr][c+dc] on the torus.
+(defun actors-shift (grid dr dc)
+    (let rows (cond ((= dr 1) (rotate-left grid)) ((= dr -1) (rotate-right grid)) (#true grid)))
+    (map (lambda (row) (cond ((= dc 1) (rotate-left row)) ((= dc -1) (rotate-right row)) (#true row))) rows))
+
+; Sends every cell the addresses of its eight neighbors: eight shifted
+; copies of the address grid, zipped cell by cell.
+(defun actors-introduce (grid)
+    (let addresses (map (lambda (row) (map (lambda (cell) (process::address (second cell))) row)) grid))
+    (let empty (map (lambda (row) (map (lambda (a) ()) row)) addresses))
+    (let neighbors
+        (fold (lambda (acc offset)
+                (map2 (lambda (acc-row row) (map2 cons row acc-row))
+                    acc (actors-shift addresses (car offset) (second offset))))
+            empty
+            '((-1 -1) (-1 0) (-1 1) (0 -1) (0 1) (1 -1) (1 0) (1 1))))
+    (for-each (lambda (pair) (for-each (lambda (an) (mailbox::send (car an) (second an))) (zip (car pair) (second pair))))
+        (zip addresses neighbors)))
+
+; Uneven quotas, fixed per cell: 1000 to 10000 ticks. A cell blocks as soon
+; as it runs out of news, and what it sends arrives only when its run ends,
+; so the spread in quotas and order is what lets some cells race ahead.
+(defun actors-quota (index)
+    (+ 1000 (* 1500 (% (* index 37) 7))))
+
+(defun actors-ready? (cell)
+    (eq? (car (process::state (second cell))) :ready))
+
+; Cells are dealt into five classes by index. One round runs every ready
+; cell once, class by class, in an order that changes each round. Returns
+; #true if any cell ran.
+(defun actors-classes (cells)
+    (map (lambda (k) (filter (lambda (cell) (= (% (car cell) 5) k)) cells)) (range 0 5)))
+
+(defun actors-round (classes round)
+    (fold (lambda (ran k)
+            (fold (lambda (ran cell)
+                    (if (actors-ready? cell)
+                        (do
+                            (let reason (process::run (second cell) (third cell)))
+                            (when (eq? (car reason) :failed)
+                                (throw (wrap-error (second reason) :cell-failed "a cell failed" (car cell))))
+                            #true)
+                        ran))
+                ran (list-ref classes (% (+ (* k 3) round) 5))))
+        #false (range 0 5)))
+
+; Buckets hold the reports per generation, oldest first:
+; (gen count reports early).
+(defun actors-drain (collector buckets)
+    (let m (mailbox::take collector))
+    (if (eq? m #false)
+        buckets
+        (actors-drain collector (actors-file m buckets))))
+
+(defun actors-file (report buckets)
+    (let gen (second report))
+    (cond
+        ((nil? buckets) (cons `(,gen 1 (,report) ,(list-ref report 3)) ()))
+        ((= (car (car buckets)) gen)
+            (do
+                (let b (car buckets))
+                (cons `(,gen ,(+ (second b) 1) ,(cons report (third b)) ,(+ (list-ref b 3) (list-ref report 3)))
+                    (cdr buckets))))
+        (#true (cons (car buckets) (actors-file report (cdr buckets))))))
+
+; The board of one complete bucket: reports sorted by cell index, cut into rows.
+(defun actors-board (w h reports)
+    (board-make w h (actors-cut (map third (actors-sort reports)) w ())))
+
+(defun actors-cut (xs w acc)
+    (if (nil? xs)
+        (reverse acc)
+        (do
+            (let split (actors-take xs w ()))
+            (actors-cut (cdr split) w (cons (car split) acc)))))
+
+; Returns (first-n . rest).
+(defun actors-take (xs n acc)
+    (if (= n 0)
+        (cons (reverse acc) xs)
+        (actors-take (cdr xs) (- n 1) (cons (car xs) acc))))
+
+; A bottom-up merge sort on each item's car.
+(defun actors-sort (xs)
+    (actors-merge-all (map (lambda (x) (cons x ())) xs)))
+
+(defun actors-merge-all (lists)
+    (if (nil? (cdr lists))
+        (car lists)
+        (actors-merge-all (actors-merge-pass lists ()))))
+
+(defun actors-merge-pass (lists acc)
+    (cond
+        ((nil? lists) (reverse acc))
+        ((nil? (cdr lists)) (reverse (cons (car lists) acc)))
+        (#true (actors-merge-pass (cdr (cdr lists)) (cons (actors-merge (car lists) (second lists) ()) acc)))))
+
+(defun actors-merge (xs ys acc)
+    (cond
+        ((nil? xs) (reverse-onto acc ys))
+        ((nil? ys) (reverse-onto acc xs))
+        ((< (car (car xs)) (car (car ys))) (actors-merge (cdr xs) ys (cons (car xs) acc)))
+        (#true (actors-merge xs (cdr ys) (cons (car ys) acc)))))
+
+(defun actors-kill (cells)
+    (for-each (lambda (cell)
+            (when (not (eq? (car (process::state (second cell))) :ended))
+                (process::kill (second cell) :stopped)))
+        cells))
+
+; State of the observer: (next buckets early-total).
+; Reports every complete generation. Returns the new state, or :stop.
+(defun actors-emit (run next buckets early-total)
+    (let n (list-ref run 2))
+    (let b (if (nil? buckets) #false (car buckets)))
+    (if (or (eq? b #false) (not (= (car b) next)) (< (second b) n))
+        (list3 next buckets early-total)
+        (do
+            (let board (actors-board (car run) (second run) (third b)))
+            (let early (list-ref b 3))
+            (let lead (- (car (last buckets)) next))
+            (let notes `(("actors" ,n)
+                         ("messages per generation" ,(* 9 n))
+                         ("arrived early this generation" ,early)
+                         ("arrived early in all" ,(+ early-total early))
+                         ("fastest cell ahead by" ,lead)))
+            (if (eq? ((list-ref run 3) next board notes) :stop)
+                :stop
+                (actors-emit run (+ next 1) (cdr buckets) (+ early-total early))))))
+
+; `run` is (width height cell-count report).
+(defun actors-loop (run cells classes collector round state)
+    (let ran (actors-round classes round))
+    (let buckets (actors-drain collector (second state)))
+    (let emitted (actors-emit run (car state) buckets (third state)))
+    (cond
+        ((eq? emitted :stop) (actors-kill cells))
+        (ran (actors-loop run cells classes collector (+ round 1) emitted))
+        (#true (do
+            (actors-kill cells)
+            (throw (make-error :deadlock "no cell can move, but a generation is missing" (car emitted)))))))
+
+(defun actors-engine (config report)
+    (let board (config-board config))
+    (let w (board-width board))
+    (let h (board-height board))
+    (let n (* w h))
+    ; A cell reports at most three generations per round, and the CPI
+    ; drains the collector after every round.
+    (let collector (mailbox::create #true (* 4 n)))
+    (let grid (actors-spawn board (config-rule config) collector))
+    (actors-introduce grid)
+    (let cells (fold append () grid))
+    (actors-loop `(,w ,h ,n ,report) cells (actors-classes cells) collector 0 (list3 0 () 0)))
