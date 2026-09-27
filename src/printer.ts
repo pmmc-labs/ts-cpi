@@ -10,6 +10,7 @@ import type { Value } from './types.ts';
  * - Symbol as its name
  * - Proper list as (a b c), improper tail as (a b . c)
  * - (quote x) stays as (quote x) - no abbreviation
+ * - Vector as #(a b c)
  * - Other values: #<procedure name>, #<error tag "message">, #<address id>, #<pid n>, #<env>
  */
 export function print(v: Value): string {
@@ -69,6 +70,9 @@ function formatValue(v: Value, quoted: boolean): string {
 
         case 'env':
             return '#<env>';
+
+        case 'vec':
+            return '#(' + v.items.map((x) => formatValue(x, quoted)).join(' ') + ')';
     }
 }
 

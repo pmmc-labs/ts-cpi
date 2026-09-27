@@ -1,6 +1,6 @@
 // Value constructors and list helpers. Owned by the manager, like types.ts.
 
-import type { Addr, Bool, Float, Int, Nil, Pair, Pid, Pos, Str, Sym, Value } from './types.ts';
+import type { Addr, Bool, Float, Int, Nil, Pair, Pid, Pos, Str, Sym, Value, Vec } from './types.ts';
 
 export const NIL: Nil = { t: 'nil' };
 export const TRUE: Bool = { t: 'bool', v: true };
@@ -45,6 +45,7 @@ export function int(n: bigint | number): Int {
 export const float = (v: number): Float => ({ t: 'float', v });
 export const str = (v: string): Str => ({ t: 'str', v });
 export const cons = (car: Value, cdr: Value, pos: Pos | null = null): Pair => ({ t: 'pair', car, cdr, pos });
+export const vec = (items: readonly Value[]): Vec => ({ t: 'vec', items });
 
 let addrCounter = 0;
 export function newAddr(): Addr {

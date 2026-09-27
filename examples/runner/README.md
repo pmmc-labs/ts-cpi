@@ -130,10 +130,10 @@ now cached.
 
 **6. What the engine writers ran into** (combined from four workers):
 - **Language:**
-  - `string-append` takes exactly two arguments, so notes need helpers.
-  - There's no `list` beyond `list3`: quasiquote works, but first drafts reached for `list`.
-  - There are no vectors or random access. Engines use row sweeps and, in one case, a hand-written persistent trie.
-  - There's no "finally", and a caught error can't be rethrown (it's `already-thrown`), so cleanup has to wrap the error, which changes its tag.
+  - `string-append` takes exactly two arguments, so notes need helpers. *Resolved Sep 27, 2026:* it takes any number, and `string-join` joins a list.
+  - There's no `list` beyond `list3`: quasiquote works, but first drafts reached for `list`. *Resolved Sep 27, 2026:* `list` is a core operation.
+  - There are no vectors or random access. Engines use row sweeps and, in one case, a hand-written persistent trie. *Resolved Sep 27, 2026:* immutable vectors with `vector-ref`.
+  - There's no "finally", and a caught error can't be rethrown (it's `already-thrown`), so cleanup has to wrap the error, which changes its tag. *Resolved Sep 27, 2026:* `rethrow`.
   - `case` is reserved even as a parameter name.
   - Host actions aren't first-class values: `(map mailbox::size row)` fails.
   - There are no mutable variables. The runner and engines use a one-message mailbox as one, which works but isn't obvious.

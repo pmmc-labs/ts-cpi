@@ -3,7 +3,7 @@
 import type { Value, ErrorValue, Result } from './types.ts';
 import type { CoreOp } from './types.ts';
 import {
-    NIL, TRUE, FALSE, bool, sym, int, float, str, cons, list, listToArray,
+    NIL, TRUE, FALSE, bool, sym, int, float, str, cons, list, listToArray, vec,
     INT_MIN, INT_MAX, fitsInt, isFalse
 } from './values.ts';
 import { ok, fail, makeError } from './errors.ts';
@@ -359,6 +359,12 @@ ops.set('env?', {
     fn: (args) => ok(bool(args[0]!.t === 'env')),
 });
 
+ops.set('vector?', {
+    name: 'vector?',
+    arity: 1,
+    fn: (args) => ok(bool(args[0]!.t === 'vec')),
+});
+
 // 5.5 Pairs
 
 ops.set('cons', {
@@ -399,6 +405,12 @@ ops.set('append', {
         for (let i = items.length - 1; i >= 0; i--) out = cons(items[i]!, out);
         return ok(out);
     },
+});
+
+ops.set('list', {
+    name: 'list',
+    arity: null,
+    fn: (args) => ok(list(...args)),
 });
 
 ops.set('apply', {
@@ -448,13 +460,31 @@ ops.set('string-ref', {
 
 ops.set('string-append', {
     name: 'string-append',
+    arity: null,
+    fn: (args) => {
+        let out = '';
+        for (const a of args) {
+            if (a.t !== 'str') return fail('type-error', 'string-append requires strings', a);
+            out += a.v;
+        }
+        return ok(str(out));
+    },
+});
+
+ops.set('string-join', {
+    name: 'string-join',
     arity: 2,
     fn: (args) => {
-        const a = args[0]!;
-        const b = args[1]!;
-        if (a.t !== 'str') return fail('type-error', 'string-append requires strings');
-        if (b.t !== 'str') return fail('type-error', 'string-append requires strings');
-        return ok(str((a as any).v + (b as any).v));
+        const sep = args[0]!;
+        if (sep.t !== 'str') return fail('type-error', 'string-join requires a string separator', sep);
+        const items = listToArray(args[1]!);
+        if (items === null) return fail('type-error', 'string-join requires a proper list of strings', args[1]!);
+        const parts: string[] = [];
+        for (const x of items) {
+            if (x.t !== 'str') return fail('type-error', 'string-join requires a proper list of strings', x);
+            parts.push(x.v);
+        }
+        return ok(str(parts.join(sep.v)));
     },
 });
 
@@ -607,6 +637,94 @@ ops.set('stack-trace-for', {
         const e = args[0]!;
         if (e.t !== 'error') return fail('type-error', 'stack-trace-for requires an error');
         return ok(traceEntries(e as ErrorValue));
+    },
+});
+
+ops.set('rethrow', {
+    name: 'rethrow',
+    arity: 1,
+    fn: () => fail('type-error', 'rethrow must be handled by the machine'),
+});
+
+// 5.9 Vectors
+
+// An index: an integer in [0, limit).
+function index(v: Value, limit: number, what: string): Result | number {
+    if (v.t !== 'int') return fail('type-error', `${what} requires an integer index`, v);
+    if (v.v < 0n || v.v >= BigInt(limit)) return fail('range-error', `${what} index out of range`, v);
+    return Number(v.v);
+}
+
+ops.set('vector', {
+    name: 'vector',
+    arity: null,
+    fn: (args) => ok(vec(args.slice())),
+});
+
+ops.set('make-vector', {
+    name: 'make-vector',
+    arity: 2,
+    fn: (args) => {
+        const n = args[0]!;
+        if (n.t !== 'int') return fail('type-error', 'make-vector requires an integer length', n);
+        if (n.v < 0n) return fail('range-error', 'make-vector requires a length that is not negative', n);
+        return ok(vec(new Array<Value>(Number(n.v)).fill(args[1]!)));
+    },
+});
+
+ops.set('vector-length', {
+    name: 'vector-length',
+    arity: 1,
+    fn: (args) => {
+        const v = args[0]!;
+        if (v.t !== 'vec') return fail('type-error', 'vector-length requires a vector', v);
+        return ok(int(v.items.length));
+    },
+});
+
+ops.set('vector-ref', {
+    name: 'vector-ref',
+    arity: 2,
+    fn: (args) => {
+        const v = args[0]!;
+        if (v.t !== 'vec') return fail('type-error', 'vector-ref requires a vector', v);
+        const i = index(args[1]!, v.items.length, 'vector-ref');
+        if (typeof i !== 'number') return i;
+        return ok(v.items[i]!);
+    },
+});
+
+ops.set('vector-set', {
+    name: 'vector-set',
+    arity: 3,
+    fn: (args) => {
+        const v = args[0]!;
+        if (v.t !== 'vec') return fail('type-error', 'vector-set requires a vector', v);
+        const i = index(args[1]!, v.items.length, 'vector-set');
+        if (typeof i !== 'number') return i;
+        const items = v.items.slice();
+        items[i] = args[2]!;
+        return ok(vec(items));
+    },
+});
+
+ops.set('list->vector', {
+    name: 'list->vector',
+    arity: 1,
+    fn: (args) => {
+        const items = listToArray(args[0]!);
+        if (items === null) return fail('type-error', 'list->vector requires a proper list', args[0]!);
+        return ok(vec(items));
+    },
+});
+
+ops.set('vector->list', {
+    name: 'vector->list',
+    arity: 1,
+    fn: (args) => {
+        const v = args[0]!;
+        if (v.t !== 'vec') return fail('type-error', 'vector->list requires a vector', v);
+        return ok(list(...v.items));
     },
 });
 

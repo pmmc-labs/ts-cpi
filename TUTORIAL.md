@@ -95,6 +95,23 @@ The things to notice:
   ```
 
   A quasiquote inside another quasiquote is not supported.
+- **Lists, strings and vectors.** `(list 1 2 3)` builds a list,
+  `(string-append "a" "b" "c")` joins any number of strings, and
+  `(string-join ", " parts)` joins a list of strings with a separator between
+  them, like Perl's `join`. Both string operations take strings only; convert
+  anything else with `value->string`. A vector is an immutable, fixed-length
+  sequence, and `vector-ref` reaches any element in one step:
+
+  ```lisp
+  (let v (list->vector (list :a :b :c)))
+  (vector-ref v 1)                    ; b
+  (vector-set v 1 :x)                 ; #(a x c), a new vector: v is unchanged
+  (vector-length (make-vector 4 0))   ; 4
+  (vector->list v)                    ; (a b c)
+  ```
+
+  `vector-set` copies the whole vector, so build a list and convert it with
+  `list->vector` rather than setting elements one at a time.
 - **Only `#false` is false.** `()`, `0` and `""` are all true.
 - **Integers and floats don't mix.** `(+ 1 2.0)` is a `type-error`; convert
   with `integer->float` or `float->integer`. Integers are 64-bit, and overflow
@@ -107,13 +124,16 @@ The things to notice:
   #<error load-error "bad.slight:1:1: '+' is reserved and cannot be used as a let name">
   ```
 
-  Core operations can still be passed as values: `(twice car x)` works.
+  Core operations can still be passed as values: `(twice car x)` works. The
+  exceptions are `list`, `string-append` and `vector`, which take any number of
+  arguments and so can only be called; passing one is a load error.
 
 ## 3. Errors
 
 Errors are values with a tag, a message, a payload and an optional cause. The
-runtime records where an error was thrown. An error is thrown **at most
-once**: to pass one on, wrap it in a new error with `wrap-error`.
+runtime records where an error was thrown, the first time it is thrown. To
+pass a caught error on unchanged, use `rethrow`; to add to it, wrap it in a new
+error with `wrap-error`.
 
 ```lisp
 ; examples/errors.slight
@@ -162,7 +182,20 @@ traces are worth understanding:
 - In the caught one, `main` appears twice, because two frames wait at line 12:
   the `let` and the `catch`.
 
-Throwing the same error twice gives `already-thrown` instead. See
+`throw` refuses an error that has already been thrown and throws
+`already-thrown` instead, so passing an error on is always explicit. `rethrow`
+is for cleanup that should leave the error alone:
+
+```lisp
+(catch (work)
+    e
+    (do
+        (cleanup)
+        (rethrow e)))
+```
+
+The caller sees the original error, with its tag and its trace from the first
+throw. `rethrow` of an error that was never thrown is `bad-state`. See
 `tests/programs/errors.slight`, which also uses `environment::error-pad` to read
 the local variables that were live where an error was thrown.
 

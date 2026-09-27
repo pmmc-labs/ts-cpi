@@ -59,8 +59,10 @@ export type ErrorValue = {
 export type Addr   = { readonly t: 'addr'; readonly id: string };
 export type Pid    = { readonly t: 'pid';  readonly id: number };
 export type EnvRef = { readonly t: 'env';  readonly env: Env };
+// Immutable and fixed-length: nothing writes to items after construction.
+export type Vec    = { readonly t: 'vec';  readonly items: readonly Value[] };
 
-export type Value = Sym | Bool | Nil | Int | Float | Str | Pair | Closure | ErrorValue | Addr | Pid | EnvRef;
+export type Value = Sym | Bool | Nil | Int | Float | Str | Pair | Closure | ErrorValue | Addr | Pid | EnvRef | Vec;
 
 // ---------------------------------------------------------------------------
 // Local scopes (SPEC-CPI section 6): a persistent linked list, innermost first.
@@ -132,7 +134,9 @@ export type State = { readonly mode: Mode; readonly K: Kont; readonly R: Env; re
 
 export type Result = { readonly ok: true; readonly v: Value } | { readonly ok: false; readonly e: ErrorValue };
 
-// fn receives exactly `arity` arguments; the machine checks arity first.
-// `apply` is in the table for its name and arity only: the machine handles it
-// itself, because applying a closure is a machine transition.
-export type CoreOp = { readonly name: string; readonly arity: number; readonly fn: (args: readonly Value[]) => Result };
+// fn receives exactly `arity` arguments, or any number when `arity` is null
+// (a variadic operation); the machine checks arity first. `apply` and
+// `rethrow` are in the table for their names and arities only: the machine
+// handles them itself, because applying a closure and throwing without
+// recording a context are machine transitions.
+export type CoreOp = { readonly name: string; readonly arity: number | null; readonly fn: (args: readonly Value[]) => Result };

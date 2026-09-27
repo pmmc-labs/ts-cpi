@@ -12,7 +12,7 @@
 import type { Pos, Sym, Value } from './types.ts';
 import { cons, gensym, listToArray, sym, NIL, TRUE } from './values.ts';
 import { LoadError } from './errors.ts';
-import { CORE_ARITY, isCoreName, isHostName, isReserved } from './names.ts';
+import { CORE_ARITY, isCoreName, isHostName, isReserved, isVariadic } from './names.ts';
 
 // A body element may be `let` or a local `defun`; anywhere else ('value')
 // those two forms are a load-error (SPEC-CPI section 4).
@@ -60,7 +60,11 @@ function requireParamList(paramsForm: Value, what: string): readonly Sym[] {
 // section 5.1): `+` becomes `(lambda (a b) (+ a b))`.
 // DECISION: the source symbol carries no position of its own (only pairs do),
 // so the synthesized lambda's pairs get a null pos.
+// A variadic operation has no closure form: `lambda` has no rest parameters.
 function etaExpand(name: string): Value {
+    if (isVariadic(name)) {
+        throw new LoadError(`'${name}' takes any number of arguments and can only be the head of an application`, sym(name));
+    }
     const arity = CORE_ARITY.get(name)!;
     const params: Sym[] = [];
     for (let i = 0; i < arity; i++) params.push(gensym('a'));

@@ -57,6 +57,16 @@ function raise(e: ErrorValue, site: Site, scope: Scope, K: Kont, R: Env, A: Chec
     return { mode: { m: 'throw', e }, K, R, A };
 }
 
+// `(rethrow e)`: throw `e` again with the context its first throw recorded.
+// Nothing is recorded, so `e`'s trace still points at the original failure.
+function applyRethrow(e: Value, scope: Scope, K: Kont, R: Env, A: Checkpoint, site: Site): State {
+    if (e.t !== 'error') return raise(makeError('type-error', 'rethrow requires an error', e), site, scope, K, R, A);
+    if (e.box.ctx === null) {
+        return raise(makeError('bad-state', 'rethrow requires an error that has been thrown; use throw', e), site, scope, K, R, A);
+    }
+    return { mode: { m: 'throw', e }, K, R, A };
+}
+
 // ---------------------------------------------------------------------------
 // `do`, `cond`, `and`/`or` bodies (SPEC-CPI section 7.3)
 // ---------------------------------------------------------------------------
@@ -164,11 +174,14 @@ function applyHead(
 ): State {
     if (head.h === 'core') {
         const arity = CORE_ARITY.get(head.op)!;
-        if (args.length !== arity) {
+        if (arity !== null && args.length !== arity) {
             return raise(makeError('arity-error', `${head.op} requires ${arity} argument(s)`), site, scope, K, R, A);
         }
         if (head.op === 'apply') {
             return applyApply(args, scope, K, R, A, site);
+        }
+        if (head.op === 'rethrow') {
+            return applyRethrow(args[0]!, scope, K, R, A, site);
         }
         const op = CORE.get(head.op)!;
         const result = op.fn(args);

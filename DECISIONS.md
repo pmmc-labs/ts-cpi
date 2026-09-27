@@ -104,6 +104,208 @@ Rationale: views are data (see `spike/tui/`), and building data without quasiquo
 
 Rationale: a CPI that shows its state in a view (SPEC-TUI) needs values as text, and before this the language had no way to turn a number, list or error into a string. The printed form of an address, PID or env ref describes it and cannot be turned back into it: nothing converts a string to an address, so the result grants no authority.
 
+### `list`, `string-append`, `string-join`, `rethrow` and vectors (2026-09-27)
+
+*Status.* Agreed and implemented 2026-09-27: option A, `string-join` takes the separator first, strings only, no reader syntax for vectors yet. Tests in `tests/additions.test.ts`; the tutorial covers them. Done before building environments from roles. From the field notes: every worker wrote list and string helpers, random access is a list walk, and a caught error cannot be passed on unchanged.
+
+*What the examples do today.* The shared libraries define `list2` and `list3`, called 97 and 39 times in 27 and 17 files. `list-ref`, a walk down the list, is called 135 times in 25 files. Text is built by folding a two-argument `string-append` over a list (the runner's `rn-pair-line` and `rn-sparkline`, and a helper in two engines), which copies the text so far at every step. No program binds `list`, `vector`, `string-join` or `rethrow`, or uses `string-append` as a value, so none of the names below breaks existing code.
+
+*The arity question.* Section 5 gives every core operation a fixed arity, and section 5.1 turns a core operation used as a value into a closure of that arity. `lambda` has no rest parameters, so a variadic operation has no closure form. The options:
+
+- **A. Variadic core operations** (recommended). `list`, `string-append` and `vector` take any number of arguments, and using one anywhere but the head of an application is a `load-error`. Nothing is lost: applying one to a list of arguments is the identity for `list`, `string-join` with `""` for `string-append`, and `list->vector` for `vector`.
+- **B. Derived forms.** `(list a b c)` expands to `(cons a (cons b (cons c ())))`, like quasiquote, and `(string-append a b c)` to nested two-argument calls. It needs no new rule for arities, but `string-append` would then be a core operation for two arguments and a derived form for any other number, and a call would cost one tick per argument.
+- **C. Rest parameters for `lambda`.** Variadic operations would then have closure forms, and user procedures could be variadic. It is the most general option and the largest change; it can come later without disturbing A.
+
+**Section 5, Core operations.** Change the second sentence of the first paragraph to: "Each has a fixed arity, except the variadic operations `list`, `string-append` and `vector`, and each application costs one tick."
+
+**Section 5.1.** Add: "A variadic core operation has no closure form: using its name anywhere other than the head of an application is a `load-error`."
+
+**Section 5.5, Pairs.** Add a row:
+
+| Signature | Result | Errors |
+| --- | --- | --- |
+| `(list a ...)` † | A new list of the arguments, in order. `(list)` is `()`. | |
+
+**Section 5.6, Strings.** Replace the `string-append` row and add one:
+
+| Signature | Result | Errors |
+| --- | --- | --- |
+| `(string-append s ...)` † | A new string: the arguments joined in order. `(string-append)` is `""`. | `type-error` unless every argument is a string. |
+| `(string-join sep strings)` † | A new string: the elements of the list `strings` with `sep` between each two, as in Perl's `join`. `(string-join sep ())` is `""`. | `type-error` unless `sep` is a string and `strings` a proper list of strings. |
+
+**Section 2.1, Types.** Add a row:
+
+| Type | Written | Notes |
+| --- | --- | --- |
+| Vector | none | Immutable, fixed length, indexed from 0. Printed as `#(1 2 3)`; the reader has no syntax for vectors, so quoted data cannot contain one. |
+
+**Section 5.3.** In `eq?`, vectors compare by identity, like pairs.
+
+**Section 5.4.** Add `(vector? a)`.
+
+**Section 5.9, Vectors** (new):
+
+| Signature | Result | Errors |
+| --- | --- | --- |
+| `(vector x ...)` † | A new vector of the arguments, in order. | |
+| `(make-vector n fill)` † | A new vector of `n` elements, each `fill`. | `type-error`; `range-error` if `n` is negative. |
+| `(vector-length v)` | The number of elements. | `type-error`. |
+| `(vector-ref v i)` | The element at index `i`. | `type-error`; `range-error`. |
+| `(vector-set v i x)` † | A new vector equal to `v` except that index `i` holds `x`. `v` is unchanged. | `type-error`; `range-error`. |
+| `(list->vector l)` †, `(vector->list v)` † | Conversion. | `type-error` unless `l` is a proper list, or `v` a vector. |
+
+**Section 2.3, Errors.** `range-error`: "An index is outside its string or vector, or a length is negative."
+
+**Section 5.8, Errors.** Add a row:
+
+| Signature | Result | Errors |
+| --- | --- | --- |
+| `(rethrow e)` | Does not return. Throws `e` again, with the context recorded when it was first thrown. Nothing new is recorded. | `type-error` if `e` is not an error; `bad-state` if `e` has never been thrown. |
+
+**Section 7.5.** Replace "An error is thrown at most once. A handler that wants to pass an error on wraps it with `wrap-error` and throws the new error, so each error in the chain keeps its own trace and the chain records the whole history of the failure." with: "An error's context is recorded at most once, by its first `throw`. A handler passes an error on unchanged with `rethrow`, which keeps that context, or adds to it by wrapping the error with `wrap-error` and throwing the new one, so each error in the chain keeps its own trace and the chain records the whole history of the failure." `bad-state` in section 2.3 also covers `rethrow` of an error that has never been thrown.
+
+Rationale:
+
+- **`list` and variadic `string-append`** replace helper families that every program redefines. One tick per application, marked †, is how `append` already works.
+- **`string-join`** builds a line in one pass instead of one copy per piece, and drawing the board is where the Life runner spends most of its time outside the engine.
+- **`rethrow`** is cleanup that leaves the error alone: `(catch (work) e (do (cleanup) (rethrow e)))`. The caller sees the original tag, and the trace points at the original failure. `wrap-error` stays the way to add context. `throw` still refuses an error that was thrown before, so a second `throw` by mistake is still caught.
+- **Vectors** give constant-time `vector-ref`, which is what the 135 `list-ref` calls want. They are kept simple on purpose: `vector-set` copies (†), and there is no reader syntax. A persistent vector can replace the copying later without changing the interface.
+- **Option A over C** because it is the smallest change that removes the helpers, and C can still be added later.
+
+Decided: `string-join` takes the separator first, like Perl's `join` (Scheme's SRFI 130 puts it last). `string-append` and `string-join` accept strings only; `value->string` converts anything else. Vectors have no reader syntax yet, so a role's `const` cannot hold one. If the roles proposal is adopted, vectors compare element by element for composition, like pairs.
+
+### Building environments from roles (proposed 2026-09-27, under discussion)
+
+*Status.* Agreed so far: global names stay late-bound (SPEC-CPI sections 6 and 7.2 are unchanged, so hot reload keeps working); a role declares everything it needs from outside with `require`, host actions included; spawn, `set-env` and `unpark` check a role's host actions against grants; `const` is allowed for literal and quoted data; compacting `Conflicted` history is a strategy the user supplies. The open questions at the end are not settled.
+
+*Background.* DESIGN-001 makes a patch an environment (sections 3, 8 and 9), but SPEC-CPI section 10.4 gives the CPI no way to make one: every env ref derives from `environment::self` (see Spec issues). The model below follows p5-MXCL, where every environment is a role built by composition (`lib/MXCL/Allocator/Roles.pm`, `Context.pm` lines 116–175), and p5-slight's `Partial`, a lambda without an environment, content-addressed on its own (`lib/Slight/Term.pm`). In slight a global `defun` is already a partial: it holds no environment and resolves global names through the caller's env ref. What the CPI lacks is a way to write one that does not capture the CPI's own local scope.
+
+A role written with `role` is **abstract** while it has `Required` slots. Composing it with other roles fills them. Resolving it checks that it can run and fixes its hashes. Nothing in a role comes from the environment of the code that wrote it.
+
+**Section 2.1, Types.** Change the last paragraph to: "Addresses, PIDs and env refs cannot be constructed from other values. Addresses and PIDs are produced only by builtins; env refs by builtins and by `role` (section 4), whose env ref holds only code written in the source. Code holds only those it has been given."
+
+**Section 4, Special forms.** Add a row:
+
+| Form | Meaning |
+| --- | --- |
+| `(role form ...)` | An env ref for an environment built from the `form`s, each a `(defun name (param ...) body ...)`, a `(const name datum)` or a `(require name ...)`. Each `defun` becomes a `Defined` slot holding a closure with an empty local scope and no group, like a global `defun` (section 7.2): it captures nothing from where `role` appears. Each `const` becomes a `Defined` slot holding `datum`, which must be a literal (integer, float, string, boolean, `()`), a quoted datum or a tag; any other expression is a `load-error`. Each name in a `require` becomes a `Required` slot. Every name that a body uses as a global name, host request names included, must be defined in the role or named in a `require`; any other is a `load-error`. A name that is local where it is used (a parameter, `let` or local `defun`) is not a global use. Two definitions of the same name, or a definition of a special form, core operation or host request name, are a `load-error`. The value depends only on the forms. |
+
+`role` and `require` are reserved like the other special forms.
+
+**Section 10.4, Environments.** Add before the table:
+
+> Two values are **identical** for composition when they are atoms (booleans, `()`, integers, floats, strings, symbols) of the same type and value; pairs whose heads and tails are identical; or closures with an empty local scope and no group whose names, parameters and expanded bodies are the same (they have the same core hash, `DESIGN-001.md` section 8). Any other two values are identical only if they are the same value.
+
+Add rows:
+
+| Signature | Result | Errors |
+| --- | --- | --- |
+| `(environment::define e name value)` | The env ref of `e` composed with an environment holding only `Defined(name, value)`. | `type-error` if `name` is not a symbol, or is a special form, core operation or host request name. |
+| `(environment::required e)` | The list of names whose slots in `e` are `Required`, host request names included. | `type-error`. |
+| `(environment::resolve e grants)` | `e`, once it is known to run in a process granted the namespaces in the list `grants`: every `Required` slot left is a host request name whose namespace is in `grants`. Its binding hash is fixed here. | `type-error`; `unbound`, with the list of other `Required` names as payload; `not-granted`, with the first missing namespace as payload. |
+| `(environment::history e name)` | The values `name` has been defined to in `e`, oldest first: one for a `Defined` slot, every `Defined` leaf of a `Conflicted` slot in composition order, `()` for a `Required` slot or a name `e` does not have. | `type-error`. |
+| `(environment::accept e names)` | The env ref of `e` with each `Conflicted` slot named in the list `names` replaced by the `Defined` slot it resolves to under the scope policy. Other names are left as they are. | `type-error`. |
+| `(environment::difference a b)` | The env ref of the slots of `a` that `b` does not have with an identical slot under the same name: what composing `a` onto `b` would change. | `type-error`. |
+
+**Section 10.1, Processes.** `process::spawn`, `process::set-env` and `process::unpark` also throw `not-granted` when their env ref has a `Required` host request name whose namespace the process is not granted: the grants given to `spawn`, or the process's own for `set-env` and `unpark`. The payload is the first missing namespace.
+
+**Composition strategies, as a library.** Policy about history stays in the user's code. A strategy is called with each conflicted name and its history and answers `:accept` (flatten the slot) or `:retain` (keep its history). It is asked about every conflicted name on every composition, so a name tracked for a while can later be accepted:
+
+```lisp
+(defun compose-with (a b strategy)
+    (let e (environment::compose a b))
+    (environment::accept e (accepted-names e (environment::conflicts e) strategy)))
+
+(defun accepted-names (e names strategy)
+    (cond
+        ((nil? names) ())
+        ((eq? (strategy (car names) (environment::history e (car names))) :accept)
+            (cons (car names) (accepted-names e (cdr names) strategy)))
+        (#true (accepted-names e (cdr names) strategy))))
+```
+
+DESIGN-001's two policies are two strategies: the scope rule accepts everything, and the module rule throws on any conflict. Keeping state in a role, tracking `score` and nothing else:
+
+```lisp
+(defun track-score (name history)
+    (if (eq? name 'score) :retain :accept))
+
+(let s0 (environment::define (role) 'score 0))
+(let s1 (compose-with s0 (environment::define (role) 'score 10) track-score))
+(environment::history s1 'score)    ; (0 10)
+(environment::lookup s1 'score)     ; 10
+```
+
+A hot reload, with the rule swapped as a role instead of as quasiquoted code:
+
+```lisp
+(defun world-code ()
+    (role
+        (require actor::send actor::recv)
+        (require list2 make-board cell-at neighbor-count life-rule)
+        (defun hr-world (gen board out)
+            (actor::send out (list2 gen board))
+            (actor::recv)
+            (hr-world (+ gen 1) (hr-step board) out))
+        (defun hr-step (board)
+            (make-board (lambda (row col) (life-rule (cell-at board row col) (neighbor-count board row col)))))))
+
+; One rule for every B/S rulestring: born and survives are parameters.
+(defun bs-rule ()
+    (role
+        (require born survives member?)
+        (defun life-rule (alive n)
+            (if (= alive 1)
+                (if (member? n survives) 1 0)
+                (if (member? n born) 1 0)))))
+
+(defun highlife ()
+    (role
+        (const born '(3 6))
+        (const survives '(2 3))))
+
+(defun seeds ()
+    (role
+        (const born '(2))
+        (const survives ())))
+
+; world-code and bs-rule are abstract until composed with a library, a rule and its parameters.
+(defun world-env (params)
+    (environment::resolve
+        (environment::compose
+            (environment::compose (environment::compose (board-library) (world-code)) (bs-rule))
+            params)
+        '(actor)))
+
+(let env (world-env (highlife)))
+(let pid (process::spawn (environment::lookup env 'hr-world) (list3 0 board out) env '(actor) #false))
+; switching to Seeds changes two parameters, not the code: (process::set-env pid (world-env (seeds)));
+; rolling back is (process::set-env pid env)
+```
+
+A required `const` is a parameter. Because global names are late-bound, a parameter is read by name at each use, so replacing it is an ordinary hot reload, and the role that supplies it is plain data that can be sent, stored and hashed.
+
+Rationale:
+
+- **Independent of the CPI's environment.** A role captures neither the CPI's local scope nor its env ref, so the code it holds means the same wherever it is composed. Anything else a role should hold, such as an address, enters through `environment::define`, where it is visible and hashed.
+- **No code as data.** The bodies are ordinary source, checked by the base expander when the CPI loads, so building a patch needs no quasiquote.
+- **A boundary for content hashing.** A `defun` in a role is identified by its core hash, and a role by its names and those hashes (the binding hash). Two loads of an unchanged `defun` compose without a conflict. In the prototype today they conflict: composing a module with a second load of the same source marks every closure and every list constant as conflicted, because `src/env.ts` compares them by reference.
+- **Late binding keeps the hashes acyclic.** A resolved closure does not hold its role, so a role never contains itself. p5-slight bound partials to their environment early and had to mutate an interned term to tie the knot (`Compiler.pm`, `fixup_top_level_env`).
+- **What a role needs is declared.** Its `require` forms are its whole interface: every name it uses from outside, and every host action. A misspelled global is a `load-error` when the CPI loads, not `unbound` at run time. `environment::required` lists what is still unfilled: the inputs to DESIGN-001's capabilities hash (section 9). `(require actor::send)` is a finer-grained statement than a namespace grant, and a process is refused at spawn instead of failing at first use.
+- **Parameters without new machinery.** A `require`d name filled by another role's `const` works as a parameter of the whole role, the way a functor takes a structure. Rule tables, board sizes and presets in the Life examples become parameters.
+- **An immutable record type.** Roles give named lookup and merging, which the language otherwise lacks, and `history` keeps an update's provenance for as long as the strategy retains it.
+- **Strategies as library code.** SPEC-CPI section 8 would let a builtin call the strategy by splicing frames, but no host action does that yet. As library code, strategies run as ordinary CPI code: ticks are counted, errors carry traces, and the policy can be replaced. A builtin `environment::compose-with` stays an option if strategies turn out to be slow.
+
+Consequence for section 9 (not required by this change): each loaded file could be read as a role and the files composed with the module strategy. A file's `require` forms would then be the `Required` slots the field notes asked the loader for (open question 5).
+
+Open questions:
+
+1. `role` gives any code a way to make an env ref, not only the CPI. It holds only source code and constants, and using it needs the privileged namespaces, so this looks harmless.
+2. A closure with a captured local scope is compared by identity, so defining the same `lambda` value twice always conflicts. Its local scope could be hashed too.
+3. Hashes should be computed lazily and cached per environment: re-hashing the CPI's environment cost about 0.7 ms per park before it was cached.
+4. `eq?` on env refs compares wrappers (field notes). With content-addressed roles, it could compare composition hashes.
+5. Whether top-level files should follow the same declaration rule when section 9 reads them as roles. That would make every CPI program declare its host actions, which today are checked only by grants at run time.
+
 ## Spec issues
 
 - SPEC-CPI section 1 says the CPI "is granted the privileged namespaces in section 8"; they are listed in section 10. Editorial.
@@ -114,7 +316,10 @@ Rationale: a CPI that shows its state in a view (SPEC-TUI) needs values as text,
 - SPEC-CPI section 7.5 records one trace entry per frame in `K`. Two frames can wait on the same expression, for example `(let r (catch …))`, where the `let` frame and the `catch` frame both sit at the `catch`. The trace then shows the same entry twice. This follows the spec literally; the spec may want entries collapsed, or per-procedure entries only.
 - An ordinary process cannot read the time: `host::now` is in the privileged `host::` namespace, and `timer::` has only `sleep` in the prototype. SPEC-CPI section 10.5 leaves other namespaces to their subsystems, so this is a gap rather than a contradiction.
 - SPEC-CPI section 11 counts every `step` as a tick, and section 7.3's `Eval((do rest …))` transitions make tick counts depend on how literally the table is read. Quotas are therefore implementation-defined until the spec fixes a canonical step count per form.
-- The language cannot build an environment with a new or replaced binding: every env ref derives from `environment::self`. `process::set-env`, and the hot reload of SPEC-CPI section 6 and DESIGN-001 section 8, therefore can't be driven from control plane code (`examples/life/20-rule-swap.slight`). DESIGN-001 has patches come from the pipeline, which is not specified yet.
+- The language cannot build an environment with a new or replaced binding: every env ref derives from `environment::self`. `process::set-env`, and the hot reload of SPEC-CPI section 6 and DESIGN-001 section 8, therefore can't be driven from control plane code (`examples/life/20-rule-swap.slight`). DESIGN-001 has patches come from the pipeline, which is not specified yet. *Proposed Sep 27, 2026:* building environments from roles (see Spec changes).
+- DESIGN-001 section 3 says what a `BEGIN` phaser adds "is a patch, composed onto the environment with the module rule: a conflict is an error", and that "a hot reload is simply a patch going through its phases". Section 8 says a hot reload's `Conflicted` slots "record what was replaced". Read together, replacing a name in a hot reload is an error. A reading that fits both: the module rule applies within a load, and a finished patch is composed onto a running environment with whatever strategy the control plane chooses.
+- DESIGN-001's primitive table lists "Compose slots; resolve; swap" for environments, but SPEC-CPI section 10.4 has no resolve, so `Conflicted` history can only grow.
+- DESIGN-001's appendix "Reference implementations" cites more-roles for the slot algebra but not the prototypes that build environments from it. Proposed row: | Environment construction | p5-MXCL, Term-Roles, p5-slight | `__older_prototypes__/MXCLs/p5-MXCL` (`lib/MXCL/Allocator/Roles.pm`, `Term/Role*.pm`, `Context.pm` base-scope layers, `Machine.pm` Define and Capture, `Runtime/Primitives.pm` `Role::*`, `Debugger/Scope.pm`); `__older_prototypes__/misc-experiments/Term-Roles`, commit `be6c0ba` (`src/Term.ts`); `__older_prototypes__/p5-slight` (`lib/Slight/Term.pm` `Partial`, `Compiler.pm`) | Environments as first-class, content-addressed slot maps; a base environment built in composed layers; `require` as `Required` slots; difference as the diff between environments; lambdas without an environment as the unit of content hashing | Global environments only; patches from definitions, not captured as a difference (MXCL's `make-role` carries the replaced binding inside a `Conflicted` slot); value identity by core hash; late binding instead of capturing the environment; a resolve step |
 - SPEC-CPI does not say what happens when several live processes receive on one address (spawning onto a live process's mailbox, or unparking one parked value twice). The prototype lets the newest process own it, and a non-durable mailbox dead-letters sends once that owner ends, even if others still wait on it.
 - The CPI has no way to wait for a particular process: `actor::join` and `actor::recv` are not available to it (SPEC-CPI section 1), and `host::wait` reports which PIDs woke but not why.
 - Nothing in SPEC-CPI reclaims ended processes or parked state: the process table and the park table only grow.
