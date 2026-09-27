@@ -9,7 +9,7 @@ SRC, OUT = sys.argv[1], sys.argv[2]
 lines = open(SRC).read().split('\n')
 
 SPECIAL = {'defun', 'const', 'let', 'lambda', 'if', 'when', 'case', 'cond', 'do',
-           'and', 'or', 'catch', 'quote', 'else'}
+           'and', 'or', 'catch', 'quote', 'else', 'role', 'require'}
 
 def esc(s):
     return html.escape(s, quote=False)
@@ -20,7 +20,10 @@ def inline(s):
     def keep(m):
         codes.append('<code>' + esc(m.group(1)) + '</code>')
         return f'\x00{len(codes) - 1}\x00'
-    t = re.sub(r'`([^`]+)`', keep, s)
+    # A span in double backticks may contain a backtick; one space of padding
+    # on each side is dropped, as in Markdown.
+    t = re.sub(r'``\s?(.+?)\s?``', keep, s)
+    t = re.sub(r'`([^`]+)`', keep, t)
     t = esc(t)
     t = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', t)
     t = re.sub(r'(?<![*\w])\*([^*\s][^*]*?)\*(?![*\w])', r'<em>\1</em>', t)
