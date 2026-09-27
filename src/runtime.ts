@@ -776,7 +776,8 @@ export class Runtime implements Handlers {
         }
         const missing = missingNamespace(eV.env, grants);
         if (missing !== null) return T('not-granted', `the environment needs ${missing}, which is not granted`, sym(missing));
-        this.bindingHashOf(eV.env);
+        // The environment is immutable, so its binding hash is already fixed;
+        // it is computed when first asked for (park, binding-hash) and cached.
         return V(eV);
     }
 

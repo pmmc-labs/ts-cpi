@@ -1,5 +1,28 @@
-; List helpers shared by the Game of Life examples and the runner. The
-; language has cons, car, cdr, list and append; everything else is here.
+; Helpers shared by the Game of Life examples and the runner: lists, and
+; environments for processes. The language has cons, car, cdr, list and
+; append; everything else is here.
+
+; ---------------------------------------------------------------------------
+; Environments for processes
+; ---------------------------------------------------------------------------
+
+; The environment a process runs in: `code`, a role holding the process's
+; own procedures, composed onto the CPI's environment, which supplies the
+; library procedures the role requires. Resolving it checks that every name
+; the role requires is filled and every host action it requires is in
+; `grants`. Building one costs about 10 microseconds, but parking a process
+; hashes its environment once per environment, so when processes will be
+; parked, build one and spawn them all in it.
+(defun process-env (code grants)
+    (environment::resolve (environment::compose (environment::self) code) grants))
+
+; A process that applies the procedure named `name` in `env` to `args`.
+(defun spawn-in (env name args grants mailbox)
+    (process::spawn (environment::lookup env name) args env grants mailbox))
+
+; ---------------------------------------------------------------------------
+; Lists
+; ---------------------------------------------------------------------------
 
 (defun second (xs) (car (cdr xs)))
 (defun third (xs) (car (cdr (cdr xs))))

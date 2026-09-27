@@ -68,15 +68,20 @@
 ; Thinkers: processes that answer by dying.
 ; ---------------------------------------------------------------------------
 
-(defun cp-thinker (row col alive neighbors)
-    (let count (sum neighbors))
-    (let next (life-rule alive count))
-    ; Not a tail call: this frame stays on the stack, holding the pad above.
-    (let answer (cp-confess))
-    answer)
+; A thinker's code, as a role. It uses no host action at all.
+(defun cp-thinker-code ()
+    (role
+        (require life-rule sum)
 
-(defun cp-confess ()
-    (throw (make-error :confession "I have nothing to say" ())))
+        (defun cp-thinker (row col alive neighbors)
+            (let count (sum neighbors))
+            (let next (life-rule alive count))
+            ; Not a tail call: this frame stays on the stack, holding the pad above.
+            (let answer (cp-confess))
+            answer)
+
+        (defun cp-confess ()
+            (throw (make-error :confession "I have nothing to say" ())))))
 
 ; Spawn a thinker for one cell, run it until it throws, and read its verdict
 ; from the stack it left behind. Returns the next generation's closure.
@@ -85,8 +90,7 @@
     (let row (car p))
     (let col (second p))
     (let neighbors (map (lambda (n) (cell-at board (car n) (second n))) (neighbors-of row col)))
-    (let pid (process::spawn cp-thinker (list row col (third p) neighbors)
-            (environment::self) () #false))
+    (let pid (spawn-in (process-env (cp-thinker-code) ()) 'cp-thinker (list row col (third p) neighbors) () #false))
     (let r (process::run pid 10000))
     (when (not (eq? (car r) :failed))
         (throw (make-error :thinker-survived "a thinker did not throw" r)))
@@ -102,8 +106,8 @@
     (IO::print "the first cell in the bag captured" (environment::closure-pad cell))
     (IO::print "calling it would throw:" (error-tag (catch (cell) e e)))
     (let p (cp-peek cell))
-    (let pid (process::spawn cp-thinker (list (car p) (second p) (third p) '(0 1 0 1 0 1 0 0))
-            (environment::self) () #false))
+    (let pid (spawn-in (process-env (cp-thinker-code) ()) 'cp-thinker
+            (list (car p) (second p) (third p) '(0 1 0 1 0 1 0 0)) () #false))
     (let e (second (process::run pid 10000)))
     (IO::print "a thinker for it (3 live neighbors) died with" (error-tag e) "payload" (error-payload e))
     (IO::print "  pad at the throw (level 0):" (environment::error-pad e 0))

@@ -31,22 +31,29 @@
 
 (const ja-quota 1000)
 
-; The zero at the bottom of every chain: waits for the message that ends it.
-(defun ja-anchor ()
-    (actor::recv))
+; The abacus's code, as a role. It needs only two host actions and nothing
+; of the CPI's, so its processes run in this role alone.
+(defun ja-bead-code ()
+    (role
+        (require actor::join actor::recv)
 
-; One unit: waits for the process below it to end.
-(defun ja-bead (below)
-    (actor::join below))
+        ; The zero at the bottom of every chain: waits for the message that ends it.
+        (defun ja-anchor ()
+            (actor::recv))
 
-(defun ja-start (f args)
-    (let p (process::spawn f args (environment::self) '(actor) #false))
+        ; One unit: waits for the process below it to end.
+        (defun ja-bead (below)
+            (actor::join below))))
+
+; Starts the procedure named `name` from the role and runs it until it blocks.
+(defun ja-start (name args)
+    (let p (spawn-in (environment::resolve (ja-bead-code) '(actor)) name args '(actor) #false))
     (process::run p ja-quota)
     p)
 
 ; Threads one bead onto a chain whose top is `top`; the bead is the new top.
 (defun ja-thread (top)
-    (ja-start ja-bead (list top)))
+    (ja-start 'ja-bead (list top)))
 
 ; Builds the abacus for one cell: an anchor plus one bead per live neighbor.
 (defun ja-build (board row col)
@@ -54,7 +61,7 @@
             (if (= (cell-at board (car p) (second p)) 1)
                 (ja-thread top)
                 top))
-        (ja-start ja-anchor ())
+        (ja-start 'ja-anchor ())
         (neighbors-of row col)))
 
 ; The chain from its top down to its anchor, found by following join edges.

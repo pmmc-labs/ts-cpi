@@ -61,7 +61,29 @@ engine computes a generation, nothing else happens.
 
 None of the old versions needed a rewrite of its core idea.
 
+The processes an engine spawns run code kept in a role, which declares the
+host actions and library procedures it uses (`process-env` and `spawn-in` in
+`examples/life/lib/lists.slight`). Literal death's and the hourglass's cells
+need only `actor::recv`, so they run in their roles alone.
+
 ## Measurements
+
+*Sep 27, 2026.* After the migration to `list`, `string-join`, vectors and a
+one-pass `map` (`DECISIONS.md` and the git log), measured the same way:
+
+| Engine | 64×32 engine ms | 64×32 draw ms | 128×64 engine ms | 128×64 draw ms |
+| --- | ---: | ---: | ---: | ---: |
+| Reference | 50 → 25 | 13 → 14 | 189 → 93 | 44 → 41 |
+| Row workers | 54 → 27 | 13 → 14 | 214 → 103 | 45 → 40 |
+| Decision tree | 1283 → 362 | 15 → 16 | | |
+| Mailboxes as memory | 62 → 34 | 13 → 17 | | |
+| Literal death | 74 → 45 | 14 → 16 | | |
+| Join dataflow | 219 → 161 | 13 → 16 | | |
+| Hourglass | 167 → 138 | 14 → 16 | | |
+
+Most of the engine gain is the one-pass `map`; the decision tree's first 3x
+is vectors (`board-cell`). Drawing did not get faster: see finding 4. The
+tables below are from Sep 26.
 
 These come from the real runner on a real (pseudo-)terminal, 200×60, with the
 R-pentomino at pace 0. "q answered" is the time from pressing q to the runner
@@ -118,7 +140,12 @@ renders the run screen in about 4 ms at either size
 (`spike/tui/probe/draw-cost.ts`). The remaining 9 ms at 64×32, and 40 ms at
 128×64, is slight code building the half-block strings: one `string-append`
 per cell. A `string-join` or `list->string` core operation would cut most of
-it.
+it. *Sep 27, 2026: wrong.* With `string-join`, building the lines for a 64×32
+board takes 2.7 ms against 5.5 ms for the old fold, but only when the cells
+are walked once (`map2`, one pass). Mapped with the old two-pass `map`, it
+was slower than the fold, and `string-join` itself takes 0.2 ms. Building
+the lines was about 5 ms of the 13, not 9, and the draw column barely moved:
+the rest of the view and Ink take the other 10 or so.
 
 **5. The runtime slowed down as programs ran.** Delivering a message, ending
 a process and `host::wait` scanned the whole process table, which keeps every

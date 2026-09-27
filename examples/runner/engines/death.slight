@@ -22,14 +22,20 @@
     (death-loop 0 (board-width board) (board-height board) rule (death-survival rule) registry undertaker
         born () born report))
 
-; A cell does nothing but live: it waits for a message that never comes.
-(defun death-cell ()
-    (actor::recv)
-    (death-cell))
+; A cell's code, as a role. It needs only `actor::recv`, so a cell runs in
+; this role alone, with nothing of the CPI's environment.
+(defun death-cell-code ()
+    (role
+        (require actor::recv)
+
+        ; A cell does nothing but live: it waits for a message that never comes.
+        (defun death-cell ()
+            (actor::recv)
+            (death-cell))))
 
 ; A newborn: spawned, watched by the undertaker, and run until it waits.
 (defun death-spawn (undertaker)
-    (let p (process::spawn death-cell () (environment::self) '(actor) #false))
+    (let p (spawn-in (environment::resolve (death-cell-code) '(actor)) 'death-cell () '(actor) #false))
     (process::watch p undertaker)
     (process::run p 100)
     p)

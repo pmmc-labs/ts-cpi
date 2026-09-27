@@ -4,18 +4,15 @@
 ; a while, and change it back, without the frames noticing? This version is
 ; one long-lived "world" process that computes every generation itself,
 ; reports each board to the CPI, and waits for a go-ahead between
-; generations. While it runs, the CPI swaps the Life rule four times:
+; generations. While it runs, the CPI changes its code four times:
 ;
-;   A. Swap the environment. SPEC-CPI says `process::set-env` changes which
-;      code later calls by name reach, so a hot reload would be: build an env
-;      in which `life-rule` means something else, and set it. The CPI tries.
-;      It can get env refs from `environment::self`, `environment::compose`,
-;      `process::env` and `environment::error-env`, but every one of them is
-;      the CPI's own env or a composition of it with itself: the binding
-;      hashes all match. There is no builtin that adds or replaces a binding,
-;      so the language cannot build the patch env a hot reload needs. The
-;      swap goes through (the world keeps running, unharmed), and changes
-;      nothing. This is a finding, printed at generation 1.
+;   A. Swap the environment. `process::set-env` changes which code later
+;      calls by name reach. The world calls `hr-step` by name every
+;      generation, so at generation 1 the CPI composes a patch onto the
+;      world's environment: a role whose `hr-step` computes the same board
+;      and also sends a note to an address the CPI put into the patch with
+;      `environment::define`. After the swap a note arrives every generation:
+;      the world is running code it was never given as a value.
 ;
 ;   B. Swap by message. The world takes its rule as a loop argument, and a
 ;      go-ahead may carry an upgrade. At generation 2 the CPI sends an
@@ -33,32 +30,51 @@
 ;
 ;   D. Swap back. At generation 6 the original `life-rule` is sent back, and
 ;      the CPI confirms, by reading the checkpoint, that the world is running
-;      exactly the code it started with.
+;      exactly the code it started with. The CPI also sets the world's
+;      environment back to the one it was spawned in: rolling back a hot
+;      reload is keeping the old env ref. The notes stop.
 ;
 ; Before every go-ahead the CPI names the rule the world holds, found by
 ; comparing the checkpoint's rule argument with `eq?`.
 ;
-; CPI features: `process::set-env`, `process::env`, `environment::compose`,
-; `environment::binding-hash`, `environment::conflicts`, `environment::error-env`,
-; closures sent in messages, `process::checkpoint` as editable data,
-; `process::kill` and respawn on a durable mailbox, quota preemption,
-; `mailbox::take`.
+; CPI features: roles, `environment::define` putting an address into a
+; patch, `environment::compose`, `environment::resolve`,
+; `environment::conflicts`, `environment::binding-hash`, `process::set-env`
+; and `process::env`, closures sent in messages, `process::checkpoint` as
+; editable data, `process::kill` and respawn on a durable mailbox, quota
+; preemption, `mailbox::take`.
 
 ; ---------------------------------------------------------------------------
 ; Inside the world (granted only actor)
 ; ---------------------------------------------------------------------------
 
-; Reports the board, waits for (go) or (upgrade rule), computes the next
-; generation with whichever rule it now holds, and loops. The rule is an
-; argument, so the checkpoint holds it.
-(defun hr-world (gen board rule out)
-    (actor::send out (list gen board))
-    (let msg (actor::recv))
-    (let next-rule (if (eq? (car msg) :upgrade) (second msg) rule))
-    (hr-world (+ gen 1) (hr-step next-rule board) next-rule out))
+; The world's code, as a role.
+(defun hr-world-code ()
+    (role
+        (require actor::recv actor::send)
+        (require cell-at make-board neighbor-count second)
 
-(defun hr-step (rule board)
-    (make-board (lambda (row col) (rule (cell-at board row col) (neighbor-count board row col)))))
+        ; Reports the board, waits for (go) or (upgrade rule), computes the next
+        ; generation with whichever rule it now holds, and loops. The rule is an
+        ; argument, so the checkpoint holds it. `hr-step` is called by name.
+        (defun hr-world (gen board rule out)
+            (actor::send out (list gen board))
+            (let msg (actor::recv))
+            (let next-rule (if (eq? (car msg) :upgrade) (second msg) rule))
+            (hr-world (+ gen 1) (hr-step next-rule board) next-rule out))
+
+        (defun hr-step (rule board)
+            (make-board (lambda (row col) (rule (cell-at board row col) (neighbor-count board row col)))))))
+
+; The patch for swap A: the same step, plus a note to `hr-notes` each time.
+; `hr-notes` is an address, which no role can write down: the CPI supplies
+; it with `environment::define`, so the authority it carries is visible.
+(defun hr-patch ()
+    (role
+        (require actor::send hr-notes cell-at make-board neighbor-count)
+        (defun hr-step (rule board)
+            (actor::send hr-notes :patched-step)
+            (make-board (lambda (row col) (rule (cell-at board row col) (neighbor-count board row col)))))))
 
 ; ---------------------------------------------------------------------------
 ; The replacement rules, made by the CPI and sent to the world
@@ -136,69 +152,71 @@
     (hr-run-world p)
     p)
 
-; Swap A: every env ref the CPI can lay its hands on, and a set-env.
-(defun hr-try-env-swap (p)
-    (let mine (environment::self))
-    (let worlds (process::env p))
-    (let composed (environment::compose mine worlds))
-    (let caught (catch (throw (make-error :probe "thrown only to capture an env" ())) e e))
-    (let thrown (environment::error-env caught))
-    (let hash (environment::binding-hash mine))
-    (IO::print "  swap A: looking for an env in which life-rule means something else")
-    (IO::print "    environment::self binding hash" hash)
-    (for-each (lambda (named)
-            (IO::print "   " (car named) "same hash:" (eq? (environment::binding-hash (second named)) hash)
-                "same life-rule:" (eq? (environment::lookup (second named) 'life-rule) life-rule)))
-        (list (list "process::env of the world," worlds)
-            (list "compose self with it," composed)
-            (list "environment::error-env of a probe," thrown)))
-    (IO::print "    conflicts in the composition:" (environment::conflicts composed))
-    (IO::print "    eq? of two environment::self refs:" (eq? mine (environment::self))
-        "(refs are compared by identity, so only the hash can tell envs apart)")
-    (IO::print "    process::set-env of the running world to the composition:" (process::set-env p composed))
-    (IO::print "  swap A: no builtin adds or replaces a binding, so every env ref is this one env.")
-    (IO::print "    The swap went through and changed nothing; the language cannot build a patch."))
+; Swap A: compose the patch onto the world's environment and set it.
+(defun hr-env-swap (p notes)
+    (let before (process::env p))
+    (let patch (environment::define (hr-patch) 'hr-notes notes))
+    (let after (environment::resolve (environment::compose before patch) '(actor)))
+    (IO::print "  swap A: a patch that redefines hr-step; it requires" (environment::required (hr-patch)))
+    (IO::print "    environment::define fills hr-notes with an address; still required:" (environment::required patch))
+    (IO::print "    composed onto the world's environment, conflicts:" (environment::conflicts after)
+        "binding hash changed:" (not (eq? (environment::binding-hash before) (environment::binding-hash after))))
+    (IO::print "    process::set-env of the running world:" (process::set-env p after)))
+
+; The notes the patched hr-step sent since the last look.
+(defun hr-print-notes (notes gen)
+    (let n (hr-count-notes notes 0))
+    (when (> n 0)
+        (IO::print "  notes from the patched hr-step during the step to generation" gen ":" n)))
+
+(defun hr-count-notes (notes n)
+    (if (eq? (mailbox::take notes) #false) n (hr-count-notes notes (+ n 1))))
 
 ; Swap C: preempt mid-generation, kill, edit the checkpoint, respawn.
-(defun hr-surgery (p home census new-rule)
+(defun hr-surgery (p home census notes new-rule)
     (mailbox::send home (list :go))
     (let r (process::run p 20000))
     (IO::print "  swap C: let the world start the next generation, then stopped it:" r)
+    (let env (process::env p))
     (process::kill p :surgery)
     (let cp (process::checkpoint p))
     (IO::print "    killed it; its checkpoint is (gen board rule out) with gen" (car cp))
     (let partial (hr-drain-census census 0 0 0 0))
-    (IO::print "    discarded" (list-ref partial 3) "census reports from the aborted attempt")
+    (IO::print "    discarded" (list-ref partial 3) "census reports and" (hr-count-notes notes 0)
+        "note from the aborted attempt")
     (let edited (cons (car cp) (cons (second cp) (cons new-rule (cdr (cdr (cdr cp)))))))
-    (let p2 (process::spawn hr-world edited (environment::self) '(actor) home))
-    (IO::print "    respawned it from the edited checkpoint on the same mailbox; it replays from there")
+    (let p2 (spawn-in env 'hr-world edited '(actor) home))
+    (IO::print "    respawned it from the edited checkpoint, in the environment it had, on the same mailbox")
     (hr-run-world p2)
     (hr-go p2 home (list :go)))
 
-; One transition per call: gen `shown` to gen `shown` + 1.
-(defun hr-drive (p home out census rules shown)
+; One transition per call: gen `shown` to gen `shown` + 1. `env` is the
+; environment the world was spawned in.
+(defun hr-drive (p env home out census notes rules shown)
     (if (= shown life-generations)
         (do
             (hr-show-rule p rules)
             (process::kill p :the-end)
-            (IO::print "the world ran" life-generations "generations under three rules and one empty env swap, and never knew"))
+            (IO::print "the world ran" life-generations "generations under three rules and one patched step, and never knew"))
         (do
             (hr-show-rule p rules)
             (let rule-of (lambda (i) (second (list-ref rules i))))
             (let p2 (case shown
                     (1 (do
-                            (hr-try-env-swap p)
+                            (hr-env-swap p notes)
                             (hr-go p home (list :go))))
                     (2 (do
                             (IO::print "  swap B: sending the counting rule in the go-ahead")
                             (hr-go p home (list :upgrade (rule-of 1)))))
-                    (4 (hr-surgery p home census (rule-of 2)))
+                    (4 (hr-surgery p home census notes (rule-of 2)))
                     (6 (do
-                            (IO::print "  swap D: sending the original life-rule back")
+                            (IO::print "  swap D: sending the original life-rule back, and setting the world's"
+                                "environment back to the one it was spawned in:" (process::set-env p env))
                             (hr-go p home (list :upgrade (rule-of 0)))))
                     (else (hr-go p home (list :go)))))
             (hr-print-census census (+ shown 1))
-            (hr-drive p2 home out census rules (hr-frames out shown)))))
+            (hr-print-notes notes (+ shown 1))
+            (hr-drive p2 env home out census notes rules (hr-frames out shown)))))
 
 (defun main ()
     (let out (mailbox::create #true 100))
@@ -207,7 +225,8 @@
     (let rules (list (list "life-rule, the original" life-rule)
             (list "the counting rule" (hr-counting-rule census))
             (list "the table rule" (hr-table-rule hr-table))))
-    (let p (process::spawn hr-world (list 0 (seed-board) life-rule out)
-            (environment::self) '(actor) home))
+    (let notes (mailbox::create #true 100))
+    (let env (process-env (hr-world-code) '(actor)))
+    (let p (spawn-in env 'hr-world (list 0 (seed-board) life-rule out) '(actor) home))
     (hr-run-world p)
-    (hr-drive p home out census rules (hr-frames out -1)))
+    (hr-drive p env home out census notes rules (hr-frames out -1)))

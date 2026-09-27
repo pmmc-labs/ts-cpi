@@ -14,44 +14,52 @@
 ; The workers
 ; ---------------------------------------------------------------------------
 
-; Never stops: always uses its whole quota.
-(defun counter (n)
-    (counter (+ n 1)))
+; The six workers, as one role. They use host actions and nothing of the
+; CPI's, so they run in this role alone: their environment holds these six
+; procedures and no other name.
+(defun tp-workers ()
+    (role
+        (require actor::recv actor::self actor::send timer::sleep)
 
-; Sleeps most of the time: shows (blocked host).
-(defun napper (naps)
-    (timer::sleep 400)
-    (napper (+ naps 1)))
+        ; Never stops: always uses its whole quota.
+        (defun counter (n)
+            (counter (+ n 1)))
 
-; Answers every message by sending its body back to the sender.
-(defun echo ()
-    (let msg (actor::recv))
-    (actor::send (car msg) (cdr msg))
-    (echo))
+        ; Sleeps most of the time: shows (blocked host).
+        (defun napper (naps)
+            (timer::sleep 400)
+            (napper (+ naps 1)))
 
-; Calls the echo server over and over: the two take turns blocking in recv.
-(defun caller (server n)
-    (actor::send server (cons (actor::self) n))
-    (actor::recv)
-    (caller server (+ n 1)))
+        ; Answers every message by sending its body back to the sender.
+        (defun echo ()
+            (let msg (actor::recv))
+            (actor::send (car msg) (cdr msg))
+            (echo))
 
-; Throws after a while: shows (failed e).
-(defun doomed (n)
-    (if (= n 300)
-        (throw (make-error :boom "reached 300" n))
-        (doomed (+ n 1))))
+        ; Calls the echo server over and over: the two take turns blocking in recv.
+        (defun caller (server n)
+            (actor::send server (cons (actor::self) n))
+            (actor::recv)
+            (caller server (+ n 1)))
 
-; Waits for a message that never comes.
-(defun waiter ()
-    (actor::recv))
+        ; Throws after a while: shows (failed e).
+        (defun doomed (n)
+            (if (= n 300)
+                (throw (make-error :boom "reached 300" n))
+                (doomed (+ n 1))))
+
+        ; Waits for a message that never comes.
+        (defun waiter ()
+            (actor::recv))))
 
 ; ---------------------------------------------------------------------------
 ; Process records and the state of the monitor
 ; ---------------------------------------------------------------------------
 
 ; A process record is (name pid last-stop-reason runs).
-(defun tp-spawn (name f args)
-    `(,name ,(process::spawn f args (environment::self) '(actor timer) #false) () 0))
+; `name` names both the record and the worker's procedure in `env`.
+(defun tp-spawn (env name args)
+    `(,name ,(spawn-in env name args '(actor timer) #false) () 0))
 
 (defun tp-name (p) (car p))
 (defun tp-pid (p) (second p))
@@ -114,7 +122,7 @@
         ("q" :quit)
         ("c" (if (member? :ctrl (third key)) :quit st))
         (" " (tp-note (tp-state (st-procs st) (st-selected st) (not (st-running st)) (st-quota st) (st-round st) (st-log st))
-                 (if (st-running st) '("paused") '("resumed"))))
+                (if (st-running st) '("paused") '("resumed"))))
         ("s" (if (st-running st) st (tp-advance st)))
         ("k" (tp-kill st))
         ("+" (tp-with-quota st (* (st-quota st) 2)))
@@ -133,7 +141,7 @@
 (defun tp-kill (st)
     (let p (list-ref (st-procs st) (st-selected st)))
     (catch (do (process::kill (tp-pid p) :killed-from-top)
-               (tp-note st `("killed " ,(symbol->string (tp-name p)))))
+            (tp-note st `("killed " ,(symbol->string (tp-name p)))))
         e
         (tp-note st `(,(symbol->string (tp-name p)) " has already ended"))))
 
@@ -172,7 +180,7 @@
 (defun tp-header ()
     `(Box
         ,@(map (lambda (col) (tp-cell (car col) `(Text (@ (dimColor #true)) ,(second col))))
-               '((2 "") (10 "name") (16 "state") (30 "last stop") (6 "runs")))))
+            '((2 "") (10 "name") (16 "state") (30 "last stop") (6 "runs")))))
 
 (defun tp-view (st)
     `(Box (@ (flexDirection column) (borderStyle round) (borderColor cyan) (paddingX 1) (width 70))
@@ -182,7 +190,7 @@
         (Box (@ (height 1)))
         ,(tp-header)
         ,@(map (lambda (i) (tp-row (list-ref (st-procs st) i) i (st-selected st)))
-               (range 0 (length (st-procs st))))
+            (range 0 (length (st-procs st))))
         (Box (@ (height 1)))
         ,@(map (lambda (line) `(Text (@ (dimColor #true)) ,@line)) (st-log st))
         (Box (@ (height 1)))
@@ -207,13 +215,14 @@
     (tui::open 'fullscreen)
     (let inbox (mailbox::create #true 100))
     (tui::subscribe inbox)
-    (let server (tp-spawn :echo echo ()))
-    (let procs `(,(tp-spawn :counter counter '(0))
-                 ,(tp-spawn :napper napper '(0))
-                 ,server
-                 ,(tp-spawn :caller caller (cons (process::address (tp-pid server)) '(0)))
-                 ,(tp-spawn :doomed doomed '(0))
-                 ,(tp-spawn :waiter waiter ())))
+    (let env (environment::resolve (tp-workers) '(actor timer)))
+    (let server (tp-spawn env :echo ()))
+    (let procs `(,(tp-spawn env :counter '(0))
+            ,(tp-spawn env :napper '(0))
+            ,server
+            ,(tp-spawn env :caller (cons (process::address (tp-pid server)) '(0)))
+            ,(tp-spawn env :doomed '(0))
+            ,(tp-spawn env :waiter ())))
     (let rounds (tp-loop (tp-state procs 0 #true 200 0 '(("started 6 processes"))) inbox))
     (tui::close)
     (IO::print "top: quit after" rounds "rounds"))

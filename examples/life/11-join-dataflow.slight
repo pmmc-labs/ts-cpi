@@ -31,38 +31,45 @@
 ; The processes. They are granted only `actor`.
 ; ---------------------------------------------------------------------------
 
-; Generation 0: nothing to wait for, just exit with the seed state.
-(defun jd-seed (state)
-    state)
+; The processes' code, as a role: seeds and cells alike.
+(defun jd-cell-code ()
+    (role
+        (require actor::join)
+        (require life-rule map second sum)
 
-; Generation g+1. `deps` is (self n1 .. n8): nine PIDs of generation g.
-(defun jd-cell (deps)
-    (let states (map jd-join-state deps))
-    (life-rule (car states) (sum (cdr states))))
+        ; Generation 0: nothing to wait for, just exit with the seed state.
+        (defun jd-seed (state)
+            state)
 
-; `actor::join` answers (exited v) once the process has ended.
-(defun jd-join-state (p)
-    (let r (actor::join p))
-    (second r))
+        ; Generation g+1. `deps` is (self n1 .. n8): nine PIDs of generation g.
+        (defun jd-cell (deps)
+            (let states (map jd-join-state deps))
+            (life-rule (car states) (sum (cdr states))))
+
+        ; `actor::join` answers (exited v) once the process has ended.
+        (defun jd-join-state (p)
+            (let r (actor::join p))
+            (second r))))
 
 ; ---------------------------------------------------------------------------
 ; Building the graph. A "pid board" has the shape of a board, with PIDs
 ; where the states would be, so `cell-at` and `neighbors-of` work on it.
 ; ---------------------------------------------------------------------------
 
-(defun jd-spawn (f args)
-    (process::spawn f args (environment::self) '(actor) #false))
+; A process running the procedure named `name` from the role.
+(defun jd-spawn (name args)
+    (spawn-in (process-env (jd-cell-code) '(actor)) name args '(actor) #false))
 
 (defun jd-seed-pids ()
     (let seed (seed-board))
-    (make-board (lambda (row col) (jd-spawn jd-seed (list (cell-at seed row col))))))
+    (make-board (lambda (row col) (jd-spawn 'jd-seed (list (cell-at seed row col))))))
 
 (defun jd-deps (prev row col)
     (cons (cell-at prev row col)
         (map (lambda (p) (cell-at prev (car p) (second p))) (neighbors-of row col))))
 
 (defun jd-next-pids (prev)
-    (make-board (lambda (row col) (jd-spawn jd-cell (list (jd-deps prev row col))))))
+    (make-board (lambda (row col) (jd-spawn 'jd-cell (list (jd-deps prev row col))))))
 
 ; A list of pid boards, generation 0 first.
 (defun jd-build (gen prev acc)

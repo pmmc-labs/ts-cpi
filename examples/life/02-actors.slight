@@ -33,55 +33,64 @@
 ; CPI features: actors with their own mailboxes, messages sent in a batch
 ; and delivered when it ends, `mailbox::send` from the CPI (introductions),
 ; a shared mailbox that nobody receives on (`mailbox::take`), a hand-written
-; round robin scheduler with per-process quotas, deadlock detection, and
-; exit values read back with `process::state`.
+; round robin scheduler with per-process quotas, deadlock detection, exit
+; values read back with `process::state`, and a role holding the cells' code.
 
 ; ---------------------------------------------------------------------------
 ; Inside a cell (granted actor)
 ; ---------------------------------------------------------------------------
 
-; A cell's first message is its introduction, (neighbors <collector> <addrs>):
-; the collector introduces it to its eight neighbors.
-(defun ac-cell (row col state)
-    (let intro (receive))
-    (ac-live row col 0 state (msg-body intro) () (msg-from intro) 0))
+; A cell's code, as a role. It sends and receives through the actor
+; library's `send` and `receive`, which use `actor::` themselves: the role
+; declares only what its own code touches, so `actor` does not appear in its
+; requirements, and resolving it cannot check that grant. A library's host
+; actions stay hidden unless the library is a role too.
+(defun ac-cell-code ()
+    (role
+        (require cell-index for-each length life-generations life-rule map msg-body msg-from receive second send sum)
 
-; One generation of a cell's life. `early` holds the neighbor states for
-; `gen` that arrived during the previous generation; `buffered` counts every
-; message this cell ever had to set aside.
-(defun ac-live (row col gen state neighbors early collector buffered)
-    (send collector :report (list gen (cell-index row col) state))
-    (if (= gen life-generations)
-        (list :retired buffered)
-        (do
-            (for-each (lambda (n) (send n :state (list gen state))) neighbors)
-            (let heard (ac-gather gen (- 8 (length early)) (sum (map second early)) ()))
-            (let later (second heard))
-            (ac-live row col (+ gen 1) (life-rule state (car heard)) neighbors later collector
-                (+ buffered (length later))))))
+        ; A cell's first message is its introduction, (neighbors <collector> <addrs>):
+        ; the collector introduces it to its eight neighbors.
+        (defun ac-cell (row col state)
+            (let intro (receive))
+            (ac-live row col 0 state (msg-body intro) () (msg-from intro) 0))
 
-; Receives until `need` more states for generation `gen` have arrived.
-; Returns (live-count early), with `early` the states for gen+1 that came in
-; the meantime, as (gen state) pairs.
-(defun ac-gather (gen need count early)
-    (if (= need 0)
-        (list count early)
-        (do
-            (let m (receive))
-            (let g (car (msg-body m)))
-            (let alive (second (msg-body m)))
-            (cond
-                ((= g gen) (ac-gather gen (- need 1) (+ count alive) early))
-                ((= g (+ gen 1)) (ac-gather gen need count (cons (msg-body m) early)))
-                (#true (throw (make-error :time-travel "a state from too far away in time" (list gen m))))))))
+        ; One generation of a cell's life. `early` holds the neighbor states for
+        ; `gen` that arrived during the previous generation; `buffered` counts every
+        ; message this cell ever had to set aside.
+        (defun ac-live (row col gen state neighbors early collector buffered)
+            (send collector :report (list gen (cell-index row col) state))
+            (if (= gen life-generations)
+                (list :retired buffered)
+                (do
+                    (for-each (lambda (n) (send n :state (list gen state))) neighbors)
+                    (let heard (ac-gather gen (- 8 (length early)) (sum (map second early)) ()))
+                    (let later (second heard))
+                    (ac-live row col (+ gen 1) (life-rule state (car heard)) neighbors later collector
+                        (+ buffered (length later))))))
+
+        ; Receives until `need` more states for generation `gen` have arrived.
+        ; Returns (live-count early), with `early` the states for gen+1 that came in
+        ; the meantime, as (gen state) pairs.
+        (defun ac-gather (gen need count early)
+            (if (= need 0)
+                (list count early)
+                (do
+                    (let m (receive))
+                    (let g (car (msg-body m)))
+                    (let alive (second (msg-body m)))
+                    (cond
+                        ((= g gen) (ac-gather gen (- need 1) (+ count alive) early))
+                        ((= g (+ gen 1)) (ac-gather gen need count (cons (msg-body m) early)))
+                        (#true (throw (make-error :time-travel "a state from too far away in time" (list gen m))))))))))
 
 ; ---------------------------------------------------------------------------
 ; The CPI: spawning, introductions, scheduling, observing
 ; ---------------------------------------------------------------------------
 
 ; Like `spawn-actor`, but quiet: 64 "spawned" lines would drown the board.
-(defun ac-spawn (row col state)
-    (let pid (process::spawn ac-cell (list row col state) (environment::self) '(actor) #false))
+(defun ac-spawn (env row col state)
+    (let pid (spawn-in env 'ac-cell (list row col state) '(actor) #false))
     (list (list row col) pid (process::address pid)))
 
 ; Cells are numbered by `cell-index`, so the cell list doubles as the board.
@@ -157,7 +166,8 @@
 (defun main ()
     (let collector (mailbox::create #true 1000))
     (let board (seed-board))
-    (let cells (map (lambda (i) (ac-spawn (index-row i) (index-col i) (cell-at board (index-row i) (index-col i))))
+    (let env (process-env (ac-cell-code) '(actor)))
+    (let cells (map (lambda (i) (ac-spawn env (index-row i) (index-col i) (cell-at board (index-row i) (index-col i))))
             (range 0 (cell-count))))
     (IO::print "[system] spawned" (length cells) "cell actors")
     (ac-introduce cells collector)

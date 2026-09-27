@@ -28,17 +28,24 @@
 ; The processes, granted only `actor`
 ; ---------------------------------------------------------------------------
 
-; Generation 0: nothing to wait for, just exit with the starting state.
-(defun dataflow-seed (state)
-    state)
+; The processes' code, as a role: seeds and cells alike. One environment
+; built from it serves every process of every generation.
+(defun dataflow-cell-code ()
+    (role
+        (require actor::join)
+        (require map rule-next second sum)
 
-; Generation g+1. `deps` is (self n1 .. n8): nine PIDs of generation g.
-(defun dataflow-cell (rule deps)
-    (let states (map dataflow-join-state deps))
-    (rule-next rule (car states) (sum (cdr states))))
+        ; Generation 0: nothing to wait for, just exit with the starting state.
+        (defun dataflow-seed (state)
+            state)
 
-(defun dataflow-join-state (p)
-    (second (actor::join p)))
+        ; Generation g+1. `deps` is (self n1 .. n8): nine PIDs of generation g.
+        (defun dataflow-cell (rule deps)
+            (let states (map dataflow-join-state deps))
+            (rule-next rule (car states) (sum (cdr states))))
+
+        (defun dataflow-join-state (p)
+            (second (actor::join p)))))
 
 ; ---------------------------------------------------------------------------
 ; The generic scheduler: it sees only PIDs.
@@ -71,8 +78,9 @@
 ; Building the graph. A pid board is rows of PIDs, one row per board row.
 ; ---------------------------------------------------------------------------
 
-(defun dataflow-spawn (f args)
-    (process::spawn f args (environment::self) '(actor) #false))
+; A process running the procedure named `name` from the cells' role.
+(defun dataflow-spawn (env name args)
+    (spawn-in env name args '(actor) #false))
 
 ; For each element of each row, the list (self n1 .. n8) of it and its
 ; neighbors on the torus.
@@ -85,8 +93,8 @@
                 above row below))
         (rotate-right ts) ts (rotate-left ts)))
 
-(defun dataflow-next-pids (rule prev)
-    (map (lambda (row) (map (lambda (deps) (dataflow-spawn dataflow-cell (list rule deps))) row))
+(defun dataflow-next-pids (env rule prev)
+    (map (lambda (row) (map (lambda (deps) (dataflow-spawn env 'dataflow-cell (list rule deps))) row))
         (dataflow-neighborhoods prev)))
 
 (defun dataflow-flatten (rows) (fold append () (reverse rows)))
@@ -109,22 +117,23 @@
 (defun dataflow-engine (config report)
     (let rule (config-rule config))
     (let board (config-board config))
-    (let seeds (map (lambda (row) (map (lambda (s) (dataflow-spawn dataflow-seed (list s))) row))
+    (let env (process-env (dataflow-cell-code) '(actor)))
+    (let seeds (map (lambda (row) (map (lambda (s) (dataflow-spawn env 'dataflow-seed (list s))) row))
             (board-rows board)))
-    (let window (dataflow-grow rule (list seeds) dataflow-ahead))
+    (let window (dataflow-grow env rule (list seeds) dataflow-ahead))
     (let cells (* (board-width board) (board-height board)))
-    (dataflow-loop rule report 0 (board-width board) (board-height board) window
+    (dataflow-loop env rule report 0 (board-width board) (board-height board) window
         (* cells (+ dataflow-ahead 1))))
 
 
 ; Spawns `n` more generations on top of the window (oldest first).
-(defun dataflow-grow (rule window n)
+(defun dataflow-grow (env rule window n)
     (if (= n 0)
         window
-        (dataflow-grow rule (append window (list (dataflow-next-pids rule (last window)))) (- n 1))))
+        (dataflow-grow env rule (append window (list (dataflow-next-pids env rule (last window)))) (- n 1))))
 
 ; `window` holds the pid boards of generations gen .. gen+ahead.
-(defun dataflow-loop (rule report gen width height window created)
+(defun dataflow-loop (env rule report gen width height window created)
     (let oldest (dataflow-flatten (car window)))
     (let all (fold (lambda (acc pids) (append (dataflow-flatten pids) acc)) () window))
     (let run (dataflow-schedule all (lambda () (all? dataflow-ended? oldest)) 0 0 0))
@@ -134,6 +143,6 @@
             ("rounds / batches" ,(text-of `(,(car run) " / " ,(second run))))
             ("batches that blocked in join" ,(third run))))
     (if (eq? (report gen (board-make width height (dataflow-frame (car window))) notes) :continue)
-        (dataflow-loop rule report (+ gen 1) width height (dataflow-grow rule (cdr window) 1)
+        (dataflow-loop env rule report (+ gen 1) width height (dataflow-grow env rule (cdr window) 1)
             (+ created (* width height)))
         (for-each (lambda (p) (when (not (dataflow-ended? p)) (process::kill p :stop))) all)))

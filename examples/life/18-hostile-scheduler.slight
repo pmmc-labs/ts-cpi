@@ -43,13 +43,19 @@
 ; Inside a worker (granted only actor)
 ; ---------------------------------------------------------------------------
 
-; A job is (gen index board). The answer is (gen index value worker-id).
-(defun hs-worker (id results)
-    (let job (actor::recv))
-    (let index (second job))
-    (let value (step-cell (third job) (index-row index) (index-col index)))
-    (actor::send results (list (car job) index value id))
-    (hs-worker id results))
+; A worker's code, as a role.
+(defun hs-worker-code ()
+    (role
+        (require actor::recv actor::send)
+        (require index-col index-row second step-cell third)
+
+        ; A job is (gen index board). The answer is (gen index value worker-id).
+        (defun hs-worker (id results)
+            (let job (actor::recv))
+            (let index (second job))
+            (let value (step-cell (third job) (index-row index) (index-col index)))
+            (actor::send results (list (car job) index value id))
+            (hs-worker id results))))
 
 ; ---------------------------------------------------------------------------
 ; The dice: a pure hash of (gen slice salt), so the chaos is reproducible.
@@ -156,8 +162,8 @@
 (defun main ()
     (let jobs (mailbox::create #true 1000))
     (let results (mailbox::create #true 1000))
-    (let workers (map (lambda (id)
-                (list id (process::spawn hs-worker (list id results) (environment::self) '(actor) jobs)))
+    (let env (process-env (hs-worker-code) '(actor)))
+    (let workers (map (lambda (id) (list id (spawn-in env 'hs-worker (list id results) '(actor) jobs)))
             (range 0 hs-worker-count)))
     (IO::print "four workers share one job queue; the scheduler is out to get them")
     (hs-run 0 (seed-board) (seed-board) jobs results workers))

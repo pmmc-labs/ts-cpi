@@ -19,7 +19,8 @@
 ; Raw builtins only, no actor library: `process::spawn`, `process::run`,
 ; `process::state`, `mailbox::create`, `mailbox::send`, `mailbox::take`,
 ; `mailbox::size`, and inside the workers `actor::recv` and `actor::send`.
-; Workers are granted only `actor`: they cannot even print.
+; Workers are granted only `actor`: they cannot even print. Their code is a
+; role, so the host actions they use are declared and checked at spawn.
 
 ; Ticks a worker may run before it is preempted. Small on purpose: a worker
 ; needs several thousand ticks per row, so every superstep interleaves them.
@@ -32,35 +33,43 @@
 ; Inside a worker (granted actor only)
 ; ---------------------------------------------------------------------------
 
-; The number of live cells among the three cells centered on `col`.
-(defun rw-triple (row col)
-    (+ (list-ref row (wrap (- col 1) life-width))
-        (+ (list-ref row col)
-            (list-ref row (wrap (+ col 1) life-width)))))
+; A worker's code, as a role: it requires the host actions it uses and the
+; library procedures it calls, and anything else it touched would stop
+; this file from loading.
+(defun rw-worker-code ()
+    (role
+        (require actor::recv actor::send)
+        (require life-rule life-width list-ref map range second third wrap)
 
-; The next state of the middle row, from the rows above and below it.
-(defun rw-step-row (above own below)
-    (map (lambda (col)
-            (do
-                (let alive (list-ref own col))
-                (let count (- (+ (rw-triple above col)
-                            (+ (rw-triple own col) (rw-triple below col)))
-                        alive))
-                (life-rule alive count)))
-        (range 0 life-width)))
+        ; The number of live cells among the three cells centered on `col`.
+        (defun rw-triple (row col)
+            (+ (list-ref row (wrap (- col 1) life-width))
+                (+ (list-ref row col)
+                    (list-ref row (wrap (+ col 1) life-width)))))
 
-; A worker's whole life. Each work order is (gen above own below); the answer,
-; sent to the shared result mailbox, is (row gen new-row). `:stop` ends it.
-(defun rw-worker (row results)
-    (let order (actor::recv))
-    (if (eq? order :stop)
-        (list :rows-done row)
-        (do
-            (let gen (car order))
-            (let rows (cdr order))
-            (let new-row (rw-step-row (car rows) (second rows) (third rows)))
-            (actor::send results (list row (+ gen 1) new-row))
-            (rw-worker row results))))
+        ; The next state of the middle row, from the rows above and below it.
+        (defun rw-step-row (above own below)
+            (map (lambda (col)
+                    (do
+                        (let alive (list-ref own col))
+                        (let count (- (+ (rw-triple above col)
+                                    (+ (rw-triple own col) (rw-triple below col)))
+                                alive))
+                        (life-rule alive count)))
+                (range 0 life-width)))
+
+        ; A worker's whole life. Each work order is (gen above own below); the answer,
+        ; sent to the shared result mailbox, is (row gen new-row). `:stop` ends it.
+        (defun rw-worker (row results)
+            (let order (actor::recv))
+            (if (eq? order :stop)
+                (list :rows-done row)
+                (do
+                    (let gen (car order))
+                    (let rows (cdr order))
+                    (let new-row (rw-step-row (car rows) (second rows) (third rows)))
+                    (actor::send results (list row (+ gen 1) new-row))
+                    (rw-worker row results))))))
 
 ; ---------------------------------------------------------------------------
 ; The CPI: supersteps
@@ -143,8 +152,8 @@
 (defun main ()
     ; One shared result mailbox. Nobody receives on it: only the CPI takes.
     (let results (mailbox::create #true 100))
-    (let workers (map (lambda (row)
-                (process::spawn rw-worker (list row results) (environment::self) '(actor) #false))
+    (let env (process-env (rw-worker-code) '(actor)))
+    (let workers (map (lambda (row) (spawn-in env 'rw-worker (list row results) '(actor) #false))
             (range 0 life-height)))
     (IO::print "[cpi] spawned" (length workers) "row workers, one result mailbox")
     (rw-loop workers results 0 (seed-board))

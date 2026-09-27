@@ -20,34 +20,40 @@
 ; Inside a cell (granted actor only)
 ; ---------------------------------------------------------------------------
 
-; A cell's first message is the list of its neighbors' addresses.
-(defun actors-cell (index rule collector state)
-    (let neighbors (actor::recv))
-    (actors-live index rule collector neighbors 0 state () 0))
+; A cell's code, as a role.
+(defun actors-cell-code ()
+    (role
+        (require actor::recv actor::send)
+        (require for-each length map rule-next second sum)
 
-; One generation. `early` holds the (gen state) messages for `gen` that
-; arrived while the cell was still gathering the generation before.
-(defun actors-live (index rule collector neighbors gen state early buffered)
-    (actor::send collector `(,index ,gen ,state ,buffered))
-    (for-each (lambda (n) (actor::send n (list gen state))) neighbors)
-    (let heard (actors-gather gen (- 8 buffered) (sum (map second early)) ()))
-    (let later (second heard))
-    (actors-live index rule collector neighbors (+ gen 1) (rule-next rule state (car heard))
-        later (length later)))
+        ; A cell's first message is the list of its neighbors' addresses.
+        (defun actors-cell (index rule collector state)
+            (let neighbors (actor::recv))
+            (actors-live index rule collector neighbors 0 state () 0))
 
-; Receives until `need` more states for generation `gen` have arrived.
-; Returns (live-count early), `early` being the states for gen+1 that came
-; in the meantime.
-(defun actors-gather (gen need count early)
-    (if (= need 0)
-        (list count early)
-        (do
-            (let m (actor::recv))
-            (let g (car m))
-            (cond
-                ((= g gen) (actors-gather gen (- need 1) (+ count (second m)) early))
-                ((= g (+ gen 1)) (actors-gather gen need count (cons m early)))
-                (#true (throw (make-error :time-travel "a state from too far away in time" (list gen m))))))))
+        ; One generation. `early` holds the (gen state) messages for `gen` that
+        ; arrived while the cell was still gathering the generation before.
+        (defun actors-live (index rule collector neighbors gen state early buffered)
+            (actor::send collector `(,index ,gen ,state ,buffered))
+            (for-each (lambda (n) (actor::send n (list gen state))) neighbors)
+            (let heard (actors-gather gen (- 8 buffered) (sum (map second early)) ()))
+            (let later (second heard))
+            (actors-live index rule collector neighbors (+ gen 1) (rule-next rule state (car heard))
+                later (length later)))
+
+        ; Receives until `need` more states for generation `gen` have arrived.
+        ; Returns (live-count early), `early` being the states for gen+1 that came
+        ; in the meantime.
+        (defun actors-gather (gen need count early)
+            (if (= need 0)
+                (list count early)
+                (do
+                    (let m (actor::recv))
+                    (let g (car m))
+                    (cond
+                        ((= g gen) (actors-gather gen (- need 1) (+ count (second m)) early))
+                        ((= g (+ gen 1)) (actors-gather gen need count (cons m early)))
+                        (#true (throw (make-error :time-travel "a state from too far away in time" (list gen m))))))))))
 
 ; ---------------------------------------------------------------------------
 ; The CPI: spawning, introductions, scheduling, observing
@@ -56,13 +62,13 @@
 ; A cell record is (index pid quota).
 (defun actors-spawn (board rule collector)
     (let w (board-width board))
+    (let env (process-env (actors-cell-code) '(actor)))
     (map2 (lambda (r row)
             (map2 (lambda (c state)
                     (do
                         (let index (+ (* r w) c))
                         (list index
-                            (process::spawn actors-cell `(,index ,rule ,collector ,state)
-                                (environment::self) '(actor) #false)
+                            (spawn-in env 'actors-cell `(,index ,rule ,collector ,state) '(actor) #false)
                             (actors-quota index))))
                 (range 0 w) row))
         (range 0 (board-height board)) (board-rows board)))

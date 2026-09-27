@@ -19,14 +19,20 @@
 ; Inside a worker (granted actor only)
 ; ---------------------------------------------------------------------------
 
-; Each work order is (gen above own below); the answer, sent to the shared
-; result mailbox, is (row gen+1 new-row).
-(defun rows-worker (row rule results)
-    (let order (actor::recv))
-    (let rows (cdr order))
-    (actor::send results
-        (list row (+ (car order) 1) (step-row rule (car rows) (second rows) (third rows))))
-    (rows-worker row rule results))
+; A worker's code, as a role.
+(defun rows-worker-code ()
+    (role
+        (require actor::recv actor::send)
+        (require second step-row third)
+
+        ; Each work order is (gen above own below); the answer, sent to the shared
+        ; result mailbox, is (row gen+1 new-row).
+        (defun rows-worker (row rule results)
+            (let order (actor::recv))
+            (let rows (cdr order))
+            (actor::send results
+                (list row (+ (car order) 1) (step-row rule (car rows) (second rows) (third rows))))
+            (rows-worker row rule results))))
 
 ; ---------------------------------------------------------------------------
 ; The CPI: supersteps
@@ -121,8 +127,8 @@
     (let rule (config-rule config))
     ; One shared result mailbox. Nobody receives on it: only the CPI takes.
     (let results (mailbox::create #true h))
-    (let workers (map (lambda (row)
-                (list (process::spawn rows-worker (list row rule results) (environment::self) '(actor) #false) row))
+    (let env (process-env (rows-worker-code) '(actor)))
+    (let workers (map (lambda (row) (list (spawn-in env 'rows-worker (list row rule results) '(actor) #false) row))
             (range 0 h)))
     (if (eq? (report 0 board `(("row workers" ,h))) :stop)
         (rows-kill workers)

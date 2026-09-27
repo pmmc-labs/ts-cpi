@@ -40,20 +40,27 @@
 ; Inside a cell (granted actor only)
 ; ---------------------------------------------------------------------------
 
-; A cell's whole life: announce, listen, apply the rule, repeat. Its state is
-; the argument `state`; `neighbors` are eight mailbox addresses.
-(defun tw-cell (neighbors state)
-    (tw-announce neighbors state)
-    (tw-cell neighbors (life-rule state (tw-listen 8 0))))
+; A cell's code, as a role. Its sends and recvs all trap to the CPI, but it
+; still declares them: they are its interface.
+(defun tw-cell-code ()
+    (role
+        (require actor::recv actor::send)
+        (require for-each life-rule second)
 
-(defun tw-announce (neighbors state)
-    (for-each (lambda (n) (actor::send n (list :state state))) neighbors))
+        ; A cell's whole life: announce, listen, apply the rule, repeat. Its state is
+        ; the argument `state`; `neighbors` are eight mailbox addresses.
+        (defun tw-cell (neighbors state)
+            (tw-announce neighbors state)
+            (tw-cell neighbors (life-rule state (tw-listen 8 0))))
 
-; Receives `k` messages of the form (state s) and sums the states.
-(defun tw-listen (k total)
-    (if (= k 0)
-        total
-        (tw-listen (- k 1) (+ total (second (actor::recv))))))
+        (defun tw-announce (neighbors state)
+            (for-each (lambda (n) (actor::send n (list :state state))) neighbors))
+
+        ; Receives `k` messages of the form (state s) and sums the states.
+        (defun tw-listen (k total)
+            (if (= k 0)
+                total
+                (tw-listen (- k 1) (+ total (second (actor::recv))))))))
 
 ; ---------------------------------------------------------------------------
 ; The world (the CPI)
@@ -140,13 +147,14 @@
     ; can name. Nothing will ever be put in one.
     (let boxes (make-board (lambda (row col) (mailbox::create #true 8))))
     (let seed (seed-board))
+    (let env (process-env (tw-cell-code) '(actor)))
     (let pids
         (make-board (lambda (row col)
-                (process::spawn tw-cell
+                (spawn-in env 'tw-cell
                     (list (map (lambda (p) (cell-at boxes (car p) (second p)))
                             (neighbors-of row col))
                         (cell-at seed row col))
-                    (environment::self) '(actor) (cell-at boxes row col)))))
+                    '(actor) (cell-at boxes row col)))))
     ; Generation 0: each cell announces its seed state and stops to listen.
     ; The world reads the first board from what they said.
     (let results

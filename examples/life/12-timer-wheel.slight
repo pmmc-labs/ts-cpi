@@ -33,15 +33,23 @@
 (const tw-period 1000)
 (const tw-sentinel 999)
 
-; The sleeper: granted only `timer`. It knows nothing, not even which cell it
-; is; the CPI chose how long it sleeps.
-(defun tw-sleeper (ms)
-    (timer::sleep ms))
+; The sleeper's code, as a role: it needs only `timer::sleep`, so it runs in
+; this role alone, with nothing of the CPI's environment.
+(defun tw-sleeper-code ()
+    (role
+        (require timer::sleep)
+
+        ; The sleeper: granted only `timer`. It knows nothing, not even which cell it
+        ; is; the CPI chose how long it sleeps.
+        (defun tw-sleeper (ms)
+            (timer::sleep ms))))
 
 ; Spawn a sleeper that wakes at absolute time `at`. `timer::sleep` counts
 ; from the moment the process first runs, so run it at once, now, to arm it.
+; Each sleeper gets its environment here, so the wheel keeps no other state.
 (defun tw-arm (at)
-    (let p (process::spawn tw-sleeper (list (- at (host::now))) (environment::self) '(timer) #false))
+    (let env (environment::resolve (tw-sleeper-code) '(timer)))
+    (let p (spawn-in env 'tw-sleeper (list (- at (host::now))) '(timer) #false))
     (process::run p 100))
 
 ; Write generation `gen` into the future: one timer per live cell, then the

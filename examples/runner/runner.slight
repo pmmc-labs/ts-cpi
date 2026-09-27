@@ -202,7 +202,7 @@
         (#true (cons (rn-pair-line (car rows) (second rows)) (rn-board-lines (cdr (cdr rows)))))))
 
 (defun rn-pair-line (top bottom)
-    (string-join "" (map (lambda (pair) (rn-half (car pair) (second pair))) (zip top bottom))))
+    (string-join "" (map2 rn-half top bottom)))
 
 (defun rn-half (top bottom)
     (if (= top 1)

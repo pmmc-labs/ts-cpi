@@ -35,11 +35,17 @@
 ; Inside a cell (granted actor only)
 ; ---------------------------------------------------------------------------
 
-; A cell does nothing but live, and mourn: every message it ever receives is
-; the terminated signal of a neighbor.
-(defun ld-cell (row col born mourned)
-    (let signal (actor::recv))
-    (ld-cell row col born (+ mourned 1)))
+; A cell's code, as a role. It requires only `actor::recv`, so it runs in
+; this role alone: nothing of the CPI's environment is visible to it.
+(defun ld-cell-code ()
+    (role
+        (require actor::recv)
+
+        ; A cell does nothing but live, and mourn: every message it ever receives is
+        ; the terminated signal of a neighbor.
+        (defun ld-cell (row col born mourned)
+            (let signal (actor::recv))
+            (ld-cell row col born (+ mourned 1)))))
 
 ; ---------------------------------------------------------------------------
 ; Fate (the CPI)
@@ -84,8 +90,7 @@
         registry))
 
 (defun ld-spawn (row col gen undertaker)
-    (let p (process::spawn ld-cell (list row col gen 0)
-            (environment::self) '(actor) #false))
+    (let p (spawn-in (environment::resolve (ld-cell-code) '(actor)) 'ld-cell (list row col gen 0) '(actor) #false))
     (process::watch p undertaker)
     p)
 

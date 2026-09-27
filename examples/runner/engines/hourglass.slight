@@ -23,7 +23,7 @@
     (let marks (hourglass-calibrate))
     (let glasses (map (lambda (row) (map (lambda (cell) (hourglass-new)) row)) (board-rows board)))
     (let base `(("hourglasses" ,(* (board-width board) (board-height board)))
-                ("tick marks T0..T8" ,(value->string marks))))
+            ("tick marks T0..T8" ,(value->string marks))))
     (hourglass-loop (config-rule config) marks glasses base 0 board base report))
 
 (defun hourglass-loop (rule marks glasses base gen board notes report)
@@ -31,8 +31,8 @@
         (do
             (let counts (hourglass-read-board marks glasses board))
             (let next (board-make (board-width board) (board-height board)
-                          (map2 (lambda (row crow) (map2 (lambda (alive n) (rule-next rule alive n)) row crow))
-                              (board-rows board) counts)))
+                    (map2 (lambda (row crow) (map2 (lambda (alive n) (rule-next rule alive n)) row crow))
+                        (board-rows board) counts)))
             (hourglass-loop rule marks glasses base (+ gen 1) next (hourglass-notes base marks counts) report))
         (for-each (lambda (row) (for-each (lambda (p) (process::kill p :stop)) row)) glasses)))
 
@@ -40,26 +40,32 @@
 ; Inside an hourglass (granted only actor, to wait for its sand)
 ; ---------------------------------------------------------------------------
 
-(defun hourglass-glass ()
-    (hourglass-pour (actor::recv))
-    (hourglass-glass))
+; The hourglass's code, as a role. It needs only `actor::recv`, so each
+; glass runs in this role alone.
+(defun hourglass-glass-code ()
+    (role
+        (require actor::recv)
 
-; One grain per live neighbor: a loop whose running time depends on the data.
-(defun hourglass-pour (states)
-    (if (nil? states)
-        :empty
-        (do
-            (hourglass-grain (car states))
-            (hourglass-pour (cdr states)))))
+        (defun hourglass-glass ()
+            (hourglass-pour (actor::recv))
+            (hourglass-glass))
 
-(defun hourglass-grain (n)
-    (if (= n 0)
-        ()
-        (hourglass-grain (- n 1))))
+        ; One grain per live neighbor: a loop whose running time depends on the data.
+        (defun hourglass-pour (states)
+            (if (nil? states)
+                :empty
+                (do
+                    (hourglass-grain (car states))
+                    (hourglass-pour (cdr states)))))
+
+        (defun hourglass-grain (n)
+            (if (= n 0)
+                ()
+                (hourglass-grain (- n 1))))))
 
 ; A new hourglass, run until it waits for its first sand.
 (defun hourglass-new ()
-    (let p (process::spawn hourglass-glass () (environment::self) '(actor) #false))
+    (let p (spawn-in (environment::resolve (hourglass-glass-code) '(actor)) 'hourglass-glass () '(actor) #false))
     (process::run p 1000)
     p)
 
@@ -79,9 +85,9 @@
 (defun hourglass-calibrate ()
     (let p (hourglass-new))
     (let marks (map (lambda (k)
-                    (hourglass-turn p (map (lambda (i) (if (< i k) 1 0)) (range 0 8)))
-                    (hourglass-stopwatch p 1))
-                   (range 0 9)))
+                (hourglass-turn p (map (lambda (i) (if (< i k) 1 0)) (range 0 8)))
+                (hourglass-stopwatch p 1))
+            (range 0 9)))
     (process::kill p :calibrated)
     marks)
 
@@ -104,17 +110,17 @@
     (fold (lambda (acc xs) (map2 cons xs acc))
         (map (lambda (x) ()) row)
         `(,(rotate-right above) ,above ,(rotate-left above)
-          ,(rotate-right row) ,(rotate-left row)
-          ,(rotate-right below) ,below ,(rotate-left below))))
+            ,(rotate-right row) ,(rotate-left row)
+            ,(rotate-right below) ,below ,(rotate-left below))))
 
 ; The neighbor count of every cell, as rows, read from the hourglasses.
 (defun hourglass-read-board (marks glasses board)
     (let rows (board-rows board))
     (map2 (lambda (grow states)
-              (map2 (lambda (p s)
-                        (hourglass-turn p s)
-                        (hourglass-read p marks 0 0))
-                  grow states))
+            (map2 (lambda (p s)
+                    (hourglass-turn p s)
+                    (hourglass-read p marks 0 0))
+                grow states))
         glasses
         (map3 hourglass-row-states (rotate-right rows) rows (rotate-left rows))))
 
@@ -122,4 +128,4 @@
     (let flat (fold (lambda (acc row) (append row acc)) () counts))
     (append base
         `(("ran dry at T0..T8" ,(value->string (map (lambda (k) (length (filter (lambda (n) (= n k)) flat))) (range 0 9))))
-          ("ticks poured" ,(fold (lambda (t n) (+ t (list-ref marks n))) 0 flat)))))
+            ("ticks poured" ,(fold (lambda (t n) (+ t (list-ref marks n))) 0 flat)))))

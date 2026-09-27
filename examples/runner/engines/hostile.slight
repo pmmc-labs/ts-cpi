@@ -34,8 +34,8 @@
     (let jobs (mailbox::create #true (+ (* 2 n) 16)))
     (let results (mailbox::create #true 1000))
     (let cost (hostile-job-cost rule))
-    (let workers (map (lambda (id)
-                (list id (process::spawn hostile-worker (list id rule results) (environment::self) '(actor) jobs)))
+    (let env (process-env (hostile-worker-code) '(actor)))
+    (let workers (map (lambda (id) (list id (spawn-in env 'hostile-worker (list id rule results) '(actor) jobs)))
             (range 0 hostile-worker-count)))
     (let state `(,jobs ,results ,workers ,cost ,(hostile-depth n 0)))
     (hostile-loop state 0 board board
@@ -56,12 +56,18 @@
 ; Inside a worker (granted only actor)
 ; ---------------------------------------------------------------------------
 
-; A job is (gen index center neighbors). The answer is (gen index value id).
-(defun hostile-worker (id rule results)
-    (let job (actor::recv))
-    (let value (rule-next rule (third job) (sum (list-ref job 3))))
-    (actor::send results `(,(car job) ,(second job) ,value ,id))
-    (hostile-worker id rule results))
+; A worker's code, as a role.
+(defun hostile-worker-code ()
+    (role
+        (require actor::recv actor::send)
+        (require list-ref rule-next second sum third)
+
+        ; A job is (gen index center neighbors). The answer is (gen index value id).
+        (defun hostile-worker (id rule results)
+            (let job (actor::recv))
+            (let value (rule-next rule (third job) (sum (list-ref job 3))))
+            (actor::send results `(,(car job) ,(second job) ,value ,id))
+            (hostile-worker id rule results))))
 
 ; ---------------------------------------------------------------------------
 ; The dice: a pure hash of (gen slice salt), so the chaos is reproducible.
@@ -86,7 +92,7 @@
 (defun hostile-job-cost (rule)
     (let q (mailbox::create #true 4))
     (let sink (mailbox::create #true 4))
-    (let p (process::spawn hostile-worker (list 9 rule sink) (environment::self) '(actor) q))
+    (let p (spawn-in (process-env (hostile-worker-code) '(actor)) 'hostile-worker (list 9 rule sink) '(actor) q))
     (process::run p 1000)
     (mailbox::send q '(0 0 1 (1 1 0 0 1 0 0 0)))
     (let ticks (hostile-stopwatch p 1))

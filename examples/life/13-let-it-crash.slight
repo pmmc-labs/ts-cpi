@@ -41,15 +41,21 @@
 ; Inside a cell (granted actor only)
 ; ---------------------------------------------------------------------------
 
-; One life of a cell. It waits for the news of its neighborhood, judges
-; itself, and either lives on or crashes.
-(defun lc-cell (row col age lives)
-    (let news (actor::recv))
-    (let count (second news))
-    (let cause (cond ((< count 2) "loneliness") ((> count 3) "overcrowding") (#true #false)))
-    (if (eq? cause #false)
-        (lc-cell row col (+ age 1) lives)
-        (throw (make-error :died cause count))))
+; A cell's code, as a role.
+(defun lc-cell-code ()
+    (role
+        (require actor::recv)
+        (require second)
+
+        ; One life of a cell. It waits for the news of its neighborhood, judges
+        ; itself, and either lives on or crashes.
+        (defun lc-cell (row col age lives)
+            (let news (actor::recv))
+            (let count (second news))
+            (let cause (cond ((< count 2) "loneliness") ((> count 3) "overcrowding") (#true #false)))
+            (if (eq? cause #false)
+                (lc-cell row col (+ age 1) lives)
+                (throw (make-error :died cause count))))))
 
 ; ---------------------------------------------------------------------------
 ; The supervisor (the CPI)
@@ -101,7 +107,7 @@
                 (let args (list row col 0 1))
                 (IO::print "    [supervisor]" (list row col) "first boot on" box "as" args)
                 args)))
-    (let p (process::spawn lc-cell args (environment::self) '(actor) box))
+    (let p (spawn-in (process-env (lc-cell-code) '(actor)) 'lc-cell args '(actor) box))
     (lc-run p)
     p)
 

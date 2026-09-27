@@ -23,7 +23,7 @@
 ;
 ; CPI features: `timer::sleep` and `(blocked host)`, `host::wait` with and
 ; without a timeout, `host::now`, `process::run` of just the woken PIDs,
-; `mailbox::take` on a shared result mailbox.
+; `mailbox::take` on a shared result mailbox, a role holding the players' code.
 
 (const mt-beat 100)
 
@@ -39,42 +39,49 @@
 ; A player (granted actor and timer)
 ; ---------------------------------------------------------------------------
 
-(defun mt-triple (row col)
-    (+ (list-ref row (wrap (- col 1) life-width))
-        (+ (list-ref row col)
-            (list-ref row (wrap (+ col 1) life-width)))))
+; A player's code, as a role: the host actions it uses and the library
+; procedures and constants it reads are its whole interface.
+(defun mt-player-code ()
+    (role
+        (require actor::recv actor::send timer::sleep)
+        (require life-rule life-width list-ref map mt-beat mt-lag mt-late-beat mt-late-row range second third wrap)
 
-(defun mt-step-row (above own below)
-    (map (lambda (col)
-            (do
-                (let alive (list-ref own col))
-                (let count (- (+ (mt-triple above col)
-                            (+ (mt-triple own col) (mt-triple below col)))
-                        alive))
-                (life-rule alive count)))
-        (range 0 life-width)))
+        (defun mt-triple (row col)
+            (+ (list-ref row (wrap (- col 1) life-width))
+                (+ (list-ref row col)
+                    (list-ref row (wrap (+ col 1) life-width)))))
 
-; How long a player sleeps: until the next beat, measured from `now`, the
-; time the conductor wrote on the score. Players cannot read the clock
-; themselves: `host::now` is privileged.
-(defun mt-sleep-for (row beat now)
-    (let on-time (- (* beat mt-beat) now))
-    (if (and (= row mt-late-row) (= beat mt-late-beat))
-        (+ on-time mt-lag)
-        on-time))
+        (defun mt-step-row (above own below)
+            (map (lambda (col)
+                    (do
+                        (let alive (list-ref own col))
+                        (let count (- (+ (mt-triple above col)
+                                    (+ (mt-triple own col) (mt-triple below col)))
+                                alive))
+                        (life-rule alive count)))
+                (range 0 life-width)))
 
-; A score is (gen now above own below). The answer, (row gen new-row), goes
-; to the shared result mailbox. `:stop` ends the performance.
-(defun mt-player (row results)
-    (let score (actor::recv))
-    (if (eq? score :stop)
-        :bow
-        (do
-            (let gen (car score))
-            (let rows (cdr (cdr score)))
-            (timer::sleep (mt-sleep-for row (+ gen 1) (second score)))
-            (actor::send results (list row (+ gen 1) (mt-step-row (car rows) (second rows) (third rows))))
-            (mt-player row results))))
+        ; How long a player sleeps: until the next beat, measured from `now`, the
+        ; time the conductor wrote on the score. Players cannot read the clock
+        ; themselves: `host::now` is privileged.
+        (defun mt-sleep-for (row beat now)
+            (let on-time (- (* beat mt-beat) now))
+            (if (and (= row mt-late-row) (= beat mt-late-beat))
+                (+ on-time mt-lag)
+                on-time))
+
+        ; A score is (gen now above own below). The answer, (row gen new-row), goes
+        ; to the shared result mailbox. `:stop` ends the performance.
+        (defun mt-player (row results)
+            (let score (actor::recv))
+            (if (eq? score :stop)
+                :bow
+                (do
+                    (let gen (car score))
+                    (let rows (cdr (cdr score)))
+                    (timer::sleep (mt-sleep-for row (+ gen 1) (second score)))
+                    (actor::send results (list row (+ gen 1) (mt-step-row (car rows) (second rows) (third rows))))
+                    (mt-player row results))))))
 
 ; ---------------------------------------------------------------------------
 ; The conductor (the CPI)
@@ -165,8 +172,8 @@
 
 (defun main ()
     (let results (mailbox::create #true 100))
-    (let players (map (lambda (row)
-                (process::spawn mt-player (list row results) (environment::self) '(actor timer) #false))
+    (let env (process-env (mt-player-code) '(actor timer)))
+    (let players (map (lambda (row) (spawn-in env 'mt-player (list row results) '(actor timer) #false))
             (range 0 life-height)))
     (IO::print "[conductor]" (length players) "players, one beat every" mt-beat "ms")
     (mt-perform players results 0 (seed-board))

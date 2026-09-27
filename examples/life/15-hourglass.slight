@@ -29,24 +29,29 @@
 ; between `(quota)` and `(exited v)`, preemption and continuation of a
 ; process across several batches, `process::kill`, processes with no grants.
 
-; The hourglass: one grain per live neighbor. Stripped of all meaning, it
-; is just a loop whose running time depends on the data.
-(defun hg-pour (neighbors)
-    (if (nil? neighbors)
-        :empty
-        (do
-            (hg-grain (car neighbors))
-            (hg-pour (cdr neighbors)))))
+; The hourglass's code, as a role. It requires nothing, so it runs in this
+; role alone: its environment holds hg-pour and hg-grain and no other name.
+(defun hg-glass-code ()
+    (role
 
-(defun hg-grain (n)
-    (if (= n 0)
-        ()
-        (hg-grain (- n 1))))
+        ; The hourglass: one grain per live neighbor. Stripped of all meaning, it
+        ; is just a loop whose running time depends on the data.
+        (defun hg-pour (neighbors)
+            (if (nil? neighbors)
+                :empty
+                (do
+                    (hg-grain (car neighbors))
+                    (hg-pour (cdr neighbors)))))
+
+        (defun hg-grain (n)
+            (if (= n 0)
+                ()
+                (hg-grain (- n 1))))))
 
 ; An hourglass process for a list of neighbor states. It is granted nothing:
 ; it cannot print, send or sleep. All it can do is take time.
 (defun hg-glass (neighbors)
-    (process::spawn hg-pour (list neighbors) (environment::self) () #false))
+    (spawn-in (environment::resolve (hg-glass-code) ()) 'hg-pour (list neighbors) () #false))
 
 ; ---------------------------------------------------------------------------
 ; Calibration: a stopwatch made of one-tick batches.

@@ -40,22 +40,29 @@
 (const am-quota 100000)
 (const am-bits 6)
 
-; The one cell program. `path` holds the answers so far, newest first.
-(defun am-cell (path)
-    (if (= (length path) am-bits)
-        (am-leaf (reverse path))
-        (am-cell (cons (actor::recv) path))))
+; The cell program, as a role. Every revival runs in the one environment
+; built from it.
+(defun am-cell-code ()
+    (role
+        (require actor::recv)
+        (require am-bits fold length reverse second step-cell third)
 
-; A leaf knows its path; the first three bits are the row, the last three
-; the column. It waits for a board and reports its cell's next state.
-(defun am-leaf (bits)
-    (let row (am-number (list (car bits) (second bits) (third bits))))
-    (let col (am-number (cdr (cdr (cdr bits)))))
-    (let board (actor::recv))
-    (step-cell board row col))
+        ; The one cell program. `path` holds the answers so far, newest first.
+        (defun am-cell (path)
+            (if (= (length path) am-bits)
+                (am-leaf (reverse path))
+                (am-cell (cons (actor::recv) path))))
 
-(defun am-number (bits)
-    (fold (lambda (n b) (+ (* n 2) b)) 0 bits))
+        ; A leaf knows its path; the first three bits are the row, the last three
+        ; the column. It waits for a board and reports its cell's next state.
+        (defun am-leaf (bits)
+            (let row (am-number (list (car bits) (second bits) (third bits))))
+            (let col (am-number (cdr (cdr (cdr bits)))))
+            (let board (actor::recv))
+            (step-cell board row col))
+
+        (defun am-number (bits)
+            (fold (lambda (n b) (+ (* n 2) b)) 0 bits))))
 
 ; Parked data is (parked <key> <checkpoint-args> <binding-hash> <address>).
 (defun am-parked-path (parked)
@@ -66,28 +73,28 @@
 
 ; Revives a parked continuation, answers its `recv` with `msg`, and runs it
 ; until it stops again.
-(defun am-revive (parked msg)
-    (let p (process::unpark parked (environment::self)))
+(defun am-revive (env parked msg)
+    (let p (process::unpark parked env))
     (mailbox::send (am-parked-address parked) msg)
     (list p (process::run p am-quota)))
 
 ; ---------------------------------------------------------------------------
 ; Growing the tree: at every choice point, fork both ways.
 
-(defun am-grow (parked depth)
+(defun am-grow (env parked depth)
     (if (= depth am-bits)
         (list parked)
-        (append (am-branch parked 0 depth) (am-branch parked 1 depth))))
+        (append (am-branch env parked 0 depth) (am-branch env parked 1 depth))))
 
-(defun am-branch (parked bit depth)
-    (let revived (am-revive parked bit))
-    (am-grow (process::park (car revived)) (+ depth 1)))
+(defun am-branch (env parked bit depth)
+    (let revived (am-revive env parked bit))
+    (am-grow env (process::park (car revived)) (+ depth 1)))
 
 ; ---------------------------------------------------------------------------
 ; Running a generation: revive every leaf with the board.
 
-(defun am-ask (leaf board)
-    (let stop (second (am-revive leaf board)))
+(defun am-ask (env leaf board)
+    (let stop (second (am-revive env leaf board)))
     (if (eq? (car stop) :exited)
         (second stop)
         (throw (make-error :am-cell "a cell did not exit" stop))))
@@ -104,19 +111,20 @@
 (defun am-drop (xs n)
     (if (= n 0) xs (am-drop (cdr xs) (- n 1))))
 
-(defun am-run (gen board leaves)
+(defun am-run (env gen board leaves)
     (print-board gen board)
     (when (< gen life-generations)
-        (am-run (+ gen 1) (am-rows (map (lambda (leaf) (am-ask leaf board)) leaves)) leaves)))
+        (am-run env (+ gen 1) (am-rows (map (lambda (leaf) (am-ask env leaf board)) leaves)) leaves)))
 
 (defun main ()
     (let mbox (mailbox::create #true 10))
-    (let root (process::spawn am-cell (list ()) (environment::self) '(actor) mbox))
+    (let env (process-env (am-cell-code) '(actor)))
+    (let root (spawn-in env 'am-cell (list ()) '(actor) mbox))
     (IO::print "the root asks its first question:" (process::run root am-quota))
-    (let leaves (am-grow (process::park root) 0))
+    (let leaves (am-grow env (process::park root) 0))
     (IO::print "grew" (length leaves) "leaves from one process;"
         "each is a parked continuation waiting for a board")
     (IO::print "leaf 0 was reached by the answers" (am-parked-path (car leaves))
         "and leaf 11 (row 1, col 3) by" (am-parked-path (list-ref leaves 11)) "(newest first)")
-    (am-run 0 (seed-board) leaves)
+    (am-run env 0 (seed-board) leaves)
     (IO::print "every leaf was revived" life-generations "times; none was used up"))

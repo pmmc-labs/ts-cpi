@@ -11,9 +11,13 @@
 ; finished generation". The CPI prints frames from what it observes.
 ;
 ; At generation `cp-fork-gen` the CPI forks history. It takes the checkpoint
-; (gen board) and spawns two new loops from it under different rules:
-; HighLife (B36/S23) and Seeds (B2/S). Those are also silent, also ungranted,
-; also observed only through their checkpoints. The three timelines run side
+; (gen board) and spawns two more universes from it under different rules:
+; HighLife (B36/S23) and Seeds (B2/S). They run the very same `universe`
+; code. A rule is a role that defines `life-rule`; composed onto a timeline's
+; environment, it shadows Conway's, and because the library's `step-board`
+; calls `life-rule` by name through the environment of whoever runs it, the
+; library applies the new rule without a line of it copied. The forks are
+; also silent, also ungranted, also observed only through their checkpoints. The three timelines run side
 ; by side under a barrier scheduler: each round gives one batch to every
 ; timeline that is behind, so no timeline gets more than one generation ahead
 ; of the others. The forks' boards are printed as commentary, each row
@@ -21,7 +25,8 @@
 ;
 ; CPI features: process::spawn with empty grants, process::run with quotas
 ; (preemption), process::checkpoint as an observation port, restarting from
-; a checkpoint, process::kill for a loop that would otherwise run forever.
+; a checkpoint, process::kill for a loop that would otherwise run forever,
+; rules as roles composed into each timeline's environment.
 
 ; Ticks per batch. One generation costs about 250,000 ticks, so a batch
 ; never spans two checkpoints; the observer checks that it doesn't.
@@ -32,30 +37,30 @@
 ; The processes. Nothing here has any grant.
 ; ---------------------------------------------------------------------------
 
-(defun universe (gen board)
-    (universe (+ gen 1) (step-board board)))
-
-(defun cp-highlife (gen board)
-    (cp-highlife (+ gen 1) (cp-step-with cp-highlife-rule board)))
-
-(defun cp-seeds (gen board)
-    (cp-seeds (+ gen 1) (cp-step-with cp-seeds-rule board)))
+; The universe's code, as a role. It requires only the library's
+; `step-board`, which calls `life-rule`: whichever `life-rule` the universe's
+; environment holds is the rule it follows.
+(defun cp-universe-code ()
+    (role
+        (require step-board)
+        (defun universe (gen board)
+            (universe (+ gen 1) (step-board board)))))
 
 ; HighLife, B36/S23: Conway plus birth on six.
-(defun cp-highlife-rule (alive count)
-    (cond
-        ((= count 3) 1)
-        ((and (= alive 0) (= count 6)) 1)
-        ((and (= alive 1) (= count 2)) 1)
-        (#true 0)))
+(defun cp-highlife ()
+    (role
+        (defun life-rule (alive count)
+            (cond
+                ((= count 3) 1)
+                ((and (= alive 0) (= count 6)) 1)
+                ((and (= alive 1) (= count 2)) 1)
+                (#true 0)))))
 
 ; Seeds, B2/S: born on exactly two, and nothing ever survives.
-(defun cp-seeds-rule (alive count)
-    (if (and (= alive 0) (= count 2)) 1 0))
-
-(defun cp-step-with (rule board)
-    (make-board (lambda (row col)
-            (rule (cell-at board row col) (neighbor-count board row col)))))
+(defun cp-seeds ()
+    (role
+        (defun life-rule (alive count)
+            (if (and (= alive 0) (= count 2)) 1 0))))
 
 ; ---------------------------------------------------------------------------
 ; Timelines, as the CPI sees them: (label pid gen board batches).
@@ -71,8 +76,11 @@
 (defun cp-board (tl) (list-ref tl 3))
 (defun cp-batches (tl) (list-ref tl 4))
 
-(defun cp-spawn (label loop args)
-    (let pid (process::spawn loop args (environment::self) '() #false))
+; A universe whose environment is the CPI's, then its code, then `rule`,
+; each shadowing what came before.
+(defun cp-spawn (label rule args)
+    (let env (process-env (environment::compose (cp-universe-code) rule) ()))
+    (let pid (spawn-in env 'universe args () #false))
     (cp-observe-now (cp-timeline label pid 0 () 0)))
 
 ; Read the checkpoint slot without running anything.
@@ -160,7 +168,7 @@
             (do
                 (let args (process::checkpoint (cp-pid conway)))
                 (IO::print "  forking history at generation" gen "from checkpoint of" (cp-pid conway))
-                (let new-forks (list (cp-spawn :highlife cp-highlife args) (cp-spawn :seeds cp-seeds args)))
+                (let new-forks (list (cp-spawn :highlife (cp-highlife) args) (cp-spawn :seeds (cp-seeds) args)))
                 (cp-next conway new-forks)))
         (#true (cp-next conway forks))))
 
@@ -177,4 +185,4 @@
 
 (defun main ()
     (IO::print "  the universe is spawned with grants ()")
-    (cp-generations (cp-spawn :conway universe (list 0 (seed-board))) ()))
+    (cp-generations (cp-spawn :conway (role) (list 0 (seed-board))) ()))

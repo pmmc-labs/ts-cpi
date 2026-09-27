@@ -17,6 +17,12 @@ node --test tests/life.test.ts
 board, the rule, `print-board`), then any files named on a `; load:` line in
 the version's header, then the version itself.
 
+The versions that spawn processes keep the processes' code in a role, which
+declares every host action and library procedure the code uses; `process-env`
+and `spawn-in` in `lib/lists.slight` build the environment and spawn in it.
+A role that needs only host actions runs alone, with none of the CPI's
+environment (07, 12, 15, 16).
+
 ## The versions
 
 ### The baseline
@@ -48,7 +54,7 @@ the version's header, then the version itself.
 
 | # | Version | Idea |
 | --- | --- | --- |
-| 08 | Checkpoint observer | The universe is one loop with no grants that never prints. The CPI sees it only through `process::checkpoint`. At generation 3 it forks HighLife and Seeds timelines from the checkpoint and runs all three in step. |
+| 08 | Checkpoint observer | The universe is one loop with no grants that never prints. The CPI sees it only through `process::checkpoint`. At generation 3 it forks HighLife and Seeds timelines from the checkpoint and runs all three in step: the same loop, with each rule a role that redefines `life-rule` in the timeline's environment. |
 | 09 | Hibernation | Cells with nothing to do are parked, and unparked into the same `recv` when news arrives. On this small board 37–43 of 64 cells stay awake (327 of 512 cell-steps), so it pays only on bigger boards. |
 | 10 | History as an error chain | Each generation wraps the last with `wrap-error`, and the history is one error. It is replayed at the end by walking `error-cause` and reading each generation's cells back out of the pads of the stack it was thrown from. |
 
@@ -69,7 +75,7 @@ the version's header, then the version itself.
 | --- | --- | --- |
 | 18 | Hostile scheduler | Four workers share a job queue, and an adversarial scheduler randomizes quotas, shuffles jobs, forges stale jobs, duplicates work and starves a victim. Frames still match because the protocol tags and deduplicates answers. |
 | 19 | Tick economy | One coin buys 1,000 ticks. Regions borrow at 25%, fall into debt spirals and go bankrupt. The Treasury kills and respawns bankrupt workers from their checkpoints. |
-| 20 | Rule swap | The CPI swaps the rule of a running world four ways: env swap, rule sent in a message, checkpoint surgery, and swap back. It shows that swapping the env ref cannot change anything, because the language cannot build a different env. |
+| 20 | Rule swap | The CPI changes the code of a running world four ways: a patch composed onto its environment and set with `process::set-env`, a rule sent in a message, checkpoint surgery, and a swap back that also restores the old environment. |
 
 ## What the versions found out about the CPI
 
@@ -81,7 +87,7 @@ combined and de-duplicated here, the most significant first.
 (found by 04).
 
 **Worth a design decision**
-1. **No hot reload from the language** (20, 08). No builtin creates, adds or replaces a binding. Every env ref derives from `environment::self`, so `process::set-env` can only swap in an env with identical bindings. SPEC-CPI section 6's hot reload cannot be exercised from control plane code. Swaps that do work pass code as values: closures in loop arguments, in messages, or in edited checkpoints. A primitive such as `(environment::bind e name value)` would close the gap.
+1. **No hot reload from the language** (20, 08). No builtin creates, adds or replaces a binding. Every env ref derives from `environment::self`, so `process::set-env` can only swap in an env with identical bindings. SPEC-CPI section 6's hot reload cannot be exercised from control plane code. Swaps that do work pass code as values: closures in loop arguments, in messages, or in edited checkpoints. A primitive such as `(environment::bind e name value)` would close the gap. *Resolved Sep 27, 2026:* roles (`DECISIONS.md`). 20's swap A now patches the running world's `hr-step` with `set-env`, and 08's forks run one `universe` loop under rules given as roles.
 2. **Mailbox ownership is underspecified** (17, 13, 18). Spawning onto an address a live process owns succeeds silently. Unparking one parked value twice makes two live clones share one address. "Owner" becomes the newest process, so when it ends, a non-durable mailbox dead-letters sends meant for the survivors, and `mailbox::send` still returns `#true`. A send wakes every process blocked on the address (a thundering herd).
 3. **The CPI can't wait on a process.** `actor::join` and `actor::recv` are `bad-state` in the CPI, so it polls `process::state`. `host::wait` returns PIDs but not which deadline fired (11, 12).
 4. **Nothing is reclaimed** (11, 09). Ended processes stay in the process table forever, waking joiners scans the whole table, and the park table never shrinks because parked data may be unparked again.

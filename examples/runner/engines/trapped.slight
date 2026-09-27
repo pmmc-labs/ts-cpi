@@ -24,15 +24,22 @@
 ; Inside a cell (granted actor only)
 ; ---------------------------------------------------------------------------
 
-(defun trapped-cell (rule neighbors state)
-    (for-each (lambda (n) (actor::send n (list :state state))) neighbors)
-    (trapped-cell rule neighbors (rule-next rule state (trapped-listen 8 0))))
+; A cell's code, as a role. Its sends and recvs trap to the CPI, but it
+; still declares them.
+(defun trapped-cell-code ()
+    (role
+        (require actor::recv actor::send)
+        (require for-each rule-next second)
 
-; Receives `k` messages (state s) and sums the states.
-(defun trapped-listen (k total)
-    (if (= k 0)
-        total
-        (trapped-listen (- k 1) (+ total (second (actor::recv))))))
+        (defun trapped-cell (rule neighbors state)
+            (for-each (lambda (n) (actor::send n (list :state state))) neighbors)
+            (trapped-cell rule neighbors (rule-next rule state (trapped-listen 8 0))))
+
+        ; Receives `k` messages (state s) and sums the states.
+        (defun trapped-listen (k total)
+            (if (= k 0)
+                total
+                (trapped-listen (- k 1) (+ total (second (actor::recv))))))))
 
 ; ---------------------------------------------------------------------------
 ; The world (the CPI)
@@ -47,11 +54,11 @@
     ; Every cell gets a real mailbox, so its neighbors can name it. Nothing
     ; is ever put in one.
     (let boxes (map (lambda (row) (map (lambda (c) (mailbox::create #true 8)) row)) (board-rows board)))
+    (let env (process-env (trapped-cell-code) '(actor)))
     (let pids
         (map2 (lambda (brow nrow)
                 (map2 (lambda (box pair)
-                        (process::spawn trapped-cell (list rule (cdr pair) (car pair))
-                            (environment::self) '(actor) box))
+                        (spawn-in env 'trapped-cell (list rule (cdr pair) (car pair)) '(actor) box))
                     brow nrow))
             boxes
             (trapped-map-grid cons (board-rows board) (trapped-neighbor-grid boxes))))

@@ -43,42 +43,50 @@
 ; Inside a worker (granted only actor)
 ; ---------------------------------------------------------------------------
 
-; A job is (gen live), with `live` the (row col) list of live cells of the
-; whole board. The worker answers (id gen born), the live cells of its
-; region in the next generation. The job is an argument of the loop, so the
-; checkpoint holds it: a worker restarted from its checkpoint redoes the job.
-(defun qe-region (id reply job)
-    (if (nil? job)
-        (qe-region id reply (actor::recv))
-        (do
-            (let born (qe-compute (qe-row0 id) (qe-col0 id) (second job)))
-            (actor::send reply (list id (car job) born))
-            (qe-region id reply ()))))
+; A worker's code, as a role. A bankrupt worker is respawned from its
+; checkpoint in a fresh environment built from the same role.
+(defun qe-worker-code ()
+    (role
+        (require actor::recv actor::send)
+        (require filter fold length life-rule member-cell? neighbors-of second)
 
-(defun qe-row0 (id) (* 4 (/ id 2)))
-(defun qe-col0 (id) (* 4 (% id 2)))
+        ; A job is (gen live), with `live` the (row col) list of live cells of the
+        ; whole board. The worker answers (id gen born), the live cells of its
+        ; region in the next generation. The job is an argument of the loop, so the
+        ; checkpoint holds it: a worker restarted from its checkpoint redoes the job.
+        (defun qe-region (id reply job)
+            (if (nil? job)
+                (qe-region id reply (actor::recv))
+                (do
+                    (let born (qe-compute (qe-row0 id) (qe-col0 id) (second job)))
+                    (actor::send reply (list id (car job) born))
+                    (qe-region id reply ()))))
 
-(defun qe-in-region? (r0 c0 p)
-    (and (>= (car p) r0) (< (car p) (+ r0 4)) (>= (second p) c0) (< (second p) (+ c0 4))))
+        (defun qe-row0 (id) (* 4 (/ id 2)))
 
-; Only cells that are live or next to a live cell can be live next time.
-(defun qe-candidates (r0 c0 live)
-    (fold (lambda (acc cell)
-            (fold (lambda (acc2 p)
-                    (if (and (qe-in-region? r0 c0 p) (not (member-cell? (car p) (second p) acc2)))
-                        (cons p acc2)
-                        acc2))
-                acc (cons cell (neighbors-of (car cell) (second cell)))))
-        () live))
+        (defun qe-col0 (id) (* 4 (% id 2)))
 
-(defun qe-next-alive? (live p)
-    (let alive (if (member-cell? (car p) (second p) live) 1 0))
-    (let count (length (filter (lambda (q) (member-cell? (car q) (second q) live))
-                (neighbors-of (car p) (second p)))))
-    (= (life-rule alive count) 1))
+        (defun qe-in-region? (r0 c0 p)
+            (and (>= (car p) r0) (< (car p) (+ r0 4)) (>= (second p) c0) (< (second p) (+ c0 4))))
 
-(defun qe-compute (r0 c0 live)
-    (filter (lambda (p) (qe-next-alive? live p)) (qe-candidates r0 c0 live)))
+        ; Only cells that are live or next to a live cell can be live next time.
+        (defun qe-candidates (r0 c0 live)
+            (fold (lambda (acc cell)
+                    (fold (lambda (acc2 p)
+                            (if (and (qe-in-region? r0 c0 p) (not (member-cell? (car p) (second p) acc2)))
+                                (cons p acc2)
+                                acc2))
+                        acc (cons cell (neighbors-of (car cell) (second cell)))))
+                () live))
+
+        (defun qe-next-alive? (live p)
+            (let alive (if (member-cell? (car p) (second p) live) 1 0))
+            (let count (length (filter (lambda (q) (member-cell? (car q) (second q) live))
+                        (neighbors-of (car p) (second p)))))
+            (= (life-rule alive count) 1))
+
+        (defun qe-compute (r0 c0 live)
+            (filter (lambda (p) (qe-next-alive? live p)) (qe-candidates r0 c0 live)))))
 
 ; ---------------------------------------------------------------------------
 ; The books. A region record is (id pid wallet debts spent borrowed done),
@@ -220,7 +228,7 @@
     (let grant (* 20 (+ bailouts 1)))
     (process::kill (qe-pid r) :bankrupt)
     (let checkpoint (process::checkpoint (qe-pid r)))
-    (let fresh (process::spawn qe-region checkpoint (environment::self) '(actor) (list-ref mailboxes id)))
+    (let fresh (spawn-in (process-env (qe-worker-code) '(actor)) 'qe-region checkpoint '(actor) (list-ref mailboxes id)))
     (IO::print "  TREASURY:" (qe-name id) "is bankrupt after buying" (qe-spent r) "slices this generation."
         "Worker killed; debts of" (qe-total-debt r) "forgiven; minted" grant
         "coins; restarted from checkpoint"
@@ -276,10 +284,10 @@
 (defun main ()
     (let inbox (mailbox::create #true 100))
     (let mailboxes (map (lambda (id) (mailbox::create #true 10)) (range 0 4)))
+    (let env (process-env (qe-worker-code) '(actor)))
     (let regions (map (lambda (id)
                 (qe-rec id
-                    (process::spawn qe-region (list id inbox ()) (environment::self) '(actor)
-                        (list-ref mailboxes id))
+                    (spawn-in env 'qe-region (list id inbox ()) '(actor) (list-ref mailboxes id))
                     qe-endowment () 0 0 #false))
             (range 0 4)))
     (IO::print "the supervision tree:  Treasury -> (NW NE SW SE) supervisors -> one worker each")
