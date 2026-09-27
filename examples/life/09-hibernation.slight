@@ -47,7 +47,7 @@
             (do
                 (let next (life-rule alive count))
                 (when (not (= next alive))
-                    (actor::send cpi (list3 row col next)))
+                    (actor::send cpi (list row col next)))
                 (hb-cell row col next count nbrs cpi)))
         ((eq? msg :commit)
             (do
@@ -56,7 +56,7 @@
         (#true (hb-cell row col alive count nbrs cpi))))
 
 (defun hb-tell (nbrs d)
-    (for-each (lambda (addr) (actor::send addr (list2 :delta d))) nbrs))
+    (for-each (lambda (addr) (actor::send addr (list :delta d))) nbrs))
 
 ; ---------------------------------------------------------------------------
 ; The CPI's view of a cell: (index addr handle), where handle is
@@ -89,10 +89,10 @@
             (let alive (if (member-cell? row col seed-cells) 1 0))
             (let addr (list-ref addrs i))
             (let pid (process::spawn hb-cell
-                    (cons row (cons col (cons alive (cons 0 (cons nbrs (cons cpi ()))))))
+                    (list row col alive 0 nbrs cpi)
                     (environment::self) '(actor) addr))
             (hb-settle pid)
-            (list3 i addr (list2 :awake pid)))
+            (list i addr (list :awake pid)))
         (range 0 (cell-count))))
 
 ; ---------------------------------------------------------------------------
@@ -108,12 +108,12 @@
 (defun hb-wake (c)
     (if (hb-awake? c)
         c
-        (list3 (hb-index c) (hb-addr c)
-            (list2 :awake (process::unpark (second (hb-handle c)) (environment::self))))))
+        (list (hb-index c) (hb-addr c)
+            (list :awake (process::unpark (second (hb-handle c)) (environment::self))))))
 
 (defun hb-sleep (c)
     (if (hb-awake? c)
-        (list3 (hb-index c) (hb-addr c) (list2 :asleep (process::park (hb-pid c))))
+        (list (hb-index c) (hb-addr c) (list :asleep (process::park (hb-pid c))))
         c))
 
 ; ---------------------------------------------------------------------------
@@ -133,7 +133,7 @@
     (let row (car report))
     (let col (second report))
     (if (= (third report) 1)
-        (cons (list2 row col) live)
+        (cons (list row col) live)
         (filter (lambda (p) (not (and (= (car p) row) (= (second p) col)))) live)))
 
 (defun hb-generation (gen cells live changed cpi history)
@@ -193,7 +193,7 @@
             (let args (third data))
             (IO::print "  a hibernating cell is plain data: parked key" (second data)
                 "checkpoint (row col alive count) ="
-                (cons (car args) (cons (second args) (cons (third args) (cons (list-ref args 3) ()))))))))
+                (list (car args) (second args) (third args) (list-ref args 3))))))
 
 (defun hb-digit (n)
     (list-ref '("0" "1" "2" "3" "4" "5" "6" "7" "8" "9") n))

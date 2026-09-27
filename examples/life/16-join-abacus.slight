@@ -46,7 +46,7 @@
 
 ; Threads one bead onto a chain whose top is `top`; the bead is the new top.
 (defun ja-thread (top)
-    (ja-start ja-bead (cons top ())))
+    (ja-start ja-bead (list top)))
 
 ; Builds the abacus for one cell: an anchor plus one bead per live neighbor.
 (defun ja-build (board row col)
@@ -62,7 +62,7 @@
     (let state (process::state top))
     (if (eq? (second state) :join)
         (cons top (ja-chain (third state)))
-        (cons top ())))
+        (list top)))
 
 (defun ja-read (top)
     (- (length (ja-chain top)) 1))

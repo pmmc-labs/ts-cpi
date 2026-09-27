@@ -61,7 +61,7 @@ are restricted.
     (IO::print :red (describe :red) :green (describe :green))
     (let twice (lambda (f x) (f (f x))))
     (IO::print :twice (twice (lambda (n) (* n 3)) 5))
-    (IO::print :list (cons 1 (cons "two" (cons :three ())))))
+    (IO::print :list (list 1 "two" :three)))
 ```
 
 ```
@@ -215,7 +215,7 @@ decides what to do with what they report. Nothing runs unless the CPI runs it.
     (host::now))
 
 (defun main ()
-    (let p (process::spawn greeter (cons :g ()) (environment::self) '(actor IO) #false))
+    (let p (process::spawn greeter (list :g) (environment::self) '(actor IO) #false))
     (IO::print :state (process::state p))
     (IO::print :run1 (process::run p 50))
     (IO::print :state (process::state p))
@@ -282,7 +282,7 @@ batch reaches the receiver when that batch ends.
 
 (defun main ()
     (let mbox (mailbox::create #true 100))
-    (let p1 (process::spawn counter (cons 0 ()) (environment::self) '(actor IO) mbox))
+    (let p1 (process::spawn counter (list 0) (environment::self) '(actor IO) mbox))
 
     (mailbox::send mbox :inc)
     (process::run p1 100)

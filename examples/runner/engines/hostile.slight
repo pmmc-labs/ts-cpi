@@ -35,14 +35,14 @@
     (let results (mailbox::create #true 1000))
     (let cost (hostile-job-cost rule))
     (let workers (map (lambda (id)
-                     (list2 id (process::spawn hostile-worker (list3 id rule results) (environment::self) '(actor) jobs)))
-                    (range 0 hostile-worker-count)))
+                (list id (process::spawn hostile-worker (list id rule results) (environment::self) '(actor) jobs)))
+            (range 0 hostile-worker-count)))
     (let state `(,jobs ,results ,workers ,cost ,(hostile-depth n 0)))
     (hostile-loop state 0 board board
         `(("workers" "4 on one shared job queue")
-          ("one job costs" ,(hostile-text `(,cost " ticks")))
-          ("slice sizes" ,(hostile-text `(,(hostile-quota-min cost) " to "
-                                     ,(+ (hostile-quota-min cost) (hostile-quota-span cost)) " ticks"))))
+            ("one job costs" ,(text-of `(,cost " ticks")))
+            ("slice sizes" ,(text-of `(,(hostile-quota-min cost) " to "
+                        ,(+ (hostile-quota-min cost) (hostile-quota-span cost)) " ticks"))))
         report))
 
 (defun hostile-loop (state gen board prev notes report)
@@ -86,7 +86,7 @@
 (defun hostile-job-cost (rule)
     (let q (mailbox::create #true 4))
     (let sink (mailbox::create #true 4))
-    (let p (process::spawn hostile-worker (list3 9 rule sink) (environment::self) '(actor) q))
+    (let p (process::spawn hostile-worker (list 9 rule sink) (environment::self) '(actor) q))
     (process::run p 1000)
     (mailbox::send q '(0 0 1 (1 1 0 0 1 0 0 0)))
     (let ticks (hostile-stopwatch p 1))
@@ -133,20 +133,20 @@
 
 ; Every cell's (center neighbors), row by row, by a sweep over the rows.
 (defun hostile-row-jobs (above row below)
-    (map2 list2 row
+    (map2 (lambda (a b) (list a b)) row
         (fold (lambda (acc xs) (map2 cons xs acc))
             (map (lambda (x) ()) row)
             `(,(rotate-right above) ,above ,(rotate-left above)
-              ,(rotate-right row) ,(rotate-left row)
-              ,(rotate-right below) ,below ,(rotate-left below)))))
+                ,(rotate-right row) ,(rotate-left row)
+                ,(rotate-right below) ,below ,(rotate-left below)))))
 
 ; A trie from cell index to (center neighbors).
 (defun hostile-job-trie (board d)
     (let rows (board-rows board))
     (car (fold (lambda (acc job) (cons (hostile-trie-set (car acc) d (cdr acc) job) (+ (cdr acc) 1)))
-             (cons (hostile-trie-empty d) 0)
-             (fold (lambda (acc row) (append row acc)) ()
-                 (reverse (map3 hostile-row-jobs (rotate-right rows) rows (rotate-left rows)))))))
+            (cons (hostile-trie-empty d) 0)
+            (fold (lambda (acc row) (append row acc)) ()
+                (reverse (map3 hostile-row-jobs (rotate-right rows) rows (rotate-left rows)))))))
 
 (defun hostile-post (jobs gen index job)
     (mailbox::send jobs (cons gen (cons index job))))
@@ -169,7 +169,7 @@
     (let fr (/ forged w))
     (let fc (% forged w))
     (hostile-post jobs (- gen 1) forged
-        (list2 (board-cell prev fr fc)
+        (list (board-cell prev fr fc)
             (map (lambda (p) (board-cell prev (car p) (second p))) (board-neighbors prev fr fc))))
     (for-each (lambda (i)
             (let index (% (+ offset (* i stride)) n))
@@ -197,10 +197,10 @@
         (#true
             (hostile-drain state gen
                 `(,(hostile-trie-set got d (second msg) (third msg))
-                  ,(+ 1 (second tally))
-                  ,(third tally)
-                  ,(list-ref tally 3)
-                  ,(hostile-bump (list-ref tally 4) (list-ref msg 3)))))))
+                    ,(+ 1 (second tally))
+                    ,(third tally)
+                    ,(list-ref tally 3)
+                    ,(hostile-bump (list-ref tally 4) (list-ref msg 3)))))))
 
 (defun hostile-tally-set (tally k v)
     (if (= k 0) (cons v (cdr tally)) (cons (car tally) (hostile-tally-set (cdr tally) (- k 1) v))))
@@ -215,7 +215,7 @@
 (defun hostile-schedule (state gen n victim tally slices preempted)
     (let t (hostile-drain state gen tally))
     (if (= (second t) n)
-        (list3 t slices preempted)
+        (list t slices preempted)
         (do
             (let ready (filter hostile-ready? (third state)))
             (when (nil? ready)
@@ -238,18 +238,14 @@
     (let first (hostile-post-all state gen board prev))
     (let victim (hostile-rand gen 0 14 hostile-worker-count))
     (let out (hostile-schedule state gen n victim
-                 `(,(hostile-trie-empty d) 0 0 0 ,(map (lambda (i) 0) (range 0 hostile-worker-count)))
-                 0 0))
+            `(,(hostile-trie-empty d) 0 0 0 ,(map (lambda (i) 0) (range 0 hostile-worker-count)))
+            0 0))
     (let tally (car out))
     (let got (car tally))
-    (list2
+    (list
         (board-from w h (lambda (r c) (hostile-trie-ref got d (+ (* r w) c))))
-        `(("victim of the week" ,(hostile-text `("worker " ,victim)))
-          ("jobs posted" ,(hostile-text `(,(+ n 2) ": shuffled, a forged one, cell " ,first " twice")))
-          ("slices" ,(hostile-text `(,(second out) ", " ,(third out) " ended mid-job")))
-          ("answers dropped" ,(hostile-text `(,(third tally) " stale, " ,(list-ref tally 3) " duplicate")))
-          ("cells per worker" ,(list-ref tally 4)))))
-
-; The parts of a note, as one string.
-(defun hostile-text (parts)
-    (fold (lambda (s x) (string-append s (value->string x))) "" parts))
+        `(("victim of the week" ,(text-of `("worker " ,victim)))
+            ("jobs posted" ,(text-of `(,(+ n 2) ": shuffled, a forged one, cell " ,first " twice")))
+            ("slices" ,(text-of `(,(second out) ", " ,(third out) " ended mid-job")))
+            ("answers dropped" ,(text-of `(,(third tally) " stale, " ,(list-ref tally 3) " duplicate")))
+            ("cells per worker" ,(list-ref tally 4)))))

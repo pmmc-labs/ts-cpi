@@ -47,7 +47,7 @@
     (tw-cell neighbors (life-rule state (tw-listen 8 0))))
 
 (defun tw-announce (neighbors state)
-    (for-each (lambda (n) (actor::send n (list2 :state state))) neighbors))
+    (for-each (lambda (n) (actor::send n (list :state state))) neighbors))
 
 ; Receives `k` messages of the form (state s) and sums the states.
 (defun tw-listen (k total)
@@ -83,7 +83,7 @@
                     (tw-drive pid pos narrate? answers (second msg) (+ traps 1)))
                 ((nil? answers)
                     (tw-say narrate? pos "actor::recv" "... frozen until the next generation")
-                    (list2 said traps))
+                    (list said traps))
                 (#true
                     (tw-answer pid pos narrate? (car answers))
                     (tw-drive pid pos narrate? (cdr answers) said (+ traps 1)))))
@@ -96,15 +96,15 @@
 ; What the cell at (row col) hears this generation: its neighbors' states on
 ; the old board, in the order it listed its neighbors.
 (defun tw-answers (board row col)
-    (map (lambda (p) (list2 :state (cell-at board (car p) (second p))))
+    (map (lambda (p) (list :state (cell-at board (car p) (second p))))
         (neighbors-of row col)))
 
 ; One generation for one cell. The cell is frozen in the `recv` where the
 ; last generation left it, so the first answer is a resume, not a run.
 (defun tw-step (pid board row col narrate?)
     (let answers (tw-answers board row col))
-    (tw-answer pid (list2 row col) narrate? (car answers))
-    (tw-drive pid (list2 row col) narrate? (cdr answers) #false 1))
+    (tw-answer pid (list row col) narrate? (car answers))
+    (tw-drive pid (list row col) narrate? (cdr answers) #false 1))
 
 (defun tw-states (results)
     (map (lambda (row) (map car row)) results))
@@ -126,7 +126,7 @@
             (let results
                 (make-board (lambda (row col)
                         (tw-step (cell-at pids row col) board row col
-                            (and narrate-gen? (member-cell? row col (cons tw-narrated ())))))))
+                            (and narrate-gen? (member-cell? row col (list tw-narrated)))))))
             (tw-world (+ gen 1) pids boxes (tw-states results) (+ carried (tw-traps results))))
         (do
             (for-each (lambda (row) (for-each (lambda (p) (process::kill p :end-of-the-world)) row)) pids)
@@ -143,12 +143,12 @@
     (let pids
         (make-board (lambda (row col)
                 (process::spawn tw-cell
-                    (list2 (map (lambda (p) (cell-at boxes (car p) (second p)))
+                    (list (map (lambda (p) (cell-at boxes (car p) (second p)))
                             (neighbors-of row col))
                         (cell-at seed row col))
                     (environment::self) '(actor) (cell-at boxes row col)))))
     ; Generation 0: each cell announces its seed state and stops to listen.
     ; The world reads the first board from what they said.
     (let results
-        (make-board (lambda (row col) (tw-drive (cell-at pids row col) (list2 row col) #false () #false 0))))
+        (make-board (lambda (row col) (tw-drive (cell-at pids row col) (list row col) #false () #false 0))))
     (tw-world 0 pids boxes (tw-states results) (tw-traps results)))

@@ -84,7 +84,7 @@
         registry))
 
 (defun ld-spawn (row col gen undertaker)
-    (let p (process::spawn ld-cell (cons row (cons col (list2 gen 0)))
+    (let p (process::spawn ld-cell (list row col gen 0)
             (environment::self) '(actor) #false))
     (process::watch p undertaker)
     p)
@@ -116,7 +116,7 @@
         (let dead (third signal))
         (let how (list-ref signal 3))
         (let life (process::checkpoint dead))
-        (IO::print "    [obituary]" (list2 (car life) (second life)) (second how) "- lived generations"
+        (IO::print "    [obituary]" (list (car life) (second life)) (second how) "- lived generations"
             (third life) "to" (- gen 1) "and outlived" (list-ref life 3) "neighbors")
         (ld-obituaries undertaker gen)))
 

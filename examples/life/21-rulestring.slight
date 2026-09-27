@@ -19,7 +19,7 @@
 ; :survivals after an S.
 (defun rs-scan (text i mode births survivals)
     (if (= i (string-length text))
-        (list2 (reverse births) (reverse survivals))
+        (list (reverse births) (reverse survivals))
         (do
             (let c (string-ref text i))
             (cond
@@ -30,7 +30,7 @@
                     (if (eq? mode :births)
                         (rs-scan text (+ i 1) mode (cons (- c 48) births) survivals)
                         (rs-scan text (+ i 1) mode births (cons (- c 48) survivals))))
-                (#true (throw (make-error :bad-rulestring "unexpected character" (list2 text i))))))))
+                (#true (throw (make-error :bad-rulestring "unexpected character" (list text i))))))))
 
 (const rs-conway (rs-parse "B3/S23"))
 

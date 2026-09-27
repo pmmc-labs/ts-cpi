@@ -1,8 +1,5 @@
-; List helpers shared by the Game of Life examples. The language has only
-; cons, car and cdr, so everything else is written here.
-
-(defun list2 (a b) (cons a (cons b ())))
-(defun list3 (a b c) (cons a (cons b (cons c ()))))
+; List helpers shared by the Game of Life examples and the runner. The
+; language has cons, car, cdr, list and append; everything else is here.
 
 (defun second (xs) (car (cdr xs)))
 (defun third (xs) (car (cdr (cdr xs))))

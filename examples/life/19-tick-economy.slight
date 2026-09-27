@@ -52,7 +52,7 @@
         (qe-region id reply (actor::recv))
         (do
             (let born (qe-compute (qe-row0 id) (qe-col0 id) (second job)))
-            (actor::send reply (list3 id (car job) born))
+            (actor::send reply (list id (car job) born))
             (qe-region id reply ()))))
 
 (defun qe-row0 (id) (* 4 (/ id 2)))
@@ -87,7 +87,7 @@
 ; ---------------------------------------------------------------------------
 
 (defun qe-rec (id pid wallet debts spent borrowed done)
-    (cons id (cons pid (cons wallet (cons debts (cons spent (cons borrowed (cons done ()))))))))
+    (list id pid wallet debts spent borrowed done))
 
 (defun qe-id (r) (car r))
 (defun qe-pid (r) (second r))
@@ -118,9 +118,9 @@
 ; Adds `amount` to the debt owed to `lender`.
 (defun qe-owe (debts lender amount)
     (cond
-        ((nil? debts) (cons (list2 lender amount) ()))
+        ((nil? debts) (list (list lender amount)))
         ((= (car (car debts)) lender)
-            (cons (list2 lender (+ (second (car debts)) amount)) (cdr debts)))
+            (cons (list lender (+ (second (car debts)) amount)) (cdr debts)))
         (#true (cons (car debts) (qe-owe (cdr debts) lender amount)))))
 
 ; ---------------------------------------------------------------------------
@@ -168,7 +168,7 @@
 (defun qe-collect (gen inbox regions born)
     (let msg (mailbox::take inbox))
     (cond
-        ((eq? msg #false) (list2 regions born))
+        ((eq? msg #false) (list regions born))
         ((or (not (= (second msg) gen)) (qe-done? (qe-find regions (car msg))))
             (qe-collect gen inbox regions born))
         (#true
@@ -208,7 +208,7 @@
 
 (defun qe-buy-slice (regions id bailouts)
     (process::run (qe-pid (qe-find regions id)) qe-coin)
-    (list2 (qe-update regions id
+    (list (qe-update regions id
             (lambda (r) (qe-rec (qe-id r) (qe-pid r) (qe-wallet r) (qe-debts r)
                     (+ (qe-spent r) 1) (qe-borrowed r) (qe-done? r))))
         bailouts))
@@ -225,7 +225,7 @@
         "Worker killed; debts of" (qe-total-debt r) "forgiven; minted" grant
         "coins; restarted from checkpoint"
         (if (nil? (third checkpoint)) "(its job still waits in its mailbox)" "(its job is in the checkpoint)"))
-    (list2 (qe-update regions id
+    (list (qe-update regions id
             (lambda (r) (qe-rec id fresh grant () (qe-spent r) (qe-borrowed r) (qe-done? r))))
         (+ bailouts 1)))
 
@@ -239,13 +239,13 @@
     (let collected (qe-collect gen inbox regions born))
     (let rs (car collected))
     (if (all? qe-done? rs)
-        (list3 rs (second collected) bailouts)
+        (list rs (second collected) bailouts)
         (do
             (let after (fold (lambda (acc id)
                         (if (qe-wants-slice? (car acc) id)
                             (qe-turn (car acc) id mailboxes (second acc))
                             acc))
-                    (list2 rs bailouts) (range 0 4)))
+                    (list rs bailouts) (range 0 4)))
             (qe-market gen inbox (car after) (second collected) mailboxes (second after)))))
 
 ; ---------------------------------------------------------------------------
@@ -266,7 +266,7 @@
             (IO::print "-- payday before generation" (+ gen 1) ": wage" qe-wage "each --")
             (let rs (qe-payday regions))
             (let live (live-cells board))
-            (for-each (lambda (m) (mailbox::send m (list2 (+ gen 1) live))) mailboxes)
+            (for-each (lambda (m) (mailbox::send m (list (+ gen 1) live))) mailboxes)
             (let out (qe-market (+ gen 1) inbox rs () mailboxes bailouts))
             (qe-ledger (car out))
             (let born (second out))
@@ -278,7 +278,7 @@
     (let mailboxes (map (lambda (id) (mailbox::create #true 10)) (range 0 4)))
     (let regions (map (lambda (id)
                 (qe-rec id
-                    (process::spawn qe-region (list3 id inbox ()) (environment::self) '(actor)
+                    (process::spawn qe-region (list id inbox ()) (environment::self) '(actor)
                         (list-ref mailboxes id))
                     qe-endowment () 0 0 #false))
             (range 0 4)))

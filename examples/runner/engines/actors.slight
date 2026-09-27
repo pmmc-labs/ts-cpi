@@ -29,7 +29,7 @@
 ; arrived while the cell was still gathering the generation before.
 (defun actors-live (index rule collector neighbors gen state early buffered)
     (actor::send collector `(,index ,gen ,state ,buffered))
-    (for-each (lambda (n) (actor::send n (list2 gen state))) neighbors)
+    (for-each (lambda (n) (actor::send n (list gen state))) neighbors)
     (let heard (actors-gather gen (- 8 buffered) (sum (map second early)) ()))
     (let later (second heard))
     (actors-live index rule collector neighbors (+ gen 1) (rule-next rule state (car heard))
@@ -40,14 +40,14 @@
 ; in the meantime.
 (defun actors-gather (gen need count early)
     (if (= need 0)
-        (list2 count early)
+        (list count early)
         (do
             (let m (actor::recv))
             (let g (car m))
             (cond
                 ((= g gen) (actors-gather gen (- need 1) (+ count (second m)) early))
                 ((= g (+ gen 1)) (actors-gather gen need count (cons m early)))
-                (#true (throw (make-error :time-travel "a state from too far away in time" (list2 gen m))))))))
+                (#true (throw (make-error :time-travel "a state from too far away in time" (list gen m))))))))
 
 ; ---------------------------------------------------------------------------
 ; The CPI: spawning, introductions, scheduling, observing
@@ -60,7 +60,7 @@
             (map2 (lambda (c state)
                     (do
                         (let index (+ (* r w) c))
-                        (list3 index
+                        (list index
                             (process::spawn actors-cell `(,index ,rule ,collector ,state)
                                 (environment::self) '(actor) #false)
                             (actors-quota index))))
@@ -125,7 +125,7 @@
 (defun actors-file (report buckets)
     (let gen (second report))
     (cond
-        ((nil? buckets) (cons `(,gen 1 (,report) ,(list-ref report 3)) ()))
+        ((nil? buckets) (list `(,gen 1 (,report) ,(list-ref report 3))))
         ((= (car (car buckets)) gen)
             (do
                 (let b (car buckets))
@@ -152,7 +152,7 @@
 
 ; A bottom-up merge sort on each item's car.
 (defun actors-sort (xs)
-    (actors-merge-all (map (lambda (x) (cons x ())) xs)))
+    (actors-merge-all (map (lambda (x) (list x)) xs)))
 
 (defun actors-merge-all (lists)
     (if (nil? (cdr lists))
@@ -184,16 +184,16 @@
     (let n (list-ref run 2))
     (let b (if (nil? buckets) #false (car buckets)))
     (if (or (eq? b #false) (not (= (car b) next)) (< (second b) n))
-        (list3 next buckets early-total)
+        (list next buckets early-total)
         (do
             (let board (actors-board (car run) (second run) (third b)))
             (let early (list-ref b 3))
             (let lead (- (car (last buckets)) next))
             (let notes `(("actors" ,n)
-                         ("messages per generation" ,(* 9 n))
-                         ("arrived early this generation" ,early)
-                         ("arrived early in all" ,(+ early-total early))
-                         ("fastest cell ahead by" ,lead)))
+                    ("messages per generation" ,(* 9 n))
+                    ("arrived early this generation" ,early)
+                    ("arrived early in all" ,(+ early-total early))
+                    ("fastest cell ahead by" ,lead)))
             (if (eq? ((list-ref run 3) next board notes) :stop)
                 :stop
                 (actors-emit run (+ next 1) (cdr buckets) (+ early-total early))))))
@@ -207,8 +207,8 @@
         ((eq? emitted :stop) (actors-kill cells))
         (ran (actors-loop run cells classes collector (+ round 1) emitted))
         (#true (do
-            (actors-kill cells)
-            (throw (make-error :deadlock "no cell can move, but a generation is missing" (car emitted)))))))
+                (actors-kill cells)
+                (throw (make-error :deadlock "no cell can move, but a generation is missing" (car emitted)))))))
 
 (defun actors-engine (config report)
     (let board (config-board config))
@@ -221,4 +221,4 @@
     (let grid (actors-spawn board (config-rule config) collector))
     (actors-introduce grid)
     (let cells (fold append () grid))
-    (actors-loop `(,w ,h ,n ,report) cells (actors-classes cells) collector 0 (list3 0 () 0)))
+    (actors-loop `(,w ,h ,n ,report) cells (actors-classes cells) collector 0 (list 0 () 0)))

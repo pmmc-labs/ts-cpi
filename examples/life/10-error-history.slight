@@ -61,7 +61,7 @@
 (defun eh-count-changes (before after from to)
     (length (filter (lambda (p) (and (= (cell-at before (car p) (second p)) from)
                     (= (cell-at after (car p) (second p)) to)))
-            (map (lambda (i) (list2 (index-row i) (index-col i))) (range 0 (cell-count))))))
+            (map (lambda (i) (list (index-row i) (index-col i))) (range 0 (cell-count))))))
 
 (defun eh-grow (history gen)
     (if (= gen life-generations)
@@ -95,8 +95,8 @@
 (defun eh-runs (names)
     (reverse (fold (lambda (acc name)
                 (if (and (not (nil? acc)) (eq? (car (car acc)) name))
-                    (cons (list2 name (+ (second (car acc)) 1)) (cdr acc))
-                    (cons (list2 name 1) acc)))
+                    (cons (list name (+ (second (car acc)) 1)) (cdr acc))
+                    (cons (list name 1) acc)))
             ()
             names)))
 

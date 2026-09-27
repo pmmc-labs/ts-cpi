@@ -61,7 +61,7 @@
             (mailbox::send (cell-at next row col) (mm-peek here))
             :survived)
         (#true
-            (mailbox::send (cell-at next row col) (list2 :born (+ gen 1)))
+            (mailbox::send (cell-at next row col) (list :born (+ gen 1)))
             :born)))
 
 ; Erases a bank: every token left in it is taken and dropped.
@@ -94,10 +94,10 @@
 (defun main ()
     (let bank-a (mm-bank))
     (let bank-b (mm-bank))
-    (for-each (lambda (c) (mailbox::send (cell-at bank-a (car c) (second c)) (list2 :born 0))) seed-cells)
+    (for-each (lambda (c) (mailbox::send (cell-at bank-a (car c) (second c)) (list :born 0))) seed-cells)
     ; Try to make a live cell "more alive": the mailbox refuses.
     (let refused
-        (catch (mailbox::send (cell-at bank-a 0 1) (list2 :born 0))
+        (catch (mailbox::send (cell-at bank-a 0 1) (list :born 0))
             e
             (error-tag e)))
     (IO::print "    [memory] writing a second token into live cell (0 1):" refused)

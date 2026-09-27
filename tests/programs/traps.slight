@@ -8,7 +8,7 @@
 (defun main ()
     (host::set-traps '(send))
     (let target (mailbox::create #true 10))
-    (let p (process::spawn sender (cons target ()) (environment::self) '(actor) #false))
+    (let p (process::spawn sender (list target) (environment::self) '(actor) #false))
     (let r (process::run p 100))
     (IO::print :stop (car r))
     (IO::print :effect (car (cdr r)))

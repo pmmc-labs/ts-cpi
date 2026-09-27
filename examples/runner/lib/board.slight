@@ -28,8 +28,8 @@
 
 ; The (row col) positions of a cell's eight neighbors.
 (defun board-neighbors (b row col)
-    (map (lambda (o) (list2 (torus (+ row (car o)) (board-height b)) (torus (+ col (second o)) (board-width b))))
-         '((-1 -1) (-1 0) (-1 1) (0 -1) (0 1) (1 -1) (1 0) (1 1))))
+    (map (lambda (o) (list (torus (+ row (car o)) (board-height b)) (torus (+ col (second o)) (board-width b))))
+        '((-1 -1) (-1 0) (-1 1) (0 -1) (0 1) (1 -1) (1 0) (1 1))))
 
 (defun board-population (b)
     (fold (lambda (n row) (+ n (sum row))) 0 (board-rows b)))
@@ -40,7 +40,11 @@
 (defun row-equal? (xs ys)
     (or (nil? xs) (and (= (car xs) (car ys)) (row-equal? (cdr xs) (cdr ys)))))
 
-(defun zip (xs ys) (map2 list2 xs ys))
+(defun zip (xs ys) (map2 (lambda (x y) (list x y)) xs ys))
+
+; The parts, strings or not, as one string: `(text-of '(3 " of " 8))` is "3 of 8".
+(defun text-of (parts)
+    (string-join "" (map value->string parts)))
 
 (defun map2 (f xs ys)
     (reverse (map2-onto f xs ys ())))
@@ -58,7 +62,7 @@
 ; ---------------------------------------------------------------------------
 
 ; (rotate-left '(a b c)) is (b c a): element i becomes element i+1.
-(defun rotate-left (xs) (append (cdr xs) (cons (car xs) ())))
+(defun rotate-left (xs) (append (cdr xs) (list (car xs))))
 (defun rotate-right (xs) (cons (last xs) (but-last xs)))
 (defun last (xs) (if (nil? (cdr xs)) (car xs) (last (cdr xs))))
 (defun but-last (xs) (if (nil? (cdr xs)) () (cons (car xs) (but-last (cdr xs)))))
@@ -95,7 +99,7 @@
 
 (defun rule-scan (text i mode births survivals)
     (if (= i (string-length text))
-        (list2 births survivals)
+        (list births survivals)
         (do
             (let c (string-ref text i))
             (cond
@@ -111,10 +115,10 @@
 ; (name rulestring description)
 (const rules
     '(("Conway" "B3/S23" "the classic: born with 3 neighbors, survives with 2 or 3")
-      ("HighLife" "B36/S23" "Conway, plus birth with 6 neighbors; gliders still fly")
-      ("Seeds" "B2/S" "every live cell dies each generation, and one is born with exactly 2 neighbors; nearly every pattern explodes")
-      ("Day & Night" "B3678/S34678" "live and dead regions behave alike; most Conway patterns, gliders included, die out")
-      ("Life without death" "B3/S012345678" "cells never die, and one is born with 3 neighbors; patterns only grow")))
+        ("HighLife" "B36/S23" "Conway, plus birth with 6 neighbors; gliders still fly")
+        ("Seeds" "B2/S" "every live cell dies each generation, and one is born with exactly 2 neighbors; nearly every pattern explodes")
+        ("Day & Night" "B3678/S34678" "live and dead regions behave alike; most Conway patterns, gliders included, die out")
+        ("Life without death" "B3/S012345678" "cells never die, and one is born with 3 neighbors; patterns only grow")))
 
 ; ---------------------------------------------------------------------------
 ; Presets: (name cells), cells as (row col) from the pattern's top left
@@ -122,13 +126,13 @@
 
 (const presets
     '(("R-pentomino" ((0 1) (0 2) (1 0) (1 1) (2 1)))
-      ("Glider" ((0 1) (1 2) (2 0) (2 1) (2 2)))
-      ("Gosper glider gun" ((0 24) (1 22) (1 24) (2 12) (2 13) (2 20) (2 21) (2 34) (2 35) (3 11) (3 15) (3 20) (3 21) (3 34) (3 35) (4 0) (4 1) (4 10) (4 16) (4 20) (4 21) (5 0) (5 1) (5 10) (5 14) (5 16) (5 17) (5 22) (5 24) (6 10) (6 16) (6 24) (7 11) (7 15) (8 12) (8 13)))
-      ("Pulsar" ((0 2) (0 3) (0 4) (0 8) (0 9) (0 10) (2 0) (2 5) (2 7) (2 12) (3 0) (3 5) (3 7) (3 12) (4 0) (4 5) (4 7) (4 12) (5 2) (5 3) (5 4) (5 8) (5 9) (5 10) (7 2) (7 3) (7 4) (7 8) (7 9) (7 10) (8 0) (8 5) (8 7) (8 12) (9 0) (9 5) (9 7) (9 12) (10 0) (10 5) (10 7) (10 12) (12 2) (12 3) (12 4) (12 8) (12 9) (12 10)))
-      ("Acorn" ((0 1) (1 3) (2 0) (2 1) (2 4) (2 5) (2 6)))
-      ("Diehard" ((0 6) (1 0) (1 1) (2 1) (2 5) (2 6) (2 7)))
-      ("Lightweight spaceship" ((0 1) (0 4) (1 0) (2 0) (2 4) (3 0) (3 1) (3 2) (3 3)))
-      ("Random" random)))
+        ("Glider" ((0 1) (1 2) (2 0) (2 1) (2 2)))
+        ("Gosper glider gun" ((0 24) (1 22) (1 24) (2 12) (2 13) (2 20) (2 21) (2 34) (2 35) (3 11) (3 15) (3 20) (3 21) (3 34) (3 35) (4 0) (4 1) (4 10) (4 16) (4 20) (4 21) (5 0) (5 1) (5 10) (5 14) (5 16) (5 17) (5 22) (5 24) (6 10) (6 16) (6 24) (7 11) (7 15) (8 12) (8 13)))
+        ("Pulsar" ((0 2) (0 3) (0 4) (0 8) (0 9) (0 10) (2 0) (2 5) (2 7) (2 12) (3 0) (3 5) (3 7) (3 12) (4 0) (4 5) (4 7) (4 12) (5 2) (5 3) (5 4) (5 8) (5 9) (5 10) (7 2) (7 3) (7 4) (7 8) (7 9) (7 10) (8 0) (8 5) (8 7) (8 12) (9 0) (9 5) (9 7) (9 12) (10 0) (10 5) (10 7) (10 12) (12 2) (12 3) (12 4) (12 8) (12 9) (12 10)))
+        ("Acorn" ((0 1) (1 3) (2 0) (2 1) (2 4) (2 5) (2 6)))
+        ("Diehard" ((0 6) (1 0) (1 1) (2 1) (2 5) (2 6) (2 7)))
+        ("Lightweight spaceship" ((0 1) (0 4) (1 0) (2 0) (2 4) (3 0) (3 1) (3 2) (3 3)))
+        ("Random" random)))
 
 ; A preset placed in the middle of a width x height board. "Random" fills
 ; about a third of the cells from a seeded generator, so it is repeatable.

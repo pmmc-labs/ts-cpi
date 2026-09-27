@@ -59,7 +59,7 @@
 ; Runs rounds until (done?) holds. Returns (rounds batches joins-blocked).
 (defun dataflow-schedule (pids done? rounds batches blocked)
     (if (done?)
-        (list3 rounds batches blocked)
+        (list rounds batches blocked)
         (do
             (let stops (dataflow-round pids ()))
             (when (nil? stops)
@@ -76,7 +76,7 @@
 
 ; For each element of each row, the list (self n1 .. n8) of it and its
 ; neighbors on the torus.
-(defun dataflow-triples (xs) (map3 list3 (rotate-right xs) xs (rotate-left xs)))
+(defun dataflow-triples (xs) (map3 (lambda (a b c) (list a b c)) (rotate-right xs) xs (rotate-left xs)))
 
 (defun dataflow-neighborhoods (rows)
     (let ts (map dataflow-triples rows))
@@ -86,7 +86,7 @@
         (rotate-right ts) ts (rotate-left ts)))
 
 (defun dataflow-next-pids (rule prev)
-    (map (lambda (row) (map (lambda (deps) (dataflow-spawn dataflow-cell (list2 rule deps))) row))
+    (map (lambda (row) (map (lambda (deps) (dataflow-spawn dataflow-cell (list rule deps))) row))
         (dataflow-neighborhoods prev)))
 
 (defun dataflow-flatten (rows) (fold append () (reverse rows)))
@@ -109,20 +109,19 @@
 (defun dataflow-engine (config report)
     (let rule (config-rule config))
     (let board (config-board config))
-    (let seeds (map (lambda (row) (map (lambda (s) (dataflow-spawn dataflow-seed (dataflow-list1 s))) row))
+    (let seeds (map (lambda (row) (map (lambda (s) (dataflow-spawn dataflow-seed (list s))) row))
             (board-rows board)))
-    (let window (dataflow-grow rule (dataflow-list1 seeds) dataflow-ahead))
+    (let window (dataflow-grow rule (list seeds) dataflow-ahead))
     (let cells (* (board-width board) (board-height board)))
     (dataflow-loop rule report 0 (board-width board) (board-height board) window
         (* cells (+ dataflow-ahead 1))))
 
-(defun dataflow-list1 (x) (cons x ()))
 
 ; Spawns `n` more generations on top of the window (oldest first).
 (defun dataflow-grow (rule window n)
     (if (= n 0)
         window
-        (dataflow-grow rule (append window (dataflow-list1 (dataflow-next-pids rule (last window)))) (- n 1))))
+        (dataflow-grow rule (append window (list (dataflow-next-pids rule (last window)))) (- n 1))))
 
 ; `window` holds the pid boards of generations gen .. gen+ahead.
 (defun dataflow-loop (rule report gen width height window created)
@@ -131,14 +130,10 @@
     (let run (dataflow-schedule all (lambda () (all? dataflow-ended? oldest)) 0 0 0))
     (let notes
         `(("processes created" ,created)
-          ("spawned ahead" ,(dataflow-text `("generations " ,(+ gen 1) " to " ,(+ gen dataflow-ahead))))
-          ("rounds / batches" ,(dataflow-text `(,(car run) " / " ,(second run))))
-          ("batches that blocked in join" ,(third run))))
+            ("spawned ahead" ,(text-of `("generations " ,(+ gen 1) " to " ,(+ gen dataflow-ahead))))
+            ("rounds / batches" ,(text-of `(,(car run) " / " ,(second run))))
+            ("batches that blocked in join" ,(third run))))
     (if (eq? (report gen (board-make width height (dataflow-frame (car window))) notes) :continue)
         (dataflow-loop rule report (+ gen 1) width height (dataflow-grow rule (cdr window) 1)
             (+ created (* width height)))
         (for-each (lambda (p) (when (not (dataflow-ended? p)) (process::kill p :stop))) all)))
-
-; string-append takes two arguments; this takes a list of values.
-(defun dataflow-text (xs)
-    (fold (lambda (s x) (string-append s (if (string? x) x (value->string x)))) "" xs))

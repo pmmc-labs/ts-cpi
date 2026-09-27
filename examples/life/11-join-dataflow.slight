@@ -55,14 +55,14 @@
 
 (defun jd-seed-pids ()
     (let seed (seed-board))
-    (make-board (lambda (row col) (jd-spawn jd-seed (cons (cell-at seed row col) ())))))
+    (make-board (lambda (row col) (jd-spawn jd-seed (list (cell-at seed row col))))))
 
 (defun jd-deps (prev row col)
     (cons (cell-at prev row col)
         (map (lambda (p) (cell-at prev (car p) (second p))) (neighbors-of row col))))
 
 (defun jd-next-pids (prev)
-    (make-board (lambda (row col) (jd-spawn jd-cell (cons (jd-deps prev row col) ())))))
+    (make-board (lambda (row col) (jd-spawn jd-cell (list (jd-deps prev row col))))))
 
 ; A list of pid boards, generation 0 first.
 (defun jd-build (gen prev acc)

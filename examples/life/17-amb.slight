@@ -49,7 +49,7 @@
 ; A leaf knows its path; the first three bits are the row, the last three
 ; the column. It waits for a board and reports its cell's next state.
 (defun am-leaf (bits)
-    (let row (am-number (list3 (car bits) (second bits) (third bits))))
+    (let row (am-number (list (car bits) (second bits) (third bits))))
     (let col (am-number (cdr (cdr (cdr bits)))))
     (let board (actor::recv))
     (step-cell board row col))
@@ -69,14 +69,14 @@
 (defun am-revive (parked msg)
     (let p (process::unpark parked (environment::self)))
     (mailbox::send (am-parked-address parked) msg)
-    (list2 p (process::run p am-quota)))
+    (list p (process::run p am-quota)))
 
 ; ---------------------------------------------------------------------------
 ; Growing the tree: at every choice point, fork both ways.
 
 (defun am-grow (parked depth)
     (if (= depth am-bits)
-        (cons parked ())
+        (list parked)
         (append (am-branch parked 0 depth) (am-branch parked 1 depth))))
 
 (defun am-branch (parked bit depth)
@@ -111,7 +111,7 @@
 
 (defun main ()
     (let mbox (mailbox::create #true 10))
-    (let root (process::spawn am-cell (cons () ()) (environment::self) '(actor) mbox))
+    (let root (process::spawn am-cell (list ()) (environment::self) '(actor) mbox))
     (IO::print "the root asks its first question:" (process::run root am-quota))
     (let leaves (am-grow (process::park root) 0))
     (IO::print "grew" (length leaves) "leaves from one process;"

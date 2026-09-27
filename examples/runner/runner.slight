@@ -29,7 +29,9 @@
         (cons (car xs) (rn-set (cdr xs) (- i 1) value))))
 
 (defun rn-size-text (size)
-    (if (eq? size 'fit) "fit the terminal" (string-append (value->string (car size)) (string-append " × " (value->string (second size))))))
+    (if (eq? size 'fit)
+        "fit the terminal"
+        (string-append (value->string (car size)) " × " (value->string (second size)))))
 
 (defun rn-choice-text (field choice)
     (let option (list-ref (rn-options field) choice))
@@ -37,7 +39,7 @@
         (0 (car option))
         (1 (rn-size-text option))
         (2 (car option))
-        (3 (string-append (car option) (string-append "  " (second option))))
+        (3 (string-append (car option) "  " (second option)))
         (else (string-append (value->string option) " ms per generation"))))
 
 ; ---------------------------------------------------------------------------
@@ -51,14 +53,15 @@
             (Text (@ (bold #true) (color cyan)) "Life runner")
             (Box (@ (height 1)))
             ,@(map (lambda (field)
-                       `(Box
-                           (Box (@ (width 10)) (Text (@ (dimColor #true)) ,(list-ref rn-fields field)))
-                           (Text (@ (inverse ,(= field focus)))
-                               ,(string-append " ‹ " (string-append (rn-choice-text field (list-ref choices field)) " › ")))))
-                   (range 0 5))
+                    `(Box
+                        (Box (@ (width 10)) (Text (@ (dimColor #true)) ,(list-ref rn-fields field)))
+                        (Text (@ (inverse ,(= field focus)))
+                            ,(string-append " ‹ " (rn-choice-text field (list-ref choices field)) " › "))))
+                (range 0 5))
             (Box (@ (height 1)))
             (Text (@ (dimColor #true))
-                ,(string-append "engine: " (string-append (third engine) (if (eq? (engine-function engine) #false) "  (not loaded)" ""))))
+                ,(string-append "engine: " (third engine)
+                    (if (eq? (engine-function engine) #false) "  (not loaded)" "")))
             (Text (@ (dimColor #true))
                 ,(string-append "rule: " (third (list-ref rules (list-ref choices 3)))))
             (Box (@ (height 1)))
@@ -110,17 +113,16 @@
             (catch
                 (do
                     (engine (config-make board (rule-parse (second rule-entry))) (rn-report cell inbox info))
-                    (string-append (car entry)
-                        (string-append " stopped at generation "
-                            (value->string (- (length (rs-history (cell-get cell))) 1)))))
+                    (string-append (car entry) " stopped at generation "
+                        (value->string (- (length (rs-history (cell-get cell))) 1))))
                 e
-                (string-append (car entry) (string-append " failed: " (value->string e)))))))
+                (string-append (car entry) " failed: " (value->string e))))))
 
 (defun rn-board-size (size)
     (if (eq? size 'fit)
         (do
             (let screen (tui::size))
-            (list2 (rn-max 16 (- (car screen) 44)) (rn-max 8 (* 2 (- (second screen) 8)))))
+            (list (rn-max 16 (- (car screen) 44)) (rn-max 8 (* 2 (- (second screen) 8)))))
         size))
 
 (defun rn-max (a b) (if (> a b) a b))
@@ -196,11 +198,11 @@
 (defun rn-board-lines (rows)
     (cond
         ((nil? rows) ())
-        ((nil? (cdr rows)) (cons (rn-pair-line (car rows) (map (lambda (c) 0) (car rows))) ()))
+        ((nil? (cdr rows)) (list (rn-pair-line (car rows) (map (lambda (c) 0) (car rows)))))
         (#true (cons (rn-pair-line (car rows) (second rows)) (rn-board-lines (cdr (cdr rows)))))))
 
 (defun rn-pair-line (top bottom)
-    (fold (lambda (s pair) (string-append s (rn-half (car pair) (second pair)))) "" (zip top bottom)))
+    (string-join "" (map (lambda (pair) (rn-half (car pair) (second pair))) (zip top bottom))))
 
 (defun rn-half (top bottom)
     (if (= top 1)
@@ -210,7 +212,7 @@
 (defun rn-sparkline (history width)
     (let recent (rn-take width history))
     (let top (fold (lambda (m n) (if (> n m) n m)) 1 recent))
-    (fold (lambda (s n) (string-append s (list-ref rn-bars (/ (* n 7) top)))) "" (reverse recent)))
+    (string-join "" (map (lambda (n) (list-ref rn-bars (/ (* n 7) top))) (reverse recent))))
 
 (defun rn-take (n xs)
     (if (or (= n 0) (nil? xs)) () (cons (car xs) (rn-take (- n 1) (cdr xs)))))
@@ -227,39 +229,37 @@
     (cond
         ((nil? before) acc)
         ((= (car before) (car after)) (rn-row-changes acc (cdr before) (cdr after)))
-        ((= (car after) 1) (rn-row-changes (list2 (+ (car acc) 1) (second acc)) (cdr before) (cdr after)))
-        (#true (rn-row-changes (list2 (car acc) (+ (second acc) 1)) (cdr before) (cdr after)))))
+        ((= (car after) 1) (rn-row-changes (list (+ (car acc) 1) (second acc)) (cdr before) (cdr after)))
+        (#true (rn-row-changes (list (car acc) (+ (second acc) 1)) (cdr before) (cdr after)))))
 
 ; Rows of (value label): values right-aligned in a column as wide as the
 ; widest, labels after them, so a label can be as long as it needs to be.
 (defun rn-table (rows)
-    (let texts (map (lambda (r) (list2 (value->string (car r)) (second r))) rows))
+    (let texts (map (lambda (r) (list (value->string (car r)) (second r))) rows))
     (let width (+ 2 (fold (lambda (m t) (rn-max m (string-length (car t)))) 1 texts)))
     `(Box (@ (flexDirection column))
         ,@(map (lambda (t)
-                   `(Box
-                       (Box (@ (width ,width) (flexShrink 0) (justifyContent flex-end) (paddingRight 2))
-                           (Text (@ (bold #true)) ,(car t)))
-                       (Text (@ (dimColor #true)) ,(second t))))
-               texts)))
+                `(Box
+                    (Box (@ (width ,width) (flexShrink 0) (justifyContent flex-end) (paddingRight 2))
+                        (Text (@ (bold #true)) ,(car t)))
+                    (Text (@ (dimColor #true)) ,(second t))))
+            texts)))
 
 (defun rn-keys-view (paused)
     `(Box (@ (flexDirection column) (paddingTop 1))
         (Text (@ (bold #true) (color ,(if paused "yellow" "green"))) ,(if paused "paused" "running"))
         (Box (@ (height 1)))
         ,(rn-table (if paused
-                       '(("space" "resume") ("s" "step one generation") ("q" "back to the menu"))
-                       '(("space" "pause") ("q" "back to the menu"))))))
+                '(("space" "resume") ("s" "step one generation") ("q" "back to the menu"))
+                '(("space" "pause") ("q" "back to the menu"))))))
 
 (defun rn-run-view (info gen board notes st engine-ms frame-ms changes)
     (let spark-width (rn-max 32 (board-width board)))
     `(Box (@ (flexDirection column) (paddingX 1))
         (Text (@ (bold #true) (color cyan)) ,(car info)
             (Text (@ (dimColor #true))
-                ,(string-append "  " (string-append (second info)
-                    (string-append " · " (string-append (third info)
-                        (string-append " " (string-append (list-ref info 3)
-                            (string-append " · " (rn-size-text (list2 (board-width board) (board-height board))))))))))))
+                ,(string-append "  " (second info) " · " (third info) " " (list-ref info 3) " · "
+                    (rn-size-text (list (board-width board) (board-height board))))))
         (Text (@ (dimColor #true)) ,(list-ref info 4))
         (Box (@ (columnGap 3))
             (Box (@ (borderStyle round) (borderColor ,(if (rs-paused st) "yellow" "green")) (flexShrink 0))
@@ -269,21 +269,23 @@
         (Box (@ (columnGap 6) (paddingTop 1))
             ,(rn-table
                 `((,gen "generation")
-                  (,(car (rs-history st)) "live cells")
-                  (,(if changes (car changes) "-") "cells born this generation")
-                  (,(if changes (second changes) "-") "cells that died this generation")
-                  (,engine-ms "ms the engine took to compute this generation")
-                  (,(rs-draw-ms st) "ms to draw the previous frame")
-                  (,frame-ms "ms since the previous frame")
-                  (,(list-ref rn-speeds (rs-speed st)) "ms pace between generations, set in the menu")))
+                    (,(car (rs-history st)) "live cells")
+                    (,(if changes (car changes) "-") "cells born this generation")
+                    (,(if changes (second changes) "-") "cells that died this generation")
+                    (,engine-ms "ms the engine took to compute this generation")
+                    (,(rs-draw-ms st) "ms to draw the previous frame")
+                    (,frame-ms "ms since the previous frame")
+                    (,(list-ref rn-speeds (rs-speed st)) "ms pace between generations, set in the menu")))
             ,(and (not (nil? notes))
-                  `(Box (@ (flexDirection column))
-                       (Text (@ (bold #true)) "how the engine is working")
-                       ,(rn-table (map (lambda (note) (list2 (second note) (car note))) notes)))))
+                `(Box (@ (flexDirection column))
+                    (Text (@ (bold #true)) "how the engine is working")
+                    ,(rn-table (map (lambda (note) (list (second note) (car note))) notes)))))
         (Box (@ (paddingTop 1) (columnGap 2))
             (Text (@ (color cyan)) ,(rn-sparkline (rs-history st) spark-width))
             (Text (@ (dimColor #true))
-                ,(string-append "live cells over the last " (string-append (value->string (rn-min spark-width (length (rs-history st)))) " generations"))))))
+                ,(string-append "live cells over the last "
+                    (value->string (rn-min spark-width (length (rs-history st))))
+                    " generations")))))
 
 (defun rn-min (a b) (if (< a b) a b))
 

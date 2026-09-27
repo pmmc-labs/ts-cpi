@@ -11,7 +11,7 @@
 (const dl-bars '("▁" "▂" "▃" "▄" "▅" "▆" "▇" "█"))
 
 (defun dl-row (row)
-    `(Text (@ (color yellow)) ,(fold (lambda (s c) (string-append s (if (= c 1) "██" "··"))) "" row)))
+    `(Text (@ (color yellow)) ,(string-join "" (map (lambda (c) (if (= c 1) "██" "··")) row))))
 
 (defun dl-largest (xs)
     (fold (lambda (m x) (if (> x m) x m)) 0 xs))
@@ -19,9 +19,7 @@
 ; One bar per generation, oldest first, scaled to the largest population.
 (defun dl-sparkline (history)
     (let top (dl-largest history))
-    (fold (lambda (s n) (string-append s (list-ref dl-bars (if (= top 0) 0 (/ (* n 7) top)))))
-        ""
-        (reverse history)))
+    (string-join "" (map (lambda (n) (list-ref dl-bars (if (= top 0) 0 (/ (* n 7) top)))) (reverse history))))
 
 (defun dl-stat (name value)
     `(Text (Text (@ (dimColor #true)) ,name " ") ,value))

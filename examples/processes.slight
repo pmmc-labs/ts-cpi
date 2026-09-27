@@ -7,7 +7,7 @@
     (host::now))
 
 (defun main ()
-    (let p (process::spawn greeter (cons :g ()) (environment::self) '(actor IO) #false))
+    (let p (process::spawn greeter (list :g) (environment::self) '(actor IO) #false))
     (IO::print :state (process::state p))
     (IO::print :run1 (process::run p 50))
     (IO::print :state (process::state p))

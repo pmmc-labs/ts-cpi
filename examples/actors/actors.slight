@@ -14,7 +14,7 @@
 ; ---------------------------------------------------------------------------
 
 (defun send (to tag body)
-    (actor::send to (cons tag (cons (actor::self) (cons body ())))))
+    (actor::send to (list tag (actor::self) body)))
 
 (defun receive ()
     (actor::recv))
@@ -41,7 +41,7 @@
 (defun spawn-actor (name behavior args)
     (let pid (process::spawn behavior args (environment::self) '(actor IO) #false))
     (IO::print "[system] spawned" name)
-    (cons name (cons pid (cons (process::address pid) ()))))
+    (list name pid (process::address pid)))
 
 (defun ready? (a)
     (eq? (car (process::state (actor-pid a))) :ready))

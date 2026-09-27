@@ -10,6 +10,6 @@
 (defun main ()
     (let r1 (loop 1000000))
     (IO::print :cpi r1)
-    (let p (process::spawn loop (cons 1000000 ()) (environment::self) '() #false))
+    (let p (process::spawn loop (list 1000000) (environment::self) '() #false))
     (let r2 (process::run p 20000000))
     (IO::print :process r2))

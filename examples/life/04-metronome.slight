@@ -73,7 +73,7 @@
             (let gen (car score))
             (let rows (cdr (cdr score)))
             (timer::sleep (mt-sleep-for row (+ gen 1) (second score)))
-            (actor::send results (list3 row (+ gen 1) (mt-step-row (car rows) (second rows) (third rows))))
+            (actor::send results (list row (+ gen 1) (mt-step-row (car rows) (second rows) (third rows))))
             (mt-player row results))))
 
 ; ---------------------------------------------------------------------------
@@ -106,9 +106,10 @@
     (let now (host::now))
     (for-each (lambda (row)
             (mailbox::send (process::address (list-ref players row))
-                (cons gen (cons now (list3 (list-ref board (wrap (- row 1) life-height))
-                            (list-ref board row)
-                            (list-ref board (wrap (+ row 1) life-height)))))))
+                (list gen now
+                    (list-ref board (wrap (- row 1) life-height))
+                    (list-ref board row)
+                    (list-ref board (wrap (+ row 1) life-height)))))
         (range 0 life-height))
     (mt-run-ready players))
 
@@ -117,7 +118,7 @@
     (let r (mailbox::take results))
     (cond
         ((eq? r #false) got)
-        ((= (second r) gen) (mt-collect results gen (cons (list2 (car r) (third r)) got)))
+        ((= (second r) gen) (mt-collect results gen (cons (list (car r) (third r)) got)))
         (#true (throw (make-error :off-beat "a row for the wrong beat" r)))))
 
 (defun mt-missing (got)
@@ -165,7 +166,7 @@
 (defun main ()
     (let results (mailbox::create #true 100))
     (let players (map (lambda (row)
-                (process::spawn mt-player (list2 row results) (environment::self) '(actor timer) #false))
+                (process::spawn mt-player (list row results) (environment::self) '(actor timer) #false))
             (range 0 life-height)))
     (IO::print "[conductor]" (length players) "players, one beat every" mt-beat "ms")
     (mt-perform players results 0 (seed-board))

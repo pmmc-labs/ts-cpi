@@ -52,7 +52,7 @@
 ; generation with whichever rule it now holds, and loops. The rule is an
 ; argument, so the checkpoint holds it.
 (defun hr-world (gen board rule out)
-    (actor::send out (list2 gen board))
+    (actor::send out (list gen board))
     (let msg (actor::recv))
     (let next-rule (if (eq? (car msg) :upgrade) (second msg) rule))
     (hr-world (+ gen 1) (hr-step next-rule board) next-rule out))
@@ -68,7 +68,7 @@
 (defun hr-counting-rule (census)
     (lambda (alive count)
         (let next (life-rule alive count))
-        (actor::send census (list2 alive next))
+        (actor::send census (list alive next))
         next))
 
 ; Life as data: row `alive` of the table, column `count`.
@@ -89,7 +89,8 @@
     (if (nil? hits) "an unknown rule" (car (car hits))))
 
 (defun hr-show-rule (p known)
-    (IO::print (string-append "  [the world's checkpoint holds " (string-append (hr-rule-name (third (process::checkpoint p)) known) "]"))))
+    (IO::print
+        (string-append "  [the world's checkpoint holds " (hr-rule-name (third (process::checkpoint p)) known) "]")))
 
 ; Prints the frames waiting in `out`, skipping any generation already shown.
 ; Returns the highest generation printed so far.
@@ -112,7 +113,7 @@
 (defun hr-drain-census (census b d s n)
     (let msg (mailbox::take census))
     (cond
-        ((eq? msg #false) (cons b (list3 d s n)))
+        ((eq? msg #false) (list b d s n))
         ((and (= (car msg) 0) (= (second msg) 1)) (hr-drain-census census (+ b 1) d s (+ n 1)))
         ((and (= (car msg) 1) (= (second msg) 0)) (hr-drain-census census b (+ d 1) s (+ n 1)))
         ((and (= (car msg) 1) (= (second msg) 1)) (hr-drain-census census b d (+ s 1) (+ n 1)))
@@ -148,9 +149,9 @@
     (for-each (lambda (named)
             (IO::print "   " (car named) "same hash:" (eq? (environment::binding-hash (second named)) hash)
                 "same life-rule:" (eq? (environment::lookup (second named) 'life-rule) life-rule)))
-        (list3 (list2 "process::env of the world," worlds)
-            (list2 "compose self with it," composed)
-            (list2 "environment::error-env of a probe," thrown)))
+        (list (list "process::env of the world," worlds)
+            (list "compose self with it," composed)
+            (list "environment::error-env of a probe," thrown)))
     (IO::print "    conflicts in the composition:" (environment::conflicts composed))
     (IO::print "    eq? of two environment::self refs:" (eq? mine (environment::self))
         "(refs are compared by identity, so only the hash can tell envs apart)")
@@ -160,7 +161,7 @@
 
 ; Swap C: preempt mid-generation, kill, edit the checkpoint, respawn.
 (defun hr-surgery (p home census new-rule)
-    (mailbox::send home (cons :go ()))
+    (mailbox::send home (list :go))
     (let r (process::run p 20000))
     (IO::print "  swap C: let the world start the next generation, then stopped it:" r)
     (process::kill p :surgery)
@@ -172,7 +173,7 @@
     (let p2 (process::spawn hr-world edited (environment::self) '(actor) home))
     (IO::print "    respawned it from the edited checkpoint on the same mailbox; it replays from there")
     (hr-run-world p2)
-    (hr-go p2 home (cons :go ())))
+    (hr-go p2 home (list :go)))
 
 ; One transition per call: gen `shown` to gen `shown` + 1.
 (defun hr-drive (p home out census rules shown)
@@ -187,15 +188,15 @@
             (let p2 (case shown
                     (1 (do
                             (hr-try-env-swap p)
-                            (hr-go p home (cons :go ()))))
+                            (hr-go p home (list :go))))
                     (2 (do
                             (IO::print "  swap B: sending the counting rule in the go-ahead")
-                            (hr-go p home (list2 :upgrade (rule-of 1)))))
+                            (hr-go p home (list :upgrade (rule-of 1)))))
                     (4 (hr-surgery p home census (rule-of 2)))
                     (6 (do
                             (IO::print "  swap D: sending the original life-rule back")
-                            (hr-go p home (list2 :upgrade (rule-of 0)))))
-                    (else (hr-go p home (cons :go ())))))
+                            (hr-go p home (list :upgrade (rule-of 0)))))
+                    (else (hr-go p home (list :go)))))
             (hr-print-census census (+ shown 1))
             (hr-drive p2 home out census rules (hr-frames out shown)))))
 
@@ -203,10 +204,10 @@
     (let out (mailbox::create #true 100))
     (let census (mailbox::create #true 1000))
     (let home (mailbox::create #true 10))
-    (let rules (list3 (list2 "life-rule, the original" life-rule)
-            (list2 "the counting rule" (hr-counting-rule census))
-            (list2 "the table rule" (hr-table-rule hr-table))))
-    (let p (process::spawn hr-world (cons 0 (cons (seed-board) (cons life-rule (cons out ()))))
+    (let rules (list (list "life-rule, the original" life-rule)
+            (list "the counting rule" (hr-counting-rule census))
+            (list "the table rule" (hr-table-rule hr-table))))
+    (let p (process::spawn hr-world (list 0 (seed-board) life-rule out)
             (environment::self) '(actor) home))
     (hr-run-world p)
     (hr-drive p home out census rules (hr-frames out -1)))

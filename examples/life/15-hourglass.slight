@@ -46,7 +46,7 @@
 ; An hourglass process for a list of neighbor states. It is granted nothing:
 ; it cannot print, send or sleep. All it can do is take time.
 (defun hg-glass (neighbors)
-    (process::spawn hg-pour (cons neighbors ()) (environment::self) () #false))
+    (process::spawn hg-pour (list neighbors) (environment::self) () #false))
 
 ; ---------------------------------------------------------------------------
 ; Calibration: a stopwatch made of one-tick batches.

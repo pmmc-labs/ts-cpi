@@ -54,12 +54,12 @@
 (defun rw-worker (row results)
     (let order (actor::recv))
     (if (eq? order :stop)
-        (list2 :rows-done row)
+        (list :rows-done row)
         (do
             (let gen (car order))
             (let rows (cdr order))
             (let new-row (rw-step-row (car rows) (second rows) (third rows)))
-            (actor::send results (list3 row (+ gen 1) new-row))
+            (actor::send results (list row (+ gen 1) new-row))
             (rw-worker row results))))
 
 ; ---------------------------------------------------------------------------
@@ -70,9 +70,10 @@
 (defun rw-scatter (workers gen board)
     (for-each (lambda (row)
             (mailbox::send (process::address (list-ref workers row))
-                (cons gen (list3 (list-ref board (wrap (- row 1) life-height))
-                        (list-ref board row)
-                        (list-ref board (wrap (+ row 1) life-height))))))
+                (list gen
+                    (list-ref board (wrap (- row 1) life-height))
+                    (list-ref board row)
+                    (list-ref board (wrap (+ row 1) life-height)))))
         (range 0 life-height)))
 
 ; The order workers run in during a superstep. 5 is coprime to 8, so this is
@@ -94,7 +95,7 @@
                     (do
                         (let reason (process::run (list-ref workers row) (rw-quota row gen)))
                         (when (not (or (eq? (car reason) :quota) (eq? (car reason) :blocked)))
-                            (throw (make-error :worker-died "a row worker stopped" (list2 row reason))))))
+                            (throw (make-error :worker-died "a row worker stopped" (list row reason))))))
                 ready)
             (rw-compute workers gen order (+ rounds 1)))))
 
@@ -103,14 +104,14 @@
 ; order. A missing result after compute would be a bug, so it throws.
 (defun rw-gather (results gen got arrivals)
     (if (= (length got) life-height)
-        (list2 got (reverse arrivals))
+        (list got (reverse arrivals))
         (do
             (let r (mailbox::take results))
             (when (eq? r #false)
-                (throw (make-error :barrier-short "a row never arrived" (list2 gen arrivals))))
+                (throw (make-error :barrier-short "a row never arrived" (list gen arrivals))))
             (when (not (= (second r) gen))
                 (throw (make-error :stale-result "a result from the wrong superstep" r)))
-            (rw-gather results gen (cons (list2 (car r) (third r)) got) (cons (car r) arrivals)))))
+            (rw-gather results gen (cons (list (car r) (third r)) got) (cons (car r) arrivals)))))
 
 ; Puts the tagged rows back in order.
 (defun rw-assemble (got)
@@ -143,7 +144,7 @@
     ; One shared result mailbox. Nobody receives on it: only the CPI takes.
     (let results (mailbox::create #true 100))
     (let workers (map (lambda (row)
-                (process::spawn rw-worker (list2 row results) (environment::self) '(actor) #false))
+                (process::spawn rw-worker (list row results) (environment::self) '(actor) #false))
             (range 0 life-height)))
     (IO::print "[cpi] spawned" (length workers) "row workers, one result mailbox")
     (rw-loop workers results 0 (seed-board))

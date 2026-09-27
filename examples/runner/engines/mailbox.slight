@@ -17,10 +17,10 @@
     (let now (mailbox-bank board))
     (let next (mailbox-bank board))
     (map2 (lambda (brow row)
-            (map2 (lambda (box alive) (when (= alive 1) (mailbox::send box (list2 :born 0)))) brow row))
+            (map2 (lambda (box alive) (when (= alive 1) (mailbox::send box (list :born 0)))) brow row))
         now (board-rows board))
     (mailbox-loop 0 (board-width board) (board-height board) (config-rule config) now next
-        (cons 0 (list3 (board-population board) 0 (if (= (board-population board) 0) #false 0)))
+        (list 0 (board-population board) 0 (if (= (board-population board) 0) #false 0))
         report))
 
 ; A bank of one-message mailboxes, one per cell of `board`.
@@ -37,13 +37,13 @@
     (let rows (mailbox-read now))
     (let notes
         `(("mailboxes" ,(* 2 (* width height)))
-          ("tokens moved, minted, dropped" ,(list3 (car tally) (second tally) (third tally)))
-          ("oldest token minted in generation" ,(list-ref tally 3))))
+            ("tokens moved, minted, dropped" ,(list (car tally) (second tally) (third tally)))
+            ("oldest token minted in generation" ,(list-ref tally 3))))
     (when (eq? (report gen (board-make width height rows) notes) :continue)
         (let counts (map3 row-counts (rotate-right rows) rows (rotate-left rows)))
         (let written
             (fold (lambda (t q) (mailbox-write-row rule (+ gen 1) (car q) (second q) (third q) (list-ref q 3) t))
-                (cons 0 (list3 0 0 #false))
+                (list 0 0 0 #false)
                 (map3 (lambda (n x rc) (cons n (cons x rc))) now next (zip rows counts))))
         (mailbox-loop (+ gen 1) width height rule next now written report)))
 
@@ -66,13 +66,13 @@
             (mailbox::send there token)
             (mailbox-tally tally 1 0 0 (second token)))
         (#true
-            (mailbox::send there (list2 :born born))
+            (mailbox::send there (list :born born))
             (mailbox-tally tally 0 1 0 born))))
 
 (defun mailbox-tally (tally moved minted dropped birth)
     (let oldest (list-ref tally 3))
     `(,(+ (car tally) moved) ,(+ (second tally) minted) ,(+ (third tally) dropped)
-      ,(cond
+        ,(cond
             ((eq? birth #false) oldest)
             ((eq? oldest #false) birth)
             ((< birth oldest) birth)

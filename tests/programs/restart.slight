@@ -10,7 +10,7 @@
 
 (defun main ()
     (let mbox (mailbox::create #true 100))
-    (let p1 (process::spawn counter (cons 0 ()) (environment::self) '(actor IO) mbox))
+    (let p1 (process::spawn counter (list 0) (environment::self) '(actor IO) mbox))
 
     (mailbox::send mbox :inc)
     (process::run p1 100)

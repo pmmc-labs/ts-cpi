@@ -47,12 +47,12 @@
             (do
                 (let next (rule-next rule alive count))
                 (when (not (= next alive))
-                    (actor::send cpi (list3 me next nbrs)))
+                    (actor::send cpi (list me next nbrs)))
                 (hibernate-cell rule me next count nbrs cpi)))
         ((eq? msg :commit)
             (do
                 (let d (if (= alive 1) 1 -1))
-                (for-each (lambda (info) (actor::send (third info) (list2 :delta d))) nbrs)
+                (for-each (lambda (info) (actor::send (third info) (list :delta d))) nbrs)
                 (hibernate-cell rule me alive count nbrs cpi)))
         (#true (hibernate-cell rule me alive count nbrs cpi))))
 
@@ -67,7 +67,7 @@
 (defun hibernate-pid (info) (second (hibernate-handle info)))
 
 (defun hibernate-set (info handle stamp)
-    (cell-put (hibernate-box info) (list2 handle stamp)))
+    (cell-put (hibernate-box info) (list handle stamp)))
 
 ; Run a process until it blocks in recv again.
 (defun hibernate-settle (pid)
@@ -83,7 +83,7 @@
 
 ; For each element of each row, the list (self n1 .. n8) of it and its
 ; neighbors on the torus.
-(defun hibernate-triples (xs) (map3 list3 (rotate-right xs) xs (rotate-left xs)))
+(defun hibernate-triples (xs) (map3 (lambda (a b c) (list a b c)) (rotate-right xs) xs (rotate-left xs)))
 
 (defun hibernate-neighborhoods (rows)
     (let ts (map hibernate-triples rows))
@@ -127,7 +127,7 @@
     (let born (+ (length live) (hibernate-wake candidates 0)))
     (hibernate-loop cells cpi report 0 board candidates
         (hibernate-notes cells (length candidates) (- cells born) 0 0 0 born 0)
-        (list3 born 0 (- cells born))))
+        (list born 0 (- cells born))))
 
 ; `awake` are the infos scheduled for this step: all awake, all stamped
 ; `gen`. `stats` is (created ticked unborn): processes created so far (each
@@ -156,25 +156,21 @@
         candidates
         (hibernate-notes cells (length candidates) unborn (length reports) woke parked created
             (hibernate-share ticked (* cells next)))
-        (list3 created ticked unborn)))
+        (list created ticked unborn)))
 
 (defun hibernate-notes (cells awake unborn changed woke parked created ticks)
     `(("awake" ,awake)
-      ("hibernating" ,(- cells (+ awake unborn)))
-      ("never spawned" ,unborn)
-      ("changed / woke / parked" ,(hibernate-slashed changed woke parked))
-      ("processes created" ,created)
-      ("cell ticks so far" ,ticks)))
+        ("hibernating" ,(- cells (+ awake unborn)))
+        ("never spawned" ,unborn)
+        ("changed / woke / parked" ,(hibernate-slashed changed woke parked))
+        ("processes created" ,created)
+        ("cell ticks so far" ,ticks)))
 
 (defun hibernate-slashed (a b c)
-    (hibernate-text `(,a " / " ,b " / " ,c)))
+    (text-of `(,a " / " ,b " / " ,c)))
 
 (defun hibernate-share (part whole)
-    (hibernate-text `(,part " of " ,whole " (" ,(/ (* 100 part) whole) "%)")))
-
-; string-append takes two arguments; this takes a list of values.
-(defun hibernate-text (xs)
-    (fold (lambda (s x) (string-append s (if (string? x) x (value->string x)))) "" xs))
+    (text-of `(,part " of " ,whole " (" ,(/ (* 100 part) whole) "%)")))
 
 ; Adds each unstamped info to `acc`, stamping it.
 (defun hibernate-mark (infos stamp acc)
@@ -195,7 +191,7 @@
         (#true
             (do
                 (let info (car infos))
-                (hibernate-set info (list2 :asleep (process::park (hibernate-pid info))) (hibernate-stamp info))
+                (hibernate-set info (list :asleep (process::park (hibernate-pid info))) (hibernate-stamp info))
                 (hibernate-park-unmarked (cdr infos) stamp (+ n 1))))))
 
 (defun hibernate-unborn? (info) (eq? (car (hibernate-handle info)) :unborn))
@@ -212,7 +208,7 @@
                 (:awake (hibernate-wake (cdr infos) n))
                 (:asleep
                     (do
-                        (hibernate-set info (list2 :awake (process::unpark (second handle) (environment::self)))
+                        (hibernate-set info (list :awake (process::unpark (second handle) (environment::self)))
                             (hibernate-stamp info))
                         (hibernate-wake (cdr infos) (+ n 1))))
                 (else
@@ -221,7 +217,7 @@
                         (let pid (process::spawn hibernate-cell
                                 `(,(second handle) ,info ,(third handle) 0 ,(list-ref handle 3) ,(list-ref handle 4))
                                 (environment::self) '(actor) (hibernate-addr info)))
-                        (hibernate-set info (list2 :awake pid) (hibernate-stamp info))
+                        (hibernate-set info (list :awake pid) (hibernate-stamp info))
                         (hibernate-wake (cdr infos) (+ n 1))))))))
 
 (defun hibernate-drain (addr acc)

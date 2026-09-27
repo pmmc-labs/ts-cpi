@@ -25,7 +25,7 @@
     (let order (actor::recv))
     (let rows (cdr order))
     (actor::send results
-        (list3 row (+ (car order) 1) (step-row rule (car rows) (second rows) (third rows))))
+        (list row (+ (car order) 1) (step-row rule (car rows) (second rows) (third rows))))
     (rows-worker row rule results))
 
 ; ---------------------------------------------------------------------------
@@ -35,7 +35,7 @@
 ; Phase 1. Every worker gets the rows around its own, wrapped on the torus.
 (defun rows-scatter (workers gen rows)
     (for-each (lambda (pair) (mailbox::send (process::address (car (car pair))) (cons gen (second pair))))
-        (zip workers (map3 list3 (rotate-right rows) rows (rotate-left rows)))))
+        (zip workers (map3 (lambda (a b c) (list a b c)) (rotate-right rows) rows (rotate-left rows)))))
 
 ; Ticks a worker may run before it is preempted: a different quota for each
 ; row and superstep, 100 to 500 ticks per cell of the row. A row takes about
@@ -67,7 +67,7 @@
                     (do
                         (let reason (process::run (car w) (rows-quota (second w) gen width)))
                         (when (not (or (eq? (car reason) :quota) (eq? (car reason) :blocked)))
-                            (throw (make-error :worker-died "a row worker stopped" (list2 (second w) reason))))))
+                            (throw (make-error :worker-died "a row worker stopped" (list (second w) reason))))))
                 ready)
             (rows-compute workers gen width (+ rounds 1)))))
 
@@ -90,7 +90,7 @@
 
 (defun rows-insert (sorted r)
     (cond
-        ((nil? sorted) (cons r ()))
+        ((nil? sorted) (list r))
         ((< (car r) (car (car sorted))) (cons r sorted))
         (#true (cons (car sorted) (rows-insert (cdr sorted) r)))))
 
@@ -102,9 +102,9 @@
     (let arrived (rows-gather results (+ gen 1) h ()))
     (let next (board-make w h (rows-assemble arrived)))
     (let notes `(("row workers" ,h)
-                 ("messages per generation" ,(* 2 h))
-                 ("rounds to the barrier" ,rounds)
-                 ("first and last rows in" (,(car (car arrived)) ,(car (last arrived))))))
+            ("messages per generation" ,(* 2 h))
+            ("rounds to the barrier" ,rounds)
+            ("first and last rows in" (,(car (car arrived)) ,(car (last arrived))))))
     (if (eq? (report (+ gen 1) next notes) :stop)
         (rows-kill workers)
         (rows-loop workers results rule (+ gen 1) next report)))
@@ -122,7 +122,7 @@
     ; One shared result mailbox. Nobody receives on it: only the CPI takes.
     (let results (mailbox::create #true h))
     (let workers (map (lambda (row)
-                (list2 (process::spawn rows-worker (list3 row rule results) (environment::self) '(actor) #false) row))
+                (list (process::spawn rows-worker (list row rule results) (environment::self) '(actor) #false) row))
             (range 0 h)))
     (if (eq? (report 0 board `(("row workers" ,h))) :stop)
         (rows-kill workers)

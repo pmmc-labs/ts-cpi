@@ -63,7 +63,7 @@
 ; ---------------------------------------------------------------------------
 
 (defun cp-timeline (label pid gen board batches)
-    (cons label (cons pid (cons gen (cons board (cons batches ()))))))
+    (list label pid gen board batches))
 
 (defun cp-label (tl) (car tl))
 (defun cp-pid (tl) (second tl))
@@ -108,14 +108,14 @@
 
 (defun cp-report-batches (tls)
     (IO::print "  observed after"
-        (map (lambda (tl) (list2 (cp-label tl) (cp-batches tl))) tls)
+        (map (lambda (tl) (list (cp-label tl) (cp-batches tl))) tls)
         "batches of" cp-batch "ticks"))
 
 ; The forks, row by row, next to each other.
 (defun cp-print-forks (conway forks gen)
     (when (not (nil? forks))
         (IO::print "  forks at" gen ":"
-            (map (lambda (tl) (list2 (cp-label tl) (cp-verdict conway tl))) forks))
+            (map (lambda (tl) (list (cp-label tl) (cp-verdict conway tl))) forks))
         (cp-print-fork-rows (map cp-board forks) (map cp-label forks))))
 
 (defun cp-verdict (conway tl)
@@ -125,21 +125,19 @@
 
 ; Strings compare by content, boards (pairs) only by identity.
 (defun cp-board-string (board)
-    (fold (lambda (s row) (string-append s (row->string row))) "" board))
+    (string-join "" (map row->string board)))
 
 (defun cp-print-fork-rows (boards labels)
     (when (not (nil? (car boards)))
-        (IO::print (fold (lambda (s pair)
-                    (string-append s (string-append (string-append "  " (cp-pad (car pair)))
-                            (string-append " | " (row->string (car (second pair)))))))
-                ""
-                (cp-zip labels boards)))
+        (IO::print (string-join ""
+                (map (lambda (pair) (string-append "  " (cp-pad (car pair)) " | " (row->string (car (second pair)))))
+                    (cp-zip labels boards))))
         (cp-print-fork-rows (map cdr boards) labels)))
 
 (defun cp-zip (xs ys)
     (if (nil? xs)
         ()
-        (cons (list2 (car xs) (car ys)) (cp-zip (cdr xs) (cdr ys)))))
+        (cons (list (car xs) (car ys)) (cp-zip (cdr xs) (cdr ys)))))
 
 (defun cp-pad (label)
     (case label
@@ -162,8 +160,7 @@
             (do
                 (let args (process::checkpoint (cp-pid conway)))
                 (IO::print "  forking history at generation" gen "from checkpoint of" (cp-pid conway))
-                (let new-forks (cons (cp-spawn :highlife cp-highlife args)
-                        (cons (cp-spawn :seeds cp-seeds args) ())))
+                (let new-forks (list (cp-spawn :highlife cp-highlife args) (cp-spawn :seeds cp-seeds args)))
                 (cp-next conway new-forks)))
         (#true (cp-next conway forks))))
 
@@ -180,4 +177,4 @@
 
 (defun main ()
     (IO::print "  the universe is spawned with grants ()")
-    (cp-generations (cp-spawn :conway universe (list2 0 (seed-board))) ()))
+    (cp-generations (cp-spawn :conway universe (list 0 (seed-board))) ()))

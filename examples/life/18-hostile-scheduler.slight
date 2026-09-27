@@ -48,7 +48,7 @@
     (let job (actor::recv))
     (let index (second job))
     (let value (step-cell (third job) (index-row index) (index-col index)))
-    (actor::send results (cons (car job) (cons index (cons value (cons id ())))))
+    (actor::send results (list (car job) index value id))
     (hs-worker id results))
 
 ; ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@
 ; ---------------------------------------------------------------------------
 
 (defun hs-post (jobs gen board index)
-    (mailbox::send jobs (list3 gen index board)))
+    (mailbox::send jobs (list gen index board)))
 
 ; Posts the forged stale job, the 64 real jobs in shuffled order, and a
 ; duplicate of one of them.
@@ -106,7 +106,7 @@
             (do
                 (IO::print "  dropped a duplicate answer: cell" (second msg) "from worker" (list-ref msg 3))
                 (hs-drain gen results got)))
-        (#true (hs-drain gen results (cons (list3 (second msg) (third msg) (list-ref msg 3)) got)))))
+        (#true (hs-drain gen results (cons (list (second msg) (third msg) (list-ref msg 3)) got)))))
 
 (defun hs-ready? (w)
     (eq? (car (process::state (second w))) :ready))
@@ -117,7 +117,7 @@
 (defun hs-schedule (gen workers results victim got slices preempts timeline)
     (let got2 (hs-drain gen results got))
     (if (= (length got2) (cell-count))
-        (cons got2 (list3 slices preempts timeline))
+        (list got2 slices preempts timeline)
         (do
             (let ready (filter hs-ready? workers))
             (when (nil? ready)
@@ -157,7 +157,7 @@
     (let jobs (mailbox::create #true 1000))
     (let results (mailbox::create #true 1000))
     (let workers (map (lambda (id)
-                (list2 id (process::spawn hs-worker (list2 id results) (environment::self) '(actor) jobs)))
+                (list id (process::spawn hs-worker (list id results) (environment::self) '(actor) jobs)))
             (range 0 hs-worker-count)))
     (IO::print "four workers share one job queue; the scheduler is out to get them")
     (hs-run 0 (seed-board) (seed-board) jobs results workers))

@@ -18,4 +18,4 @@
     (IO::print :red (describe :red) :green (describe :green))
     (let twice (lambda (f x) (f (f x))))
     (IO::print :twice (twice (lambda (n) (* n 3)) 5))
-    (IO::print :list (cons 1 (cons "two" (cons :three ())))))
+    (IO::print :list (list 1 "two" :three)))

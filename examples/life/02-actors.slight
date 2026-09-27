@@ -50,11 +50,11 @@
 ; `gen` that arrived during the previous generation; `buffered` counts every
 ; message this cell ever had to set aside.
 (defun ac-live (row col gen state neighbors early collector buffered)
-    (send collector :report (list3 gen (cell-index row col) state))
+    (send collector :report (list gen (cell-index row col) state))
     (if (= gen life-generations)
-        (list2 :retired buffered)
+        (list :retired buffered)
         (do
-            (for-each (lambda (n) (send n :state (list2 gen state))) neighbors)
+            (for-each (lambda (n) (send n :state (list gen state))) neighbors)
             (let heard (ac-gather gen (- 8 (length early)) (sum (map second early)) ()))
             (let later (second heard))
             (ac-live row col (+ gen 1) (life-rule state (car heard)) neighbors later collector
@@ -65,7 +65,7 @@
 ; the meantime, as (gen state) pairs.
 (defun ac-gather (gen need count early)
     (if (= need 0)
-        (list2 count early)
+        (list count early)
         (do
             (let m (receive))
             (let g (car (msg-body m)))
@@ -73,7 +73,7 @@
             (cond
                 ((= g gen) (ac-gather gen (- need 1) (+ count alive) early))
                 ((= g (+ gen 1)) (ac-gather gen need count (cons (msg-body m) early)))
-                (#true (throw (make-error :time-travel "a state from too far away in time" (list2 gen m))))))))
+                (#true (throw (make-error :time-travel "a state from too far away in time" (list gen m))))))))
 
 ; ---------------------------------------------------------------------------
 ; The CPI: spawning, introductions, scheduling, observing
@@ -81,8 +81,8 @@
 
 ; Like `spawn-actor`, but quiet: 64 "spawned" lines would drown the board.
 (defun ac-spawn (row col state)
-    (let pid (process::spawn ac-cell (list3 row col state) (environment::self) '(actor) #false))
-    (cons (list2 row col) (cons pid (cons (process::address pid) ()))))
+    (let pid (process::spawn ac-cell (list row col state) (environment::self) '(actor) #false))
+    (list (list row col) pid (process::address pid)))
 
 ; Cells are numbered by `cell-index`, so the cell list doubles as the board.
 (defun ac-introduce (cells collector)
@@ -90,7 +90,7 @@
             (do
                 (let neighbors (map (lambda (p) (actor-address (list-ref cells (cell-index (car p) (second p)))))
                         (neighbors-of (index-row i) (index-col i))))
-                (mailbox::send (actor-address (list-ref cells i)) (list3 :neighbors collector neighbors))))
+                (mailbox::send (actor-address (list-ref cells i)) (list :neighbors collector neighbors))))
         (range 0 (cell-count))))
 
 ; Uneven quotas: 40 to 400 ticks, fixed per cell.
@@ -134,7 +134,7 @@
 (defun ac-print-ready (next reports round highest)
     (let mine (ac-reports-for next reports))
     (if (or (> next life-generations) (< (length mine) (cell-count)))
-        (list2 next reports)
+        (list next reports)
         (do
             (IO::print "[collector] round" round "- all 64 cells reported; the fastest cell has reported gen" highest)
             (print-board next (make-board (lambda (row col)

@@ -43,7 +43,7 @@
 
 ; The (row col) positions of the eight neighbors of a cell, wrapped.
 (defun neighbors-of (row col)
-    (map (lambda (o) (list2 (wrap (+ row (car o)) life-height)
+    (map (lambda (o) (list (wrap (+ row (car o)) life-height)
                 (wrap (+ col (second o)) life-width)))
         neighbor-offsets))
 
@@ -64,11 +64,11 @@
 
 (defun live-cells (board)
     (filter (lambda (p) (= (cell-at board (car p) (second p)) 1))
-        (fold append () (map (lambda (row) (map (lambda (col) (list2 row col)) (range 0 life-width)))
+        (fold append () (map (lambda (row) (map (lambda (col) (list row col)) (range 0 life-width)))
                 (range 0 life-height)))))
 
 (defun row->string (row)
-    (fold (lambda (s cell) (string-append s (if (= cell 1) "#" "."))) "" row))
+    (string-join "" (map (lambda (cell) (if (= cell 1) "#" ".")) row)))
 
 ; Every version prints its frames with this, so tests can compare them.
 (defun print-board (gen board)

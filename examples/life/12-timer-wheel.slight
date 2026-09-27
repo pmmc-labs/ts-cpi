@@ -41,7 +41,7 @@
 ; Spawn a sleeper that wakes at absolute time `at`. `timer::sleep` counts
 ; from the moment the process first runs, so run it at once, now, to arm it.
 (defun tw-arm (at)
-    (let p (process::spawn tw-sleeper (cons (- at (host::now)) ()) (environment::self) '(timer) #false))
+    (let p (process::spawn tw-sleeper (list (- at (host::now))) (environment::self) '(timer) #false))
     (process::run p 100))
 
 ; Write generation `gen` into the future: one timer per live cell, then the
@@ -63,7 +63,7 @@
     (for-each (lambda (p) (process::run p 100)) woke)
     (let t (host::now))
     (if (= (% t tw-period) tw-sentinel)
-        (list2 (- (/ t tw-period) 1) (reverse acc))
+        (list (- (/ t tw-period) 1) (reverse acc))
         (tw-read (cons (% t tw-period) acc))))
 
 (defun tw-board (indices)

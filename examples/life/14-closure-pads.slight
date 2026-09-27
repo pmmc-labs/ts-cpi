@@ -41,7 +41,7 @@
 ; Peek at one cell: (row col alive), read from what its closure captured.
 (defun cp-peek (cell)
     (let pad (environment::closure-pad cell))
-    (list3 (cp-pad-ref pad :row) (cp-pad-ref pad :col) (cp-pad-ref pad :alive)))
+    (list (cp-pad-ref pad :row) (cp-pad-ref pad :col) (cp-pad-ref pad :alive)))
 
 ; Rebuild the board from a bag of cells, in any order.
 (defun cp-board (bag)
@@ -85,7 +85,7 @@
     (let row (car p))
     (let col (second p))
     (let neighbors (map (lambda (n) (cell-at board (car n) (second n))) (neighbors-of row col)))
-    (let pid (process::spawn cp-thinker (cons row (cons col (cons (third p) (cons neighbors ()))))
+    (let pid (process::spawn cp-thinker (list row col (third p) neighbors)
             (environment::self) () #false))
     (let r (process::run pid 10000))
     (when (not (eq? (car r) :failed))
@@ -102,7 +102,7 @@
     (IO::print "the first cell in the bag captured" (environment::closure-pad cell))
     (IO::print "calling it would throw:" (error-tag (catch (cell) e e)))
     (let p (cp-peek cell))
-    (let pid (process::spawn cp-thinker (cons (car p) (cons (second p) (cons (third p) (cons '(0 1 0 1 0 1 0 0) ()))))
+    (let pid (process::spawn cp-thinker (list (car p) (second p) (third p) '(0 1 0 1 0 1 0 0))
             (environment::self) () #false))
     (let e (second (process::run pid 10000)))
     (IO::print "a thinker for it (3 live neighbors) died with" (error-tag e) "payload" (error-payload e))

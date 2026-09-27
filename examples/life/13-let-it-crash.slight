@@ -83,7 +83,7 @@
         (IO::print "    [supervisor]   error" (error-tag e) (error-message e) "payload" (error-payload e))
         (IO::print "    [supervisor]   trace" (stack-trace-for e))
         (IO::print "    [supervisor]   pad  " pad))
-    (IO::print "    [supervisor]" (list2 row col) "crashed of" (error-message e)
+    (IO::print "    [supervisor]" (list row col) "crashed of" (error-message e)
         "- its frame says: count" (lc-pad-ref pad :count)
         "age" (lc-pad-ref pad :age) "life" (lc-pad-ref pad :lives)))
 
@@ -94,12 +94,12 @@
         (if (pid? old)
             (do
                 (let last (process::checkpoint old))
-                (let args (cons row (cons col (list2 0 (+ (list-ref last 3) 1)))))
-                (IO::print "    [supervisor]" (list2 row col) "restarted on" box "from checkpoint" last "as" args)
+                (let args (list row col 0 (+ (list-ref last 3) 1)))
+                (IO::print "    [supervisor]" (list row col) "restarted on" box "from checkpoint" last "as" args)
                 args)
             (do
-                (let args (cons row (cons col (list2 0 1))))
-                (IO::print "    [supervisor]" (list2 row col) "first boot on" box "as" args)
+                (let args (list row col 0 1))
+                (IO::print "    [supervisor]" (list row col) "first boot on" box "as" args)
                 args)))
     (let p (process::spawn lc-cell args (environment::self) '(actor) box))
     (lc-run p)
@@ -108,9 +108,9 @@
 ; Tells one live cell its neighbor count and runs it. Returns the crash,
 ; (row col e), or #false if it lived.
 (defun lc-judge (p box row col count)
-    (mailbox::send box (list2 :neighbors count))
+    (mailbox::send box (list :neighbors count))
     (let r (lc-run p))
-    (if (eq? (car r) :failed) (list3 row col (second r)) #false))
+    (if (eq? (car r) :failed) (list row col (second r)) #false))
 
 ; One generation. All counts are taken first, from this generation's board.
 ; Then every live cell hears its news and runs; the crashes are written up;
@@ -125,7 +125,7 @@
                     (lc-judge (cell-at registry row col) (cell-at boxes row col) row col (cell-at counts row col))
                     #false))))
     (let crashes (filter (lambda (v) (not (eq? v #false))) (fold append () verdicts)))
-    (for-each (lambda (c) (lc-post-mortem c (= gen 0))) (if (= gen 0) (cons (car crashes) ()) ()))
+    (for-each (lambda (c) (lc-post-mortem c (= gen 0))) (if (= gen 0) (list (car crashes)) ()))
     (for-each (lambda (c) (lc-post-mortem c #false)) (if (= gen 0) (cdr crashes) crashes))
     (let next
         (make-board (lambda (row col)

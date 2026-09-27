@@ -8,8 +8,8 @@
     (IO::print name :woke))
 
 (defun main ()
-    (let pa (process::spawn sleeper (cons :a (cons 100 ())) (environment::self) '(actor IO timer) #false))
-    (let pb (process::spawn sleeper (cons :b (cons 50 ())) (environment::self) '(actor IO timer) #false))
+    (let pa (process::spawn sleeper (list :a 100) (environment::self) '(actor IO timer) #false))
+    (let pb (process::spawn sleeper (list :b 50) (environment::self) '(actor IO timer) #false))
     (process::run pa 100)
     (process::run pb 100)
     (host::wait #false)
