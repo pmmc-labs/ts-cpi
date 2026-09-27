@@ -45,6 +45,9 @@
     (role
         (require actor::recv actor::send timer::sleep)
         (require life-rule life-width list-ref map mt-beat mt-lag mt-late-beat mt-late-row range second third wrap)
+        ; What those library procedures call in turn: the process can reach
+        ; only the names listed here.
+        (require range-down)
 
         (defun mt-triple (row col)
             (+ (list-ref row (wrap (- col 1) life-width))

@@ -116,7 +116,7 @@ quota from the keyboard.
 - **Addresses are guessable** counters, not 128-bit random identifiers.
 - **Parked state is not plain data**: the continuation stays in a runtime table referenced by an integer key, so it cannot be stored or moved to another image.
 - **No hashing of code or frames** beyond the binding hash, which hashes a printed form of each closure's code (and of any role inside it) rather than a core hash. There is no composition hash.
-- **The CPI's own code does not come from roles.** It comes from its files, and it cannot call a role's procedures, so a library shared by the CPI and its processes cannot be a role. Processes that need one run in a role composed onto `(environment::self)` (`DECISIONS.md`, Spec issues).
+- **The CPI's own code does not come from roles.** It comes from its files, and it cannot call a role's procedures, so a library shared by the CPI and its processes cannot be a role. Processes that need one select exactly the names they require from the CPI's environment with `environment::select`, so their roles must list everything they reach, library internals included (`DECISIONS.md`).
 - **No pipeline, phases, store, distribution, JIT tapes or reflection** (out of scope for SPEC-CPI).
 - **No quota for the CPI.** A CPI loop that never returns to `process::run` or `host::wait` runs forever (DESIGN-001 open question 4).
 - **No deadlock detection** and no default recovery strategies. Those are policies to write in the language.

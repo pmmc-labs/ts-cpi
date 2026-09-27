@@ -43,6 +43,11 @@
 (defun cp-universe-code ()
     (role
         (require step-board)
+        ; What those library procedures call in turn: the process can reach
+        ; only the names listed here.
+        (require cell-at fold life-height life-rule life-width list-ref make-board map
+            neighbor-count neighbor-offsets neighbors-of range range-down second step-cell sum
+            wrap)
         (defun universe (gen board)
             (universe (+ gen 1) (step-board board)))))
 

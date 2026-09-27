@@ -61,6 +61,9 @@
     (role
         (require actor::recv actor::send)
         (require list-ref rule-next second sum third)
+        ; What those library procedures call in turn: the process can reach
+        ; only the names listed here.
+        (require fold)
 
         ; A job is (gen index center neighbors). The answer is (gen index value id).
         (defun hostile-worker (id rule results)

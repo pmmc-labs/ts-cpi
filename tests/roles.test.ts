@@ -298,6 +298,57 @@ test('environment::resolve: unfilled names, missing grants, and success', async 
     `), '((unbound (helper)) (not-granted actor) #true)');
 });
 
+test('environment::select: exactly the named slots, as they are', async () => {
+    assert.equal(await cpi(`
+        (defun main ()
+            (let e (environment::define (environment::define (environment::define (role) 'a 1) 'b 2) 'c 3))
+            (let e2 (environment::compose e (environment::define (role) 'a 10)))
+            (let s (environment::select e2 '(a c missing actor::send)))
+            (list
+                (environment::history s 'a)
+                (environment::lookup s 'c)
+                (catch (environment::lookup s 'b) err (error-tag err))
+                (catch (environment::lookup s 'missing) err (error-tag err))
+                (environment::required s)
+                (environment::conflicts s)))
+    `), '((1 10) 3 unbound unbound () (a))');
+});
+
+test('environment::select: a Required slot stays Required', async () => {
+    assert.equal(await cpi(`
+        (defun main ()
+            (environment::required (environment::select (role (require x y)) '(x))))
+    `), '(x)');
+});
+
+test('environment::select: types are checked', async () => {
+    assert.equal(await cpi(`
+        (defun tag-of (thunk) (catch (thunk) e (error-tag e)))
+        (defun main ()
+            (list
+                (tag-of (lambda () (environment::select 5 '(a))))
+                (tag-of (lambda () (environment::select (role) 'a)))
+                (tag-of (lambda () (environment::select (role) '(a "b"))))))
+    `), '(type-error type-error type-error)');
+});
+
+test('environment::select: a process gets exactly what its role requires from the CPI', async () => {
+    assert.equal(await cpi(`
+        (defun helper (x) (+ x 1))
+        (defun secret () :leaked)
+        (defun code ()
+            (role
+                (require helper)
+                (defun worker (x) (helper x))))
+        (defun main ()
+            (let env (environment::compose (environment::select (environment::self) (environment::required (code))) (code)))
+            (list
+                (environment::lookup env 'helper)
+                (catch (environment::lookup env 'secret) e (error-tag e))
+                (catch (environment::lookup env 'main) e (error-tag e))))
+    `), '(#<procedure helper> unbound unbound)');
+});
+
 // ---------------------------------------------------------------------------
 // Grants are checked when a process gets an environment
 // ---------------------------------------------------------------------------

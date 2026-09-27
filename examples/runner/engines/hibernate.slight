@@ -44,6 +44,9 @@
     (role
         (require actor::recv actor::send)
         (require for-each rule-next second third)
+        ; What those library procedures call in turn: the process can reach
+        ; only the names listed here.
+        (require list-ref)
 
         (defun hibernate-cell (rule me alive count nbrs cpi)
             (let msg (actor::recv))

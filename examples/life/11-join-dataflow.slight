@@ -36,6 +36,9 @@
     (role
         (require actor::join)
         (require life-rule map second sum)
+        ; What those library procedures call in turn: the process can reach
+        ; only the names listed here.
+        (require fold)
 
         ; Generation 0: nothing to wait for, just exit with the seed state.
         (defun jd-seed (state)

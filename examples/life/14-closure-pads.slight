@@ -72,6 +72,9 @@
 (defun cp-thinker-code ()
     (role
         (require life-rule sum)
+        ; What those library procedures call in turn: the process can reach
+        ; only the names listed here.
+        (require fold)
 
         (defun cp-thinker (row col alive neighbors)
             (let count (sum neighbors))

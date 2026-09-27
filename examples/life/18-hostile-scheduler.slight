@@ -48,6 +48,10 @@
     (role
         (require actor::recv actor::send)
         (require index-col index-row second step-cell third)
+        ; What those library procedures call in turn: the process can reach
+        ; only the names listed here.
+        (require cell-at fold life-height life-rule life-width list-ref map neighbor-count
+            neighbor-offsets neighbors-of sum wrap)
 
         ; A job is (gen index board). The answer is (gen index value worker-id).
         (defun hs-worker (id results)

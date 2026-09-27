@@ -313,6 +313,17 @@ export function difference(a: Env, b: Env): Env {
     return { slots };
 }
 
+// The slots of `env` named in `names`, each as it is (a Conflicted slot keeps
+// its history). Names `env` does not have are left out.
+export function select(env: Env, names: readonly string[]): Env {
+    const slots = new Map<string, Slot>();
+    for (const name of names) {
+        const slot = env.slots.get(name);
+        if (slot !== undefined) slots.set(name, slot);
+    }
+    return { slots };
+}
+
 // Required names that are not host request names: what composition must still fill.
 export function unfilledNames(env: Env): string[] {
     return requiredNames(env).filter((name) => !isHostName(name));

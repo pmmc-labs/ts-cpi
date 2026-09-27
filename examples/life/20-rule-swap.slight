@@ -53,6 +53,13 @@
     (role
         (require actor::recv actor::send)
         (require cell-at make-board neighbor-count second)
+        ; What those library procedures call in turn: the process can reach
+        ; only the names listed here.
+        (require fold life-height life-width list-ref map neighbor-offsets neighbors-of range
+            range-down sum wrap)
+        ; Swap B sends the world a closure that calls `life-rule` by name. A
+        ; closure carries no environment, so the world must have the name.
+        (require life-rule)
 
         ; Reports the board, waits for (go) or (upgrade rule), computes the next
         ; generation with whichever rule it now holds, and loops. The rule is an

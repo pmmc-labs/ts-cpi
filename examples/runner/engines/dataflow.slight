@@ -34,6 +34,9 @@
     (role
         (require actor::join)
         (require map rule-next second sum)
+        ; What those library procedures call in turn: the process can reach
+        ; only the names listed here.
+        (require fold list-ref third)
 
         ; Generation 0: nothing to wait for, just exit with the starting state.
         (defun dataflow-seed (state)

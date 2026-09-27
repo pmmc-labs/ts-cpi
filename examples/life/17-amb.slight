@@ -46,6 +46,10 @@
     (role
         (require actor::recv)
         (require am-bits fold length reverse second step-cell third)
+        ; What those library procedures call in turn: the process can reach
+        ; only the names listed here.
+        (require cell-at length-from life-height life-rule life-width list-ref map
+            neighbor-count neighbor-offsets neighbors-of reverse-onto sum wrap)
 
         ; The one cell program. `path` holds the answers so far, newest first.
         (defun am-cell (path)

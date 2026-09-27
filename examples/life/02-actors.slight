@@ -48,6 +48,9 @@
 (defun ac-cell-code ()
     (role
         (require cell-index for-each length life-generations life-rule map msg-body msg-from receive second send sum)
+        ; What those library procedures call in turn: the process can reach
+        ; only the names listed here.
+        (require fold length-from life-width)
 
         ; A cell's first message is its introduction, (neighbors <collector> <addrs>):
         ; the collector introduces it to its eight neighbors.
