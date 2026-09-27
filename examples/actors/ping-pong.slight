@@ -1,26 +1,31 @@
 ; Ping pong on top of actors.slight. Run with:
 ;   node bin/cpi.ts examples/actors/actors.slight examples/actors/ping-pong.slight
 
-; Pong is a server: it answers every ping, forever.
-(defun pong ()
-    (let m (receive))
-    (case (msg-tag m)
-        (:ping (IO::print "pong: got ping" (msg-body m))
-            (send (msg-from m) :pong (msg-body m)))
-        (else  (IO::print "pong: ignoring" (msg-tag m))))
-    (pong))
+; The two players, as a role: they use the actor library and `IO::print`.
+(defun ping-pong ()
+    (role
+        (require msg-body msg-from msg-tag receive send IO::print)
 
-; Ping sends `n` pings to `server`, waiting for each reply, then exits.
-(defun ping (server n)
-    (if (= n 0)
-        :done
-        (do
-            (send server :ping n)
-            (let reply (receive))
-            (IO::print "ping: got" (msg-tag reply) (msg-body reply))
-            (ping server (- n 1)))))
+        ; Pong is a server: it answers every ping, forever.
+        (defun pong ()
+            (let m (receive))
+            (case (msg-tag m)
+                (:ping (IO::print "pong: got ping" (msg-body m))
+                    (send (msg-from m) :pong (msg-body m)))
+                (else  (IO::print "pong: ignoring" (msg-tag m))))
+            (pong))
+
+        ; Ping sends `n` pings to `server`, waiting for each reply, then exits.
+        (defun ping (server n)
+            (if (= n 0)
+                :done
+                (do
+                    (send server :ping n)
+                    (let reply (receive))
+                    (IO::print "ping: got" (msg-tag reply) (msg-body reply))
+                    (ping server (- n 1)))))))
 
 (defun main ()
-    (let pong-actor (spawn-actor :pong pong ()))
-    (let ping-actor (spawn-actor :ping ping (list (actor-address pong-actor) 3)))
+    (let pong-actor (spawn-actor (ping-pong) 'pong ()))
+    (let ping-actor (spawn-actor (ping-pong) 'ping (list (actor-address pong-actor) 3)))
     (run-system (list pong-actor ping-actor)))

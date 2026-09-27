@@ -1,14 +1,18 @@
 ; Scenario 5: a trapped `send` effect comes back to the CPI, which performs
 ; it itself with mailbox::send and resumes the actor.
 
-(defun sender (addr)
-    (actor::send addr :hi)
-    :sent)
+(defun sender-code ()
+    (role
+        (require actor::send)
+        (defun sender (addr)
+            (actor::send addr :hi)
+            :sent)))
 
 (defun main ()
     (host::set-traps '(send))
     (let target (mailbox::create #true 10))
-    (let p (process::spawn sender (list target) (environment::self) '(actor) #false))
+    (let env (environment::resolve (sender-code) '(actor)))
+    (let p (process::spawn (environment::lookup env 'sender) (list target) env '(actor) #false))
     (let r (process::run p 100))
     (IO::print :stop (car r))
     (IO::print :effect (car (cdr r)))

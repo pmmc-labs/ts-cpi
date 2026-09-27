@@ -6,8 +6,10 @@ the language.
 
 ## Code style
 
-- **Indent with 4 spaces, never 2**, in all code: TypeScript, `.slight` (CPI)
-  source, CPI source embedded in tests, code blocks in Markdown, and JSON.
+- **Indent with 4 spaces**, in all code: TypeScript, `.slight` (CPI) source,
+  CPI source embedded in tests, code blocks in Markdown, and JSON. Write it
+  that way from the start; there is no reformatting tool, and existing code
+  isn't reformatted just to line up.
 - CPI (`.slight`) code indents 4 spaces per open parenthesis:
 
   ```lisp
@@ -23,12 +25,12 @@ the language.
 - `npm test`: all tests (about 15 s; the runner's engine check is most of it).
 - `node bin/cpi.ts file.slight ...`: run a program.
 - `examples/runner/run.sh` (the Life runner, needs a terminal) and `examples/runner/run.sh check`.
-- `tools/`: `reindent.ts` (enforce the 4-space style), `build_tutorial.py` (the tutorial's published page), `drive_runner.py` (measure the runner on a real pty). See `tools/README.md`.
+- `tools/`: `build_tutorial.py` (the tutorial's published page), `drive_runner.py` (measure the runner on a real pty). See `tools/README.md`.
 
 ## Where things are decided
 
 - `../../design-xxx/DESIGN-001.md` and `SPEC-CPI.md` are the design and spec. Never edit them from here.
-- `DECISIONS.md` records every prototype decision, spec issue, and **proposed spec change** (quasiquote, `append`, `value->string`), with text ready to move into SPEC-CPI.
+- `DECISIONS.md` records every prototype decision, spec issue, and **spec change** (quasiquote, `append`, `value->string`, `list` and the other language additions, roles), with text ready to move into SPEC-CPI.
 - `SPEC-TUI.md` specifies `tui::`, the real clock and `host::wait`, all accepted.
 - A change to language semantics, a new core operation or builtin, or a change to runtime timing is a spec change: propose it, with options and a recommendation, before building.
 

@@ -306,6 +306,7 @@ Implementation (ts-cpi):
 - The binding hash descends into code: a closure hashes as `(name params body)` with any closure, vector or env ref inside it hashed the same way, and an env ref by its own binding hash. A changed `const` in a role that a `defun` returns therefore changes the enclosing environment's hash. Hashes are computed when first asked for and cached per environment (open question 3); `environment::resolve` does not compute one. Hashing the runner's 226 definitions takes about 0.6 ms, against 7 µs for a composition, so hashing eagerly in `resolve` made it 90 times slower.
 - `role` works in any code, not only the CPI (open question 1); `eq?` on env refs is unchanged (open question 4); loaded files do not follow the declaration rule (open question 5).
 - `environment::required` lists names in the order the role declared them; `environment::resolve` reports unfilled names before missing grants.
+- Examples (Sep 27): every process in `examples/` and `tests/programs/` runs code kept in a role. Where the role needs only host actions, or only another role such as the actor library, the process runs in that composition alone. Where it needs the Life libraries, which the CPI also uses, its role is composed onto `environment::self` (`process-env` in `examples/life/lib/lists.slight`); see Spec issues.
 
 Open questions:
 
@@ -316,6 +317,9 @@ Open questions:
 5. Whether top-level files should follow the same declaration rule when section 9 reads them as roles. That would make every CPI program declare its host actions, which today are checked only by grants at run time.
 
 ## Spec issues
+
+- A library that the CPI and its processes both use cannot be a role, because the CPI's environment comes from its files and a role's procedures resolve their globals through the environment of whoever runs them. Processes that need such a library get a role composed onto `environment::self`: they can see every CPI definition, and the host actions the library uses are neither declared nor checked by `environment::resolve`. Two ways to close it, both spec changes: read each loaded file as a role (open question 5 above), so the CPI's environment is a composition of library roles it can also give to processes; or add a projection, `(environment::select e names)`, so a process takes exactly the names its role requires. Found by migrating the examples (the CPI-Roles field notes).
+- A library that is a role declares its host actions, and they carry through composition: `examples/actors/actors.slight`'s `actor-library` requires `actor::send`, `actor::self` and `actor::recv`, so resolving an actor's environment checks the `actor` grant. The CPI still cannot call the library's procedures; version 02 reads a report's body itself.
 
 - SPEC-CPI section 1 says the CPI "is granted the privileged namespaces in section 8"; they are listed in section 10. Editorial.
 - SPEC-CPI section 2.3 calls tag, message, payload and cause "three visible fields". There are four. Editorial.

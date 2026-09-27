@@ -74,7 +74,7 @@ test('processes.slight', async () => {
             'g got hello',
             'run3 (blocked recv)',
             'checkpoint (g)',
-            'sneaky failed not-granted',
+            'sneaky (not-granted host)',
         ],
         failure: null,
     });

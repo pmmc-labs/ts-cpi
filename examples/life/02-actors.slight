@@ -41,10 +41,10 @@
 ; ---------------------------------------------------------------------------
 
 ; A cell's code, as a role. It sends and receives through the actor
-; library's `send` and `receive`, which use `actor::` themselves: the role
-; declares only what its own code touches, so `actor` does not appear in its
-; requirements, and resolving it cannot check that grant. A library's host
-; actions stay hidden unless the library is a role too.
+; library, which is a role too (`actor-library`), and the cells' environment
+; composes the two: the library's own requirements, `actor::send` and the
+; rest, come along, so resolving the environment checks the `actor` grant.
+; The Life procedures come from the CPI's environment.
 (defun ac-cell-code ()
     (role
         (require cell-index for-each length life-generations life-rule map msg-body msg-from receive second send sum)
@@ -130,8 +130,10 @@
         reports
         (ac-drain collector (cons r reports))))
 
+; `msg-body` lives in the actor library's role, which the CPI cannot call
+; into, so the CPI reads the body itself.
 (defun ac-take-body (m)
-    (if (eq? m #false) #false (msg-body m)))
+    (if (eq? m #false) #false (car (cdr (cdr m)))))
 
 (defun ac-reports-for (gen reports)
     (filter (lambda (r) (= (car r) gen)) reports))
@@ -166,7 +168,7 @@
 (defun main ()
     (let collector (mailbox::create #true 1000))
     (let board (seed-board))
-    (let env (process-env (ac-cell-code) '(actor)))
+    (let env (process-env (environment::compose (actor-library) (ac-cell-code)) '(actor)))
     (let cells (map (lambda (i) (ac-spawn env (index-row i) (index-col i) (cell-at board (index-row i) (index-col i))))
             (range 0 (cell-count))))
     (IO::print "[system] spawned" (length cells) "cell actors")

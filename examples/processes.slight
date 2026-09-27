@@ -1,13 +1,23 @@
-(defun greeter (name)
-    (let msg (actor::recv))
-    (IO::print name :got msg)
-    (greeter name))
+; A process's code is a role: it captures nothing from where it is written,
+; and names everything it uses from outside, host actions included.
+(defun greeter-code ()
+    (role
+        (require actor::recv IO::print)
+        (defun greeter (name)
+            (let msg (actor::recv))
+            (IO::print name :got msg)
+            (greeter name))))
 
-(defun sneaky ()
-    (host::now))
+; This one asks for the time, which only the CPI may do.
+(defun sneaky-code ()
+    (role
+        (require host::now)
+        (defun sneaky ()
+            (host::now))))
 
 (defun main ()
-    (let p (process::spawn greeter (list :g) (environment::self) '(actor IO) #false))
+    (let env (environment::resolve (greeter-code) '(actor IO)))
+    (let p (process::spawn (environment::lookup env 'greeter) (list :g) env '(actor IO) #false))
     (IO::print :state (process::state p))
     (IO::print :run1 (process::run p 50))
     (IO::print :state (process::state p))
@@ -16,6 +26,8 @@
     (IO::print :run2 (process::run p 3))
     (IO::print :run3 (process::run p 50))
     (IO::print :checkpoint (process::checkpoint p))
-    (let q (process::spawn sneaky () (environment::self) '(actor) #false))
-    (let r (process::run q 50))
-    (IO::print :sneaky (car r) (error-tag (car (cdr r)))))
+    (let sneaky (sneaky-code))
+    (IO::print :sneaky
+        (catch (process::spawn (environment::lookup sneaky 'sneaky) () sneaky '(actor) #false)
+            e
+            (list (error-tag e) (error-payload e)))))

@@ -10,6 +10,16 @@ constant-space tail calls, plain-data continuations, and a runtime whose
 processes, mailboxes, traps, parking and timers are driven entirely by
 control-plane code written in the language.
 
+Environments are built in the language from **roles**: `(role ...)` holds
+definitions, captures nothing from where it is written, and declares with
+`require` every name it uses from outside, host actions included. Roles
+compose; a required `const` works as a parameter; `process::set-env` swaps a
+running process onto a new composition. Processes in the examples run code
+kept in roles. The language also has `list`, a variadic `string-append`,
+`string-join`, `rethrow` and immutable vectors, proposed and agreed in
+[`DECISIONS.md`](DECISIONS.md) along with quasiquote, `append` and
+`value->string`.
+
 ## Running
 
 Node 22.6 or later runs the `.ts` files directly; there is no build step.
@@ -40,7 +50,8 @@ A minimal program:
 [`TUTORIAL.md`](TUTORIAL.md) walks through the language, errors, processes and
 the builtins, using the programs in `examples/` and `tests/programs/`.
 `examples/actors/` builds a minimal actor system in the language (message
-helpers, a round-robin scheduler, idle shutdown) and runs ping pong on it:
+helpers kept in a role, a round-robin scheduler, idle shutdown) and runs ping
+pong on it:
 
 ```sh
 node bin/cpi.ts examples/actors/actors.slight examples/actors/ping-pong.slight
@@ -87,8 +98,9 @@ quota from the keyboard.
 | `src/reader.ts` | Source text to values, with a position on every list (SPEC-CPI section 3). |
 | `src/printer.ts` | `print` and `display`. |
 | `src/core.ts` | The core operations, `eq?`, and trace entries (section 5). |
-| `src/env.ts` | Slot composition, the scope and module rules, binding hash (DESIGN-001 section 8). |
-| `src/expander.ts` | The base expander: derived forms to `cond`, eta-expansion, reserved names, placement and shape checks (section 4). |
+| `src/env.ts` | Slot composition with values compared by content, the scope and module rules, `define`, `history`, `accept`, `difference`, and the binding hash (DESIGN-001 section 8). |
+| `src/role.ts` | The global names a role's code uses, found by walking its expanded bodies. |
+| `src/expander.ts` | The base expander: derived forms to `cond`, eta-expansion, reserved names, placement and shape checks (section 4), and `role`, built into an environment when the file loads. |
 | `src/machine.ts` | The pure `step` function and its state: tail calls, local `defun` groups, catch/throw, host requests, the checkpoint slot (sections 6 to 8). |
 | `src/builtins.ts` | The namespace tables: `process::`, `mailbox::`, `host::`, `environment::`, `actor::`, `IO::print`, `timer::sleep`, with arities. |
 | `src/runtime.ts` | `Runtime`: boots the CPI, the process table, mailboxes, `process::run` batches, traps, parking, the clock, dead letters, the TUI (sections 10 to 12, and SPEC-TUI). |
@@ -103,7 +115,8 @@ quota from the keyboard.
 - **No acknowledgment** of messages, no selective receive support, and no reader for the dead-letter queue.
 - **Addresses are guessable** counters, not 128-bit random identifiers.
 - **Parked state is not plain data**: the continuation stays in a runtime table referenced by an integer key, so it cannot be stored or moved to another image.
-- **No hashing of code or frames** beyond the binding hash, and the binding hash prints closures rather than hashing expanded code. There is no composition hash.
+- **No hashing of code or frames** beyond the binding hash, which hashes a printed form of each closure's code (and of any role inside it) rather than a core hash. There is no composition hash.
+- **The CPI's own code does not come from roles.** It comes from its files, and it cannot call a role's procedures, so a library shared by the CPI and its processes cannot be a role. Processes that need one run in a role composed onto `(environment::self)` (`DECISIONS.md`, Spec issues).
 - **No pipeline, phases, store, distribution, JIT tapes or reflection** (out of scope for SPEC-CPI).
 - **No quota for the CPI.** A CPI loop that never returns to `process::run` or `host::wait` runs forever (DESIGN-001 open question 4).
 - **No deadlock detection** and no default recovery strategies. Those are policies to write in the language.

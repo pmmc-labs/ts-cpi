@@ -1,19 +1,23 @@
-; Scenario 6: a process blocked in recv is parked, then unparked into
-; (environment::self); a message to its address wakes it after unpark.
+; Scenario 6: a process blocked in recv is parked, then unparked into the
+; environment it ran in; a message to its address wakes it after unpark.
 
-(defun waiter ()
-    (let msg (actor::recv))
-    (IO::print :got msg)
-    msg)
+(defun waiter-code ()
+    (role
+        (require actor::recv IO::print)
+        (defun waiter ()
+            (let msg (actor::recv))
+            (IO::print :got msg)
+            msg)))
 
 (defun main ()
-    (let p (process::spawn waiter () (environment::self) '(actor IO) #false))
+    (let env (environment::resolve (waiter-code) '(actor IO)))
+    (let p (process::spawn (environment::lookup env 'waiter) () env '(actor IO) #false))
     (let r1 (process::run p 100))
     (IO::print :r1 (car r1))
     (let addr (process::address p))
     (let parked (process::park p))
     (IO::print :parked-tag (car parked))
-    (let p2 (process::unpark parked (environment::self)))
+    (let p2 (process::unpark parked env))
     (mailbox::send addr :hello)
     (let r2 (process::run p2 100))
     (IO::print :r2 r2))

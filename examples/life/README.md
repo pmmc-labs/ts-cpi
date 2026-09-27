@@ -21,7 +21,8 @@ The versions that spawn processes keep the processes' code in a role, which
 declares every host action and library procedure the code uses; `process-env`
 and `spawn-in` in `lib/lists.slight` build the environment and spawn in it.
 A role that needs only host actions runs alone, with none of the CPI's
-environment (07, 12, 15, 16).
+environment (07, 12, 15, 16). 02's cells also compose the actor library,
+which is a role, so the host actions it uses are checked.
 
 ## The versions
 
@@ -99,11 +100,11 @@ combined and de-duplicated here, the most significant first.
 10. **Restarts repeat side effects** (20). Sends are flushed at batch end and can't be recalled, so a restart from a checkpoint gives at-least-once effects, and consumers must deduplicate (18 and 20 do).
 
 **Smaller things**
-- `(eq? (environment::self) (environment::self))` is `#false`: env refs compare by wrapper identity, so only `binding-hash` identifies an env (20).
+- `(eq? (environment::self) (environment::self))` is `#false`: env refs compare by wrapper identity, so only `binding-hash` identifies an env (found by an earlier 20). A `role` form is the exception: it gives the same env ref every time.
 - `mailbox::take` returns `#false` for an empty mailbox, which is ambiguous with a `#false` message, and there is no `mailbox::peek` (06, 03).
 - Host requests are not values: `(map mailbox::size row)` is a load error, though core operations can be passed (06).
 - The checkpoint follows only the spawned procedure, matched by name. A boot wrapper freezes it at the wrapper's arguments (09).
 - Reading mail destroys the only "had mail" signal the CPI can see (09).
 - A woken joiner shows `(ready)` before it has seen the ended target, so stop reasons go stale within a round (11, 16).
-- There is no structural `equal?` and no number-to-string conversion, and `IO::print` always separates arguments with spaces (08, 02, 07).
+- There is no structural `equal?`, and `IO::print` always separates arguments with spaces (08, 02, 07). (Number to string: `value->string`, added Sep 26; joining: `string-join`, Sep 27.)
 - `examples/actors/actors.slight` prints a line for every spawn and every `(blocked recv)`, and has one global quota, so it doesn't scale past a handful of actors (02).

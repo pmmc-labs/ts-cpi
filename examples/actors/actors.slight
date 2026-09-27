@@ -5,23 +5,30 @@
 ; Knowing `from` is what lets an actor reply without being told who will
 ; talk to it.
 ;
-; The first half of this file runs inside actors. The second half runs in
-; the CPI: it spawns actors and schedules them round robin until they have
-; all ended, or until none can make progress.
+; The first half of this file is a role: the helpers that run inside actors.
+; The second half runs in the CPI: it spawns actors and schedules them round
+; robin until they have all ended, or until none can make progress.
 
 ; ---------------------------------------------------------------------------
 ; Inside an actor (granted actor and IO)
 ; ---------------------------------------------------------------------------
 
-(defun send (to tag body)
-    (actor::send to (list tag (actor::self) body)))
+; The helpers actors use, as a role. It declares the host actions they call,
+; so an actor built on it declares them too, and resolving the actor's
+; environment checks that it is granted `actor`.
+(defun actor-library ()
+    (role
+        (require actor::recv actor::self actor::send)
 
-(defun receive ()
-    (actor::recv))
+        (defun send (to tag body)
+            (actor::send to (list tag (actor::self) body)))
 
-(defun msg-tag (m) (car m))
-(defun msg-from (m) (car (cdr m)))
-(defun msg-body (m) (car (cdr (cdr m))))
+        (defun receive ()
+            (actor::recv))
+
+        (defun msg-tag (m) (car m))
+        (defun msg-from (m) (car (cdr m)))
+        (defun msg-body (m) (car (cdr (cdr m))))))
 
 ; ---------------------------------------------------------------------------
 ; The system (runs in the CPI)
@@ -35,11 +42,13 @@
 (defun actor-pid (a) (car (cdr a)))
 (defun actor-address (a) (car (cdr (cdr a))))
 
-; Starts `behavior` applied to `args` as a new actor with its own mailbox.
-; Actors see the same global definitions as the CPI, so they can call the
-; helpers above.
-(defun spawn-actor (name behavior args)
-    (let pid (process::spawn behavior args (environment::self) '(actor IO) #false))
+; Starts the procedure named `name` from `code`, a role, applied to `args`,
+; as a new actor with its own mailbox. The actor's environment is the actor
+; library composed with `code`, and nothing else: it cannot see the CPI's
+; definitions, and `code` must require whatever it uses.
+(defun spawn-actor (code name args)
+    (let env (environment::resolve (environment::compose (actor-library) code) '(actor IO)))
+    (let pid (process::spawn (environment::lookup env name) args env '(actor IO) #false))
     (IO::print "[system] spawned" name)
     (list name pid (process::address pid)))
 

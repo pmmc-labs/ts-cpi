@@ -7,9 +7,20 @@
         :done
         (loop (- n 1))))
 
+; The same loop for the process. The CPI cannot run a role's code (its
+; global names would resolve through the CPI's environment), so the CPI
+; keeps its own copy above.
+(defun loop-code ()
+    (role
+        (defun loop (n)
+            (if (eq? n 0)
+                :done
+                (loop (- n 1))))))
+
 (defun main ()
     (let r1 (loop 1000000))
     (IO::print :cpi r1)
-    (let p (process::spawn loop (list 1000000) (environment::self) '() #false))
+    (let env (environment::resolve (loop-code) '()))
+    (let p (process::spawn (environment::lookup env 'loop) (list 1000000) env '() #false))
     (let r2 (process::run p 20000000))
     (IO::print :process r2))

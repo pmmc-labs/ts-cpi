@@ -3,13 +3,18 @@
 ; alone is granted the privileged host:: namespace) reports the expected
 ; values.
 
-(defun sleeper (name ms)
-    (timer::sleep ms)
-    (IO::print name :woke))
+(defun sleeper-code ()
+    (role
+        (require timer::sleep IO::print)
+        (defun sleeper (name ms)
+            (timer::sleep ms)
+            (IO::print name :woke))))
 
 (defun main ()
-    (let pa (process::spawn sleeper (list :a 100) (environment::self) '(actor IO timer) #false))
-    (let pb (process::spawn sleeper (list :b 50) (environment::self) '(actor IO timer) #false))
+    (let env (environment::resolve (sleeper-code) '(actor IO timer)))
+    (let sleeper (environment::lookup env 'sleeper))
+    (let pa (process::spawn sleeper (list :a 100) env '(actor IO timer) #false))
+    (let pb (process::spawn sleeper (list :b 50) env '(actor IO timer) #false))
     (process::run pa 100)
     (process::run pb 100)
     (host::wait #false)

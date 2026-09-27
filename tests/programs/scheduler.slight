@@ -2,14 +2,17 @@
 ; Each player sends its counter to the other, then waits for the other's,
 ; five rounds each, then exits.
 
-(defun player (name other n)
-    (if (eq? n 0)
-        (do (IO::print name :done) :done)
-        (do
-            (actor::send other n)
-            (let msg (actor::recv))
-            (IO::print name :recv msg)
-            (player name other (- n 1)))))
+(defun player-code ()
+    (role
+        (require actor::recv actor::send IO::print)
+        (defun player (name other n)
+            (if (eq? n 0)
+                (do (IO::print name :done) :done)
+                (do
+                    (actor::send other n)
+                    (let msg (actor::recv))
+                    (IO::print name :recv msg)
+                    (player name other (- n 1)))))))
 
 (defun any-ready? (pids)
     (if (nil? pids)
@@ -46,7 +49,9 @@
 (defun main ()
     (let addr-a (mailbox::create #false 100))
     (let addr-b (mailbox::create #false 100))
-    (let pa (process::spawn player (list :a addr-b 5) (environment::self) '(actor IO) addr-a))
-    (let pb (process::spawn player (list :b addr-a 5) (environment::self) '(actor IO) addr-b))
+    (let env (environment::resolve (player-code) '(actor IO)))
+    (let player (environment::lookup env 'player))
+    (let pa (process::spawn player (list :a addr-b 5) env '(actor IO) addr-a))
+    (let pb (process::spawn player (list :b addr-a 5) env '(actor IO) addr-b))
     (scheduler (list pa pb))
     :done)

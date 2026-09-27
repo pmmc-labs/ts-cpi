@@ -113,6 +113,8 @@ The things to notice:
   `vector-set` copies the whole vector, so build a list and convert it with
   `list->vector` rather than setting elements one at a time.
 - **Only `#false` is false.** `()`, `0` and `""` are all true.
+- **Indent 4 spaces per open parenthesis**, as every example here does. The
+  reader ignores layout; the people reading your code don't.
 - **Integers and floats don't mix.** `(+ 1 2.0)` is a `type-error`; convert
   with `integer->float` or `float->integer`. Integers are 64-bit, and overflow
   throws.
@@ -206,16 +208,26 @@ decides what to do with what they report. Nothing runs unless the CPI runs it.
 
 ```lisp
 ; examples/processes.slight
-(defun greeter (name)
-    (let msg (actor::recv))
-    (IO::print name :got msg)
-    (greeter name))
+; A process's code is a role: it captures nothing from where it is written,
+; and names everything it uses from outside, host actions included.
+(defun greeter-code ()
+    (role
+        (require actor::recv IO::print)
+        (defun greeter (name)
+            (let msg (actor::recv))
+            (IO::print name :got msg)
+            (greeter name))))
 
-(defun sneaky ()
-    (host::now))
+; This one asks for the time, which only the CPI may do.
+(defun sneaky-code ()
+    (role
+        (require host::now)
+        (defun sneaky ()
+            (host::now))))
 
 (defun main ()
-    (let p (process::spawn greeter (list :g) (environment::self) '(actor IO) #false))
+    (let env (environment::resolve (greeter-code) '(actor IO)))
+    (let p (process::spawn (environment::lookup env 'greeter) (list :g) env '(actor IO) #false))
     (IO::print :state (process::state p))
     (IO::print :run1 (process::run p 50))
     (IO::print :state (process::state p))
@@ -224,9 +236,11 @@ decides what to do with what they report. Nothing runs unless the CPI runs it.
     (IO::print :run2 (process::run p 3))
     (IO::print :run3 (process::run p 50))
     (IO::print :checkpoint (process::checkpoint p))
-    (let q (process::spawn sneaky () (environment::self) '(actor) #false))
-    (let r (process::run q 50))
-    (IO::print :sneaky (car r) (error-tag (car (cdr r)))))
+    (let sneaky (sneaky-code))
+    (IO::print :sneaky
+        (catch (process::spawn (environment::lookup sneaky 'sneaky) () sneaky '(actor) #false)
+            e
+            (list (error-tag e) (error-payload e)))))
 ```
 
 ```
@@ -238,28 +252,41 @@ run2 (quota)
 g got hello
 run3 (blocked recv)
 checkpoint (g)
-sneaky failed not-granted
+sneaky (not-granted host)
 ```
 
 Step by step:
 
-1. **`process::spawn f args env grants mailbox`** creates a `ready` process that
-   will apply `greeter` to `(:g)`. It resolves global names through `env`, here
-   the CPI's own environment. It may use only the namespaces in `grants`, and
+1. **A process's code is a role.** `(role ...)` holds definitions and captures
+   nothing from where it is written. Every name its code uses from outside must
+   be named in a `require`, host actions included: `greeter` uses `actor::recv`
+   and `IO::print` and requires both. Using a name without requiring it is a
+   load error. Section 9 covers roles in full.
+2. **`environment::resolve env grants`** checks that the role can run in a
+   process granted `grants`, and returns it: every host action it requires must
+   be in a granted namespace.
+3. **`process::spawn f args env grants mailbox`** creates a `ready` process that
+   will apply `f`, here `greeter` looked up in the role, to `(:g)`. Its global
+   names resolve through `env`. It may use only the namespaces in `grants`, and
    receives on `mailbox` (`#false` makes a fresh one).
-2. **`process::run p n`** runs the process for at most `n` ticks, one tick per
+4. **`process::run p n`** runs the process for at most `n` ticks, one tick per
    evaluator step. It returns a **stop reason** saying why it stopped. The first
    run ends with `(blocked recv)`, because the mailbox is empty.
-3. **`mailbox::send`** from the CPI delivers at once, and the process becomes
+5. **`mailbox::send`** from the CPI delivers at once, and the process becomes
    `ready` again.
-4. With a quota of 3, the process runs out of ticks before printing: `(quota)`.
+6. With a quota of 3, the process runs out of ticks before printing: `(quota)`.
    It is preempted, not failed, and the next `run` continues where it stopped.
-5. **`process::checkpoint`** returns the arguments of the most recent call to
+7. **`process::checkpoint`** returns the arguments of the most recent call to
    the procedure the process was spawned with: here `(g)`. This is how you
    restart an actor (section 5).
-6. `sneaky` was granted only `actor`, and `host::` is a privileged namespace,
-   so its request throws `not-granted` inside the process. It isn't caught
-   there, so the run reports `(failed e)`.
+8. `sneaky` requires `host::now`, and `host::` is a privileged namespace that no
+   process can be granted. `process::spawn` checks an environment's
+   requirements against the grants, so it throws `not-granted`, with the
+   namespace as payload, and the process never starts.
+
+A process can also run in `(environment::self)`, the CPI's own environment. It
+can then call everything the CPI defines, and nothing is declared or checked
+until it runs.
 
 All the stop reasons are `(quota)`, `(blocked recv)`, `(blocked join <pid>)`,
 `(blocked host)`, `(exited v)`, `(failed e)` and `(trap <effect> <args>)`.
@@ -273,16 +300,21 @@ batch reaches the receiver when that batch ends.
 `tests/programs/restart.slight` shows the recovery pattern:
 
 ```lisp
-(defun counter (n)
-    (let msg (actor::recv))
-    (case msg
-        (:boom (throw (make-error :boom "boom!" n)))
-        (:inc  (do (IO::print :count (+ n 1)) (counter (+ n 1))))
-        (else  (counter n))))
+(defun counter-code ()
+    (role
+        (require actor::recv IO::print)
+        (defun counter (n)
+            (let msg (actor::recv))
+            (case msg
+                (:boom (throw (make-error :boom "boom!" n)))
+                (:inc  (do (IO::print :count (+ n 1)) (counter (+ n 1))))
+                (else  (counter n))))))
 
 (defun main ()
     (let mbox (mailbox::create #true 100))
-    (let p1 (process::spawn counter (list 0) (environment::self) '(actor IO) mbox))
+    (let env (environment::resolve (counter-code) '(actor IO)))
+    (let counter (environment::lookup env 'counter))
+    (let p1 (process::spawn counter (list 0) env '(actor IO) mbox))
 
     (mailbox::send mbox :inc)
     (process::run p1 100)
@@ -297,7 +329,7 @@ batch reaches the receiver when that batch ends.
     (let checkpoint (process::checkpoint p1))
     (IO::print :checkpoint checkpoint)
 
-    (let p2 (process::spawn counter checkpoint (environment::self) '(actor IO) mbox))
+    (let p2 (process::spawn counter checkpoint env '(actor IO) mbox))
     (mailbox::send mbox :inc)
     (let r4 (process::run p2 100))
     (IO::print :restarted-stop (car r4))
@@ -314,7 +346,8 @@ count 3
 restarted-stop blocked
 ```
 
-The counter's state is its argument `n`. Each `(counter (+ n 1))` call updates
+The counter's state is its argument `n`. Both runs use the same environment,
+built once from the counter's role. Each `(counter (+ n 1))` call updates
 the checkpoint slot, so after the failure `process::checkpoint` returns `(2)`,
 the last good count. The CPI spawns a new run with those arguments **on the
 same mailbox**, so the actor keeps its address and continues from 3.
@@ -371,13 +404,14 @@ actor's `send`. `process::resume-throw` answers with an error instead.
 ```lisp
 (let addr (process::address p))
 (let parked (process::park p))                        ; p's PID is now ended
-(let p2 (process::unpark parked (environment::self)))  ; new PID, same address
+(let p2 (process::unpark parked env))                 ; new PID, same address
 (mailbox::send addr :hello)
 (process::run p2 100)                                  ; → prints "got hello"
 ```
 
 The unparked process continues inside the same `recv` it was waiting in, and
-`unpark` chooses which environment it resumes with.
+`unpark` chooses which environment it resumes with: here `env`, the one it ran
+in before.
 
 **Timers** (`tests/programs/timers.slight`) use the real clock.
 `(timer::sleep ms)` blocks a process with `(blocked host)`. `host::wait` waits
@@ -450,7 +484,8 @@ pause, step and steer from the keyboard.
 ## 9. Building environments with roles
 
 A process runs in an environment: the names its code calls resolve through
-the env ref it was given. `(role ...)` builds one from definitions:
+the env ref it was given. Section 4 built one from a single role. Roles also
+compose, and a role can leave names for other roles to fill:
 
 ```lisp
 ; examples/roles.slight
@@ -507,6 +542,18 @@ the env ref it was given. `(role ...)` builds one from definitions:
   conflict, which `environment::conflicts` lists, and lookup takes the newer
   one. Identical definitions, such as the same `defun` loaded twice, compose
   without a conflict.
+- **Libraries can be roles.** `examples/actors/actors.slight` keeps the
+  helpers actors use in a role, `actor-library`, which requires the host
+  actions they call. `spawn-actor` composes it with the actor's own role, so an
+  actor's environment holds its own code and the library and nothing else, and
+  resolving it checks the library's host actions too.
+- **Code the CPI also runs can't be a role.** A role's procedures resolve their
+  global names through the environment of whoever runs them, and the CPI's
+  environment comes from its files. The Life examples share their library
+  between the CPI and its processes, so they compose each process's role onto
+  `(environment::self)` (`process-env` in `examples/life/lib/lists.slight`):
+  the role still declares what it uses, but the process can see every CPI
+  definition. `DECISIONS.md` has ways to close this gap.
 
 `main` asks the server about a dead cell, swaps the rule's parameters while
 the server runs, and asks again:
@@ -557,7 +604,9 @@ shows what composing one environment onto another would change.
 | --- | --- |
 | `let may appear only as an element of a body` | A `let` inside an argument or `if` test. Move it into the enclosing body, or wrap it in `(do …)`. |
 | `top-level form must be (defun ...) or (const ...)` | A bare expression at file level. Put it in `main`. |
-| `not-granted` in a process | The namespace isn't in the spawn's `grants`, or it's privileged (`process`, `mailbox`, `host`, `environment`), which processes can never have. |
+| `'x' is used in a role but neither defined nor required there` | Add `x` to a `require`, or define it in the role. The local variables around a `role` form are not visible inside it. |
+| `not-granted` from `process::spawn` | The environment requires a host action whose namespace the spawn doesn't grant, or one that is privileged (`process`, `mailbox`, `host`, `environment`), which processes can never have. |
+| `not-granted` in a process | The process runs in `(environment::self)` or in library code from it, and used a namespace it wasn't granted. |
 | `bad-state` from `process::run` | The process isn't `ready`. Check `process::state` first. |
 | A process never sees a message | Messages sent during a batch arrive when that batch ends, and a blocked process must be `run` again to receive. |
 | `bad-state: input is not a terminal` | `tui::subscribe` needs a real terminal; it fails when input is piped. |

@@ -160,7 +160,7 @@ test('scenario 5: a trapped send effect is performed by the CPI and the actor is
 // Scenario 6: parking
 // ---------------------------------------------------------------------------
 
-test('scenario 6: a blocked actor is parked, unparked into (environment::self), and wakes on a message', async () => {
+test('scenario 6: a blocked actor is parked, unparked into its environment, and wakes on a message', async () => {
     const { output } = await expectOk('parking.slight');
     assert.deepEqual(output, [
         'r1 blocked',
