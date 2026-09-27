@@ -6,14 +6,18 @@
 // shape (arities, and which method an action calls).
 
 import type {
-    Addr, Closure, Env, ErrorContext, ErrorValue, Scope, State, Value,
+    Addr, Env, ErrorContext, ErrorValue, Scope, State, Value,
 } from './types.ts';
 import {
     NIL, TRUE, FALSE, sym, int, str, cons, list, listToArray, newAddr, pid,
 } from './values.ts';
 import { makeError } from './errors.ts';
 import { start, startExpr, step, resumeValue, resumeThrow } from './machine.ts';
-import { compose, conflicts, lookup, bindingHash } from './env.ts';
+import {
+    compose, conflicts, lookup, bindingHashOf, define, requiredNames, unfilledNames, missingNamespace,
+    history, accept, difference,
+} from './env.ts';
+import { isReserved } from './names.ts';
 import { print, display } from './printer.ts';
 import type { ActionResult, Answer, Handlers, RunCtx } from './builtins.ts';
 import type { TuiBackend, TuiMode } from './tui/backend.ts';
@@ -33,20 +37,6 @@ const TRAP = (effect: string, args: Value): ActionResult => ({ kind: 'trap', eff
 const ORDINARY_NAMESPACES = new Set(['actor', 'IO', 'timer']);
 const ALL_NAMESPACES = new Set(['process', 'mailbox', 'host', 'environment', 'actor', 'IO', 'timer', 'tui']);
 const TRAPPABLE_EFFECTS = new Set(['recv', 'send', 'self', 'join']);
-
-// ---------------------------------------------------------------------------
-// Printing for the binding hash (SPEC-CPI 10.4; the task brief's prototype
-// choices): like `print`, except a closure prints as `(name params body)` so
-// the hash covers code, not an opaque `#<procedure ...>` tag.
-// ---------------------------------------------------------------------------
-
-function closureHashForm(c: Closure): Value {
-    return list(c.name ?? FALSE, list(...c.params), list(...c.body));
-}
-
-function printForHash(v: Value): string {
-    return v.t === 'closure' ? print(closureHashForm(v)) : print(v);
-}
 
 // ---------------------------------------------------------------------------
 // Pads (SPEC-CPI 10.4): a local scope shown as `(name value)` pairs,
@@ -161,8 +151,6 @@ export class Runtime implements Handlers {
     private readonly recvWaiters = new Map<string, Set<ProcEntry>>();
     private readonly joinWaiters = new Map<number, Set<ProcEntry>>();
     private readonly sleepers = new Set<ProcEntry>();
-    // Environments are immutable, so a binding hash never changes.
-    private readonly hashes = new WeakMap<Env, string>();
     private readonly mailboxes = new Map<string, MailboxEntry>();
     private readonly parkTable = new Map<number, ParkedRecord>();
     private readonly deadLettersList: DeadLetter[] = [];
@@ -323,12 +311,7 @@ export class Runtime implements Handlers {
     }
 
     private bindingHashOf(env: Env): string {
-        let hash = this.hashes.get(env);
-        if (hash === undefined) {
-            hash = bindingHash(env, printForHash);
-            this.hashes.set(env, hash);
-        }
-        return hash;
+        return bindingHashOf(env);
     }
 
     private endProcess(entry: ProcEntry, detail: EndedDetail): void {
@@ -399,6 +382,8 @@ export class Runtime implements Handlers {
             if (!ORDINARY_NAMESPACES.has(g.name)) return T('not-granted', `the CPI may not grant ${g.name}`, g);
             grants.add(g.name);
         }
+        const missing = missingNamespace(envV.env, grants);
+        if (missing !== null) return T('not-granted', `the environment needs ${missing}, which is not granted`, sym(missing));
         let addr: Addr;
         if (mailboxV.t === 'bool' && mailboxV.v === false) {
             addr = newAddr();
@@ -510,6 +495,8 @@ export class Runtime implements Handlers {
         if (entry === undefined || entry.status === 'ended' || entry.status === 'parked') {
             return T('bad-state', 'process has ended or is parked', pidV);
         }
+        const missing = missingNamespace(envV.env, entry.grants);
+        if (missing !== null) return T('not-granted', `the environment needs ${missing}, which is not granted`, sym(missing));
         entry.state = { ...entry.state, R: envV.env };
         entry.envRef = envV;
         return V(TRUE);
@@ -540,6 +527,8 @@ export class Runtime implements Handlers {
         const rec = this.parkTable.get(key);
         if (rec === undefined) return T('type-error', 'process::unpark requires parked state', dataV);
         if (envV.t !== 'env') return T('type-error', 'process::unpark requires an env ref', envV);
+        const missing = missingNamespace(envV.env, rec.grants);
+        if (missing !== null) return T('not-granted', `the environment needs ${missing}, which is not granted`, sym(missing));
         const pidNum = this.nextPid++;
         const state: State = { ...rec.state, R: envV.env };
         const entry: ProcEntry = {
@@ -758,6 +747,61 @@ export class Runtime implements Handlers {
     envClosurePad(fV: Value): ActionResult {
         if (fV.t !== 'closure') return T('type-error', 'environment::closure-pad requires a procedure', fV);
         return V(padFromScope(fV.scope));
+    }
+
+    envDefine(eV: Value, nameV: Value, value: Value): ActionResult {
+        if (eV.t !== 'env') return T('type-error', 'environment::define requires an env ref', eV);
+        if (nameV.t !== 'sym') return T('type-error', 'environment::define requires a symbol', nameV);
+        if (isReserved(nameV.name)) return T('type-error', `'${nameV.name}' is reserved and cannot be defined`, nameV);
+        return V({ t: 'env', env: define(eV.env, nameV.name, value) });
+    }
+
+    envRequired(eV: Value): ActionResult {
+        if (eV.t !== 'env') return T('type-error', 'environment::required requires an env ref', eV);
+        return V(list(...requiredNames(eV.env).map((n) => sym(n))));
+    }
+
+    envResolve(eV: Value, grantsV: Value): ActionResult {
+        if (eV.t !== 'env') return T('type-error', 'environment::resolve requires an env ref', eV);
+        const grantNames = listToArray(grantsV);
+        if (grantNames === null) return T('type-error', 'environment::resolve requires a list of namespace symbols', grantsV);
+        const grants = new Set<string>();
+        for (const g of grantNames) {
+            if (g.t !== 'sym') return T('type-error', 'environment::resolve grants must be symbols', g);
+            grants.add(g.name);
+        }
+        const unfilled = unfilledNames(eV.env);
+        if (unfilled.length > 0) {
+            return T('unbound', `unfilled names: ${unfilled.join(' ')}`, list(...unfilled.map((n) => sym(n))));
+        }
+        const missing = missingNamespace(eV.env, grants);
+        if (missing !== null) return T('not-granted', `the environment needs ${missing}, which is not granted`, sym(missing));
+        this.bindingHashOf(eV.env);
+        return V(eV);
+    }
+
+    envHistory(eV: Value, nameV: Value): ActionResult {
+        if (eV.t !== 'env') return T('type-error', 'environment::history requires an env ref', eV);
+        if (nameV.t !== 'sym') return T('type-error', 'environment::history requires a symbol', nameV);
+        return V(list(...history(eV.env, nameV.name)));
+    }
+
+    envAccept(eV: Value, namesV: Value): ActionResult {
+        if (eV.t !== 'env') return T('type-error', 'environment::accept requires an env ref', eV);
+        const names = listToArray(namesV);
+        if (names === null) return T('type-error', 'environment::accept requires a list of symbols', namesV);
+        const strs: string[] = [];
+        for (const n of names) {
+            if (n.t !== 'sym') return T('type-error', 'environment::accept requires a list of symbols', n);
+            strs.push(n.name);
+        }
+        return V({ t: 'env', env: accept(eV.env, strs) });
+    }
+
+    envDifference(aV: Value, bV: Value): ActionResult {
+        if (aV.t !== 'env') return T('type-error', 'environment::difference requires env refs', aV);
+        if (bV.t !== 'env') return T('type-error', 'environment::difference requires env refs', bV);
+        return V({ t: 'env', env: difference(aV.env, bV.env) });
     }
 
     // ===========================================================================

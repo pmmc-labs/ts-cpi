@@ -26,8 +26,10 @@ export const CORE_ARITY: ReadonlyMap<string, number | null> = new Map<string, nu
 ]);
 
 // Evaluated by the machine.
+// `role` (and `require`, which appears only inside it) is resolved by the
+// expander into a quoted env ref, so the machine never sees either.
 export const SPECIAL_FORMS: ReadonlySet<string> = new Set([
-    'quote', 'lambda', 'defun', 'const', 'let', 'do', 'cond', 'and', 'or', 'catch',
+    'quote', 'lambda', 'defun', 'const', 'let', 'do', 'cond', 'and', 'or', 'catch', 'role', 'require',
 ]);
 
 // Rewritten into cond by the expander; the machine never sees them.

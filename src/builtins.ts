@@ -84,6 +84,12 @@ export interface Handlers {
     envErrorEnv(eV: Value): ActionResult;
     envErrorPad(eV: Value, levelV: Value): ActionResult;
     envClosurePad(fV: Value): ActionResult;
+    envDefine(eV: Value, nameV: Value, value: Value): ActionResult;
+    envRequired(eV: Value): ActionResult;
+    envResolve(eV: Value, grantsV: Value): ActionResult;
+    envHistory(eV: Value, nameV: Value): ActionResult;
+    envAccept(eV: Value, namesV: Value): ActionResult;
+    envDifference(aV: Value, bV: Value): ActionResult;
 
     // 10.5 actor:: (needs the caller's own pid, via RunCtx)
     actorRecv(ctx: RunCtx): ActionResult;
@@ -148,6 +154,12 @@ export const NAMESPACES: ReadonlyMap<string, ReadonlyMap<string, ActionSpec>> = 
         'error-env':     { arity: 1, run: (h, _c, a) => h.envErrorEnv(a[0]!) },
         'error-pad':     { arity: 2, run: (h, _c, a) => h.envErrorPad(a[0]!, a[1]!) },
         'closure-pad':   { arity: 1, run: (h, _c, a) => h.envClosurePad(a[0]!) },
+        'define':        { arity: 3, run: (h, _c, a) => h.envDefine(a[0]!, a[1]!, a[2]!) },
+        'required':      { arity: 1, run: (h, _c, a) => h.envRequired(a[0]!) },
+        'resolve':       { arity: 2, run: (h, _c, a) => h.envResolve(a[0]!, a[1]!) },
+        'history':       { arity: 2, run: (h, _c, a) => h.envHistory(a[0]!, a[1]!) },
+        'accept':        { arity: 2, run: (h, _c, a) => h.envAccept(a[0]!, a[1]!) },
+        'difference':    { arity: 2, run: (h, _c, a) => h.envDifference(a[0]!, a[1]!) },
     })],
     ['actor', ns({
         'recv': { arity: 0, run: (h, c) => h.actorRecv(c) },

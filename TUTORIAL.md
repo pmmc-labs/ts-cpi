@@ -447,7 +447,111 @@ final count 3
 sparkline, and `examples/tui/top.slight` is a live process monitor you can
 pause, step and steer from the keyboard.
 
-## 9. Common mistakes
+## 9. Building environments with roles
+
+A process runs in an environment: the names its code calls resolve through
+the env ref it was given. `(role ...)` builds one from definitions:
+
+```lisp
+; examples/roles.slight
+(defun rule-code ()
+    (role
+        (require actor::recv actor::send born survives member?)
+        (defun rule-server ()
+            (let msg (actor::recv))
+            (actor::send (car msg) (life-rule (car (cdr msg)) (car (cdr (cdr msg)))))
+            (rule-server))
+        (defun life-rule (alive n)
+            (if (= alive 1)
+                (if (member? n survives) 1 0)
+                (if (member? n born) 1 0)))))
+
+(defun lists ()
+    (role
+        (defun member? (x xs)
+            (cond
+                ((nil? xs) #false)
+                ((eq? x (car xs)) #true)
+                (#true (member? x (cdr xs)))))))
+
+(defun conway ()
+    (role
+        (const born '(3))
+        (const survives '(2 3))))
+
+(defun seeds ()
+    (role
+        (const born '(2))
+        (const survives ())))
+
+(defun server-env (rule)
+    (environment::resolve
+        (environment::compose (environment::compose (lists) (rule-code)) rule)
+        '(actor)))
+```
+
+- **A role captures nothing** from where it is written: not the local
+  variables around it, and not the CPI's own environment. Every name its code
+  uses from outside must be named in a `require`, host actions included, or
+  loading fails. A role holds only `defun`s, `require`s, and `const`s whose
+  value is a literal or quoted data.
+- **A role with `Required` names is abstract.** Composing it with roles that
+  define those names fills them. `rule-code` needs `member?`, which `lists`
+  defines, and `born` and `survives`, which `conway` and `seeds` define: a
+  required `const` works as a parameter.
+- **`environment::resolve`** checks that an environment can run in a process
+  granted the given namespaces: every other name is filled, and every host
+  action it requires is in a granted namespace. It returns the environment,
+  or throws `unbound` listing what is missing.
+- **Composing never fails.** Two different definitions of one name become a
+  conflict, which `environment::conflicts` lists, and lookup takes the newer
+  one. Identical definitions, such as the same `defun` loaded twice, compose
+  without a conflict.
+
+`main` asks the server about a dead cell, swaps the rule's parameters while
+the server runs, and asks again:
+
+```lisp
+(defun ask (pid box alive n)
+    (mailbox::send (process::address pid) (list box alive n))
+    (process::run pid 1000)
+    (mailbox::take box))
+
+(defun main ()
+    (IO::print :needs (environment::required (rule-code)))
+    (IO::print :unfilled (catch (environment::resolve (rule-code) '(actor)) e (error-payload e)))
+    (let box (mailbox::create #false 10))
+    (let env (server-env (conway)))
+    (let pid (process::spawn (environment::lookup env 'rule-server) () env '(actor) #false))
+    (IO::print :conway (ask pid box 0 3) (ask pid box 0 2))
+    (process::set-env pid (server-env (seeds)))
+    (IO::print :seeds (ask pid box 0 3) (ask pid box 0 2))
+    (IO::print :changed (environment::conflicts (environment::compose env (seeds)))))
+```
+
+```
+needs (actor::recv actor::send born survives member?)
+unfilled (born survives member?)
+conway 1 0
+seeds 0 1
+changed (born survives)
+```
+
+The server calls `life-rule` and itself by name, and names resolve when they
+are called, so after `process::set-env` its next message is answered by the
+new rule. That is a hot reload: here it changes two parameters and no code.
+`process::spawn`, `process::set-env` and `process::unpark` refuse an
+environment that requires a host action the process isn't granted.
+
+Roles can also hold state. `environment::define` adds one value, and
+`environment::history` lists every value a conflicted name has had, oldest
+first. `environment::accept` flattens the conflicts you no longer want to
+keep, so a program decides for itself which names keep their history. The
+`compose-with` procedure in `DECISIONS.md` ("Building environments from
+roles") does this with a strategy you pass in, and `environment::difference`
+shows what composing one environment onto another would change.
+
+## 10. Common mistakes
 
 | Symptom | Cause |
 | --- | --- |

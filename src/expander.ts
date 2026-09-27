@@ -9,10 +9,11 @@
 // special forms, applications, symbols and literals; `quote` data is left
 // untouched.
 
-import type { Pos, Sym, Value } from './types.ts';
+import type { Closure, Pos, Slot, Sym, Value } from './types.ts';
 import { cons, gensym, listToArray, sym, NIL, TRUE } from './values.ts';
 import { LoadError } from './errors.ts';
 import { CORE_ARITY, isCoreName, isHostName, isReserved, isVariadic } from './names.ts';
+import { globalUses } from './role.ts';
 
 // A body element may be `let` or a local `defun`; anywhere else ('value')
 // those two forms are a load-error (SPEC-CPI section 4).
@@ -142,7 +143,11 @@ function expandExpr(form: Value, ctx: Ctx): Value {
             }
             return expandDefun(elements, p);
         case 'const':
-            throw new LoadError('const may appear only at the top level of a file', form);
+            throw new LoadError('const may appear only at the top level of a file or in a role', form);
+        case 'role':
+            return expandRole(elements, p);
+        case 'require':
+            throw new LoadError('require may appear only in a role', form);
         case 'let':
             if (ctx !== 'body') throw new LoadError('let may appear only as an element of a body', form);
             return expandLet(elements, p);
@@ -248,6 +253,81 @@ function expandCatch(elements: readonly Value[], p: Pos | null): Value {
     checkNotReserved(name, 'a catch variable');
     const handler = expandExpr(elements[3]!, 'value');
     return mkList([elements[0]!, body, name, handler], p);
+}
+
+// `(role form ...)` (DECISIONS.md, "Building environments from roles"). The
+// environment depends only on the forms, so it is built here, once, and the
+// form becomes a quoted env ref. Its closures capture nothing: every global
+// name their bodies use must be defined in the role or named in a `require`.
+function expandRole(elements: readonly Value[], p: Pos | null): Value {
+    const slots = new Map<string, Slot>();
+    const defined = new Set<string>();
+    const defuns: { form: Value; closure: Closure }[] = [];
+
+    const addDefinition = (name: Sym, value: Value, form: Value): void => {
+        if (defined.has(name.name)) throw new LoadError(`'${name.name}' is defined twice in a role`, form);
+        defined.add(name.name);
+        slots.set(name.name, { s: 'defined', name: name.name, value });
+    };
+
+    for (const form of elements.slice(1)) {
+        const arr = form.t === 'pair' ? listToArray(form) : null;
+        const head = arr?.[0];
+        if (arr === null || head === undefined || head.t !== 'sym') {
+            throw new LoadError('a role may contain only defun, const and require forms', form);
+        }
+        if (head.name === 'defun') {
+            const expanded = listToArray(expandDefun(arr, posOf(form)))!;
+            const name = expanded[1] as Sym;
+            const params = listToArray(expanded[2]!) as Sym[];
+            const closure: Closure = { t: 'closure', name, params, body: expanded.slice(3), scope: null, group: null };
+            addDefinition(name, closure, form);
+            defuns.push({ form, closure });
+        } else if (head.name === 'const') {
+            if (arr.length !== 3) throw new LoadError('const requires a name and a datum', form);
+            const name = requireSym(arr[1]!, 'const name');
+            checkNotReserved(name, 'a const name');
+            addDefinition(name, roleDatum(arr[2]!), form);
+        } else if (head.name === 'require') {
+            for (const n of arr.slice(1)) {
+                const name = requireSym(n, 'a required name');
+                if (!isHostName(name.name)) checkNotReserved(name, 'a required name');
+                if (!slots.has(name.name)) slots.set(name.name, { s: 'required', name: name.name });
+            }
+        } else {
+            throw new LoadError('a role may contain only defun, const and require forms', form);
+        }
+    }
+
+    for (const { form, closure } of defuns) {
+        const used = new Set<string>();
+        globalUses(closure.body, new Set(closure.params.map((s) => s.name)), used);
+        for (const name of used) {
+            if (!slots.has(name)) {
+                throw new LoadError(`'${name}' is used in a role but neither defined nor required there`, form);
+            }
+        }
+    }
+
+    return mkList([sym('quote'), { t: 'env', env: { slots } }], p);
+}
+
+// A role's const holds a literal, a quoted datum or a tag, never an
+// expression, so it captures nothing.
+function roleDatum(v: Value): Value {
+    switch (v.t) {
+        case 'int':
+        case 'float':
+        case 'str':
+        case 'bool':
+        case 'nil':
+            return v;
+        case 'pair': {
+            const arr = listToArray(v);
+            if (arr !== null && arr.length === 2 && arr[0]!.t === 'sym' && arr[0]!.name === 'quote') return arr[1]!;
+        }
+    }
+    throw new LoadError('a const in a role must be a literal or a quoted datum', v);
 }
 
 // ---------------------------------------------------------------------------

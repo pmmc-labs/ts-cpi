@@ -1,0 +1,57 @@
+; examples/roles.slight: building an environment from roles, running a
+; process in it, and swapping its parameters while it runs.
+
+; The rule server's code. A role captures nothing from where it is written:
+; every name its code uses from outside is declared, host actions included.
+(defun rule-code ()
+    (role
+        (require actor::recv actor::send born survives member?)
+        (defun rule-server ()
+            (let msg (actor::recv))
+            (actor::send (car msg) (life-rule (car (cdr msg)) (car (cdr (cdr msg)))))
+            (rule-server))
+        (defun life-rule (alive n)
+            (if (= alive 1)
+                (if (member? n survives) 1 0)
+                (if (member? n born) 1 0)))))
+
+(defun lists ()
+    (role
+        (defun member? (x xs)
+            (cond
+                ((nil? xs) #false)
+                ((eq? x (car xs)) #true)
+                (#true (member? x (cdr xs)))))))
+
+; Two sets of parameters: each fills the rule's required born and survives.
+(defun conway ()
+    (role
+        (const born '(3))
+        (const survives '(2 3))))
+
+(defun seeds ()
+    (role
+        (const born '(2))
+        (const survives ())))
+
+(defun server-env (rule)
+    (environment::resolve
+        (environment::compose (environment::compose (lists) (rule-code)) rule)
+        '(actor)))
+
+; Asks the server whether a cell with `alive` and `n` neighbors lives.
+(defun ask (pid box alive n)
+    (mailbox::send (process::address pid) (list box alive n))
+    (process::run pid 1000)
+    (mailbox::take box))
+
+(defun main ()
+    (IO::print :needs (environment::required (rule-code)))
+    (IO::print :unfilled (catch (environment::resolve (rule-code) '(actor)) e (error-payload e)))
+    (let box (mailbox::create #false 10))
+    (let env (server-env (conway)))
+    (let pid (process::spawn (environment::lookup env 'rule-server) () env '(actor) #false))
+    (IO::print :conway (ask pid box 0 3) (ask pid box 0 2))
+    (process::set-env pid (server-env (seeds)))
+    (IO::print :seeds (ask pid box 0 3) (ask pid box 0 2))
+    (IO::print :changed (environment::conflicts (environment::compose env (seeds)))))

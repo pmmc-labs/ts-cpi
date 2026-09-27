@@ -26,6 +26,19 @@ test('hello.slight', async () => {
     assert.deepEqual(await run('hello.slight'), { output: ['hello, world 42'], failure: null });
 });
 
+test('roles.slight', async () => {
+    assert.deepEqual(await run('roles.slight'), {
+        output: [
+            'needs (actor::recv actor::send born survives member?)',
+            'unfilled (born survives member?)',
+            'conway 1 0',
+            'seeds 0 1',
+            'changed (born survives)',
+        ],
+        failure: null,
+    });
+});
+
 test('tour.slight', async () => {
     assert.deepEqual(await run('tour.slight'), {
         output: [
