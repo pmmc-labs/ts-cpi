@@ -1,0 +1,383 @@
+SLIGHT CPI BUILTINS
+===================
+
+A reference to everything built into the prototype: the language's special
+forms and core operations, and the host requests (names with ::). For the
+full rules see ../../design-xxx/SPEC-CPI.md; for the changes agreed during
+the prototype see DECISIONS.md; for a walkthrough see TUTORIAL.md.
+
+Conventions used below:
+
+    (name arg ...)      how it is called
+    -> result           what it returns
+    ! error             the error tags it can throw besides type-error
+
+Every core operation checks its argument types and throws type-error on a
+mismatch. Every call with the wrong number of arguments throws arity-error.
+Operations marked "linear" do work proportional to their input; all others
+do a bounded amount of work. Each core operation application costs one tick.
+
+
+PART 1: THE LANGUAGE
+====================
+
+Special forms
+-------------
+
+These are fixed. They are not in any environment and cannot be bound,
+shadowed or passed as values.
+
+(quote datum)  also written 'datum, and :name for (quote name)
+    -> the datum, unevaluated.
+
+(lambda (param ...) body ...)
+    -> a closure over the local variables in scope.
+
+(defun name (param ...) body ...)
+    At the top level of a file: a global procedure. Inside a body: a local
+    procedure, visible to itself and the rest of the body. Consecutive local
+    defuns form a group that can call one another.
+
+(const name expr)
+    Top level of a file only: a global value, evaluated once at load time.
+    It may not make host requests.
+
+(let name expr)
+    Inside a body only: binds name for the rest of that body.
+
+(do expr ...)
+    -> the value of the last expression; (do) is ().
+
+(cond (test body ...) ...)
+    -> the body of the first test that is not #false; () if none passes.
+
+(and expr ...)
+    -> the first #false, or the last value; (and) is #true.
+
+(or expr ...)
+    -> the first value that is not #false; (or) is #false.
+
+(catch body name handler)
+    -> the value of body, or, if body throws, handler with the error bound
+    to name.
+
+(role form ...)
+    -> an env ref built from the forms, each one of:
+        (defun name (param ...) body ...)   a procedure that captures nothing
+        (const name datum)                  a literal or quoted datum
+        (require name ...)                  names the role needs from outside
+    Every global name the role's code uses, host requests included, must be
+    defined in the role or required, or loading fails. The environment is
+    built once, when the file loads. A required const works as a parameter.
+
+(require name ...)
+    Only inside role.
+
+Derived forms
+-------------
+
+Rewritten into cond when the file loads.
+
+(if test then else)       else is required
+(when test body ...)
+(case key (value body ...) ... (else body ...))    values compared with eq?
+`template                 quasiquote: ,x inserts x, ,@x splices the list x
+
+Truth and equality
+------------------
+
+Only #false is false. (), 0 and "" are true.
+
+(eq? a b) -> #true if a and b are the same value. Booleans, (), integers,
+floats, symbols and strings compare by value. Pairs, vectors, procedures,
+errors, addresses, PIDs and env refs compare by identity.
+
+Core operations as values
+-------------------------
+
+A core operation with a fixed number of arguments can be passed as a value:
+(map car xs) works. list, string-append and vector take any number of
+arguments and can only be called; passing one is a load error.
+
+Arithmetic
+----------
+
+Both arguments must be integers, or both floats. Integers are 64-bit.
+
+(+ a b)  (- a b)  (* a b)
+    -> sum, difference, product.                        ! overflow
+(/ a b)
+    -> quotient; integers truncate toward zero.         ! divide-by-zero
+(% a b)
+    -> remainder with the sign of a; integers only.     ! divide-by-zero
+
+Comparison
+----------
+
+(= a b)  (< a b)  (<= a b)  (> a b)  (>= a b)
+    -> #true or #false. Both integers or both floats.
+(eq? a b)
+    -> see Truth and equality.
+(not a)
+    -> #true if a is #false, otherwise #false.
+
+Type predicates
+---------------
+
+Each takes one value, returns #true or #false, and never throws.
+
+nil?  pair?  boolean?  integer?  float?  string?  symbol?  procedure?
+error?  address?  pid?  env?  vector?
+
+Pairs and lists
+---------------
+
+(cons a b)
+    -> a new pair.
+(car p)  (cdr p)
+    -> the head or tail of a pair.
+(list x ...)                                            linear
+    -> a new list of the arguments; (list) is ().
+(append a b)                                            linear
+    -> the elements of the list a followed by b. b is not copied.
+(apply f args)
+    -> the result of applying the procedure f to the elements of the list
+    args.
+
+Strings
+-------
+
+(string-length s)
+    -> the number of characters.
+(string-ref s i)
+    -> the character at index i, as an integer code point.  ! range-error
+(string-append s ...)                                   linear
+    -> the strings joined in order; (string-append) is "". Strings only.
+(string-join sep strings)                               linear
+    -> the list of strings joined with sep between each two, as in Perl's
+    join; (string-join sep ()) is "". Strings only.
+(symbol->string y)  (string->symbol s)
+    -> the conversion.
+(value->string v)
+    -> the text IO::print shows for v; a string is returned unchanged.
+
+Conversions
+-----------
+
+(integer->float i)
+    -> the nearest float.
+(float->integer f)
+    -> truncated toward zero.     ! overflow, or type-error if not finite
+
+Vectors
+-------
+
+Immutable and fixed-length, indexed from 0. Printed as #(1 2 3); there is
+no syntax for writing one in source.
+
+(vector x ...)                                          linear
+    -> a new vector of the arguments.
+(make-vector n fill)                                    linear
+    -> a vector of n copies of fill.                    ! range-error if n < 0
+(vector-length v)
+    -> the number of elements.
+(vector-ref v i)
+    -> the element at index i.                          ! range-error
+(vector-set v i x)                                      linear
+    -> a new vector with x at index i; v is unchanged.  ! range-error
+(list->vector l)  (vector->list v)                      linear
+    -> the conversion.
+
+Errors
+------
+
+An error has a tag (a symbol), a message (a string), a payload (any value)
+and an optional cause. Its trace is recorded the first time it is thrown.
+
+(make-error tag message payload)
+    -> a new error with no cause.
+(wrap-error cause tag message payload)
+    -> a new error whose cause is cause: how to pass an error on while
+    adding to it.
+(throw e)
+    Throws e.                     ! already-thrown if e was thrown before
+(rethrow e)
+    Throws e again, keeping the trace from its first throw.
+                                  ! bad-state if e was never thrown
+(error-tag e)  (error-message e)  (error-payload e)
+    -> the field.
+(error-cause e)
+    -> the error e wraps, or #false.
+(stack-trace-for e)                                     linear
+    -> e's trace, innermost first, as a list of (procedure file line column),
+    or () if e was never thrown.
+
+Errors the runtime throws use these tags: type-error, arity-error, unbound,
+overflow, divide-by-zero, range-error, not-granted, unknown-action,
+bad-state, full, load-error, already-thrown.
+
+
+PART 2: HOST REQUESTS
+=====================
+
+A name with :: is a request to the host, grouped by namespace. A process
+may use only the namespaces it was granted. process, mailbox, host,
+environment and tui are privileged: only the CPI has them, and no process
+can be granted them. actor, IO and timer are ordinary. Using a namespace
+you were not granted throws not-granted. A request costs no ticks.
+
+process:: (privileged)
+----------------------
+
+(process::spawn f args env grants mailbox)
+    -> a PID for a new ready process that will apply the procedure f to the
+    list args, resolving global names through env, allowed the namespaces
+    in the list grants, and receiving on mailbox (an address, or #false for
+    a new one).
+    ! not-granted if grants names a privileged namespace, or env requires a
+    host request whose namespace grants lacks
+(process::run pid n)
+    -> a stop reason, after running the process for at most n ticks:
+        (quota)  (blocked recv)  (blocked join pid)  (blocked host)
+        (exited value)  (failed error)  (trap effect args)
+    ! bad-state unless the process is ready
+(process::state pid)
+    -> (ready), (blocked recv), (blocked join pid), (blocked host),
+    (trapped), (parked), or (ended how value).
+(process::kill pid reason)
+    -> #true, after ending the process.     ! bad-state if ended or parked
+(process::resume pid value)  (process::resume-throw pid error)
+    -> #true. A trapped process continues as if the trapped request had
+    returned value, or thrown error.        ! bad-state unless trapped
+(process::address pid)
+    -> the address the process receives on.
+(process::env pid)
+    -> the process's env ref.               ! bad-state if ended or parked
+(process::set-env pid env)
+    -> #true, after swapping the process's env ref: later calls by name
+    reach the new code.
+    ! bad-state if ended or parked; not-granted as for spawn
+(process::park pid)
+    -> (parked key checkpoint binding-hash address): the process set aside.
+    Its PID ends; its mailbox stays.
+    ! bad-state unless blocked in recv or join
+(process::unpark parked env)
+    -> a new PID continuing from parked data, with env ref env. The same
+    parked data can be unparked any number of times.
+    ! not-granted as for spawn
+(process::watch pid watcher)
+    -> #true. When the process ends, watcher (a PID or an address) receives
+    (signal terminated pid (how value)).    ! bad-state if ended
+(process::checkpoint pid)
+    -> the arguments of the most recent call to the procedure the process
+    was spawned with. Readable after the process ends.
+
+mailbox:: (privileged)
+----------------------
+
+(mailbox::create durable capacity)
+    -> a new address. A durable mailbox keeps receiving after its process
+    ends; otherwise later messages go to the dead-letter queue.
+(mailbox::send address message)
+    -> #true. Delivered at once.            ! full
+(mailbox::size address)
+    -> the number of waiting messages.
+(mailbox::take address)
+    -> the oldest message, removed, or #false if there is none.
+
+host:: (privileged)
+-------------------
+
+(host::wait timeout)
+    -> the list of PIDs woken, after waiting until a timer fires, a key
+    arrives or timeout milliseconds pass (#false waits without limit). ()
+    if nothing is pending.
+(host::set-traps effects)
+    -> #true. The effects in the list (recv, send, self, join) stop any
+    process that uses them with (trap effect args). () turns traps off.
+(host::now)
+    -> milliseconds since the image started.
+
+environment:: (privileged)
+--------------------------
+
+(environment::self)
+    -> the CPI's own env ref.
+(environment::compose a b)
+    -> a composed with b. Never fails: different definitions of one name
+    become a conflict, and lookup takes the newer (b's). Identical
+    definitions, compared by content, compose without a conflict.
+(environment::define e name value)
+    -> e with name defined as value.        type-error if name is reserved
+(environment::lookup e name)
+    -> the value name resolves to.          ! unbound
+(environment::required e)
+    -> the names e requires but does not define, host requests included.
+(environment::resolve e grants)
+    -> e, once every required name is filled and every required host
+    request is in a namespace in grants.
+    ! unbound (payload: the unfilled names), not-granted
+(environment::conflicts e)
+    -> the names that have conflicting definitions.
+(environment::history e name)
+    -> every value name has been defined to, oldest first.
+(environment::accept e names)
+    -> e with each named conflict flattened to its newest definition.
+(environment::difference a b)
+    -> the slots of a that b lacks or holds differently: what composing a
+    onto b would change.
+(environment::binding-hash e)
+    -> a string identifying e's resolved bindings and their code.
+(environment::error-env e)
+    -> the env ref of the process that threw the error e.
+    ! bad-state if never thrown
+(environment::error-pad e level)
+    -> the local variables at trace entry level of e, as (name value) pairs.
+    ! range-error
+(environment::closure-pad f)
+    -> the local variables the closure f captured, as (name value) pairs.
+
+actor:: (ordinary; processes only)
+----------------------------------
+
+(actor::recv)
+    -> the next message. Blocks the process while its mailbox is empty.
+(actor::send address message)
+    -> #true. Delivered when the sender's batch ends.   ! full
+(actor::self)
+    -> the process's own address.
+(actor::join pid)
+    -> (exited value), (failed error) or (killed reason) once the process
+    ends; the symbol ended for a parked or unknown one. Blocks until then.
+
+IO:: (ordinary)
+---------------
+
+(IO::print value ...)
+    -> (), after printing the values separated by spaces, strings without
+    quotes.
+
+timer:: (ordinary)
+------------------
+
+(timer::sleep ms)
+    -> () after ms milliseconds. The process shows (blocked host) until
+    then.
+
+tui:: (privileged; SPEC-TUI.md)
+-------------------------------
+
+(tui::open mode)
+    -> #true. mode is 'inline (below the output) or 'fullscreen.
+(tui::render view)
+    -> #true, once the view is on screen. A view is data:
+    (Tag (@ (prop value) ...) child ...), with Box, Text, Newline, Spacer.
+(tui::size)
+    -> (columns rows).
+(tui::subscribe address)
+    -> #true. Sends (key name modifiers) and (resize columns rows) to the
+    address. They arrive only inside host::wait.
+(tui::unsubscribe)
+    -> #true.
+(tui::close)
+    -> #true, after restoring the terminal.
