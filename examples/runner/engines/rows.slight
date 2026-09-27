@@ -24,9 +24,6 @@
     (role
         (require actor::recv actor::send)
         (require second step-row third)
-        ; What those library procedures call in turn: the process can reach
-        ; only the names listed here.
-        (require but-last last list-ref map2 map3 rotate-left rotate-right row-counts rule-next)
 
         ; Each work order is (gen above own below); the answer, sent to the shared
         ; result mailbox, is (row gen+1 new-row).

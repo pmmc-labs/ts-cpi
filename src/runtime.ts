@@ -15,7 +15,7 @@ import { makeError } from './errors.ts';
 import { start, startExpr, step, resumeValue, resumeThrow } from './machine.ts';
 import {
     compose, conflicts, lookup, bindingHashOf, define, requiredNames, unfilledNames, missingNamespace,
-    history, accept, difference, select,
+    history, accept, difference,
 } from './env.ts';
 import { isReserved } from './names.ts';
 import { print, display } from './printer.ts';
@@ -797,18 +797,6 @@ export class Runtime implements Handlers {
             strs.push(n.name);
         }
         return V({ t: 'env', env: accept(eV.env, strs) });
-    }
-
-    envSelect(eV: Value, namesV: Value): ActionResult {
-        if (eV.t !== 'env') return T('type-error', 'environment::select requires an env ref', eV);
-        const names = listToArray(namesV);
-        if (names === null) return T('type-error', 'environment::select requires a list of symbols', namesV);
-        const strs: string[] = [];
-        for (const n of names) {
-            if (n.t !== 'sym') return T('type-error', 'environment::select requires a list of symbols', n);
-            strs.push(n.name);
-        }
-        return V({ t: 'env', env: select(eV.env, strs) });
     }
 
     envDifference(aV: Value, bV: Value): ActionResult {

@@ -90,7 +90,6 @@ export interface Handlers {
     envHistory(eV: Value, nameV: Value): ActionResult;
     envAccept(eV: Value, namesV: Value): ActionResult;
     envDifference(aV: Value, bV: Value): ActionResult;
-    envSelect(eV: Value, namesV: Value): ActionResult;
 
     // 10.5 actor:: (needs the caller's own pid, via RunCtx)
     actorRecv(ctx: RunCtx): ActionResult;
@@ -161,7 +160,6 @@ export const NAMESPACES: ReadonlyMap<string, ReadonlyMap<string, ActionSpec>> = 
         'history':       { arity: 2, run: (h, _c, a) => h.envHistory(a[0]!, a[1]!) },
         'accept':        { arity: 2, run: (h, _c, a) => h.envAccept(a[0]!, a[1]!) },
         'difference':    { arity: 2, run: (h, _c, a) => h.envDifference(a[0]!, a[1]!) },
-        'select':        { arity: 2, run: (h, _c, a) => h.envSelect(a[0]!, a[1]!) },
     })],
     ['actor', ns({
         'recv': { arity: 0, run: (h, c) => h.actorRecv(c) },

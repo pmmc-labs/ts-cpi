@@ -25,9 +25,6 @@
     (role
         (require actor::recv actor::send)
         (require for-each length map rule-next second sum)
-        ; What those library procedures call in turn: the process can reach
-        ; only the names listed here.
-        (require fold length-from list-ref third)
 
         ; A cell's first message is the list of its neighbors' addresses.
         (defun actors-cell (index rule collector state)

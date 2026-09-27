@@ -20,9 +20,6 @@ the version's header, then the version itself.
 The versions that spawn processes keep the processes' code in a role, which
 declares every host action and library procedure the code uses; `process-env`
 and `spawn-in` in `lib/lists.slight` build the environment and spawn in it.
-The environment holds the role and exactly the names it requires from the
-CPI's (`environment::select`), so a role also lists what the library
-procedures it calls reach in turn.
 A role that needs only host actions runs alone, with none of the CPI's
 environment (07, 12, 15, 16). 02's cells also compose the actor library,
 which is a role, so the host actions it uses are checked.

@@ -49,10 +49,6 @@
     (role
         (require actor::recv actor::send)
         (require filter fold length life-rule member-cell? neighbors-of second)
-        ; What those library procedures call in turn: the process can reach
-        ; only the names listed here.
-        (require any? filter-onto length-from life-height life-width map neighbor-offsets
-            reverse reverse-onto wrap)
 
         ; A job is (gen live), with `live` the (row col) list of live cells of the
         ; whole board. The worker answers (id gen born), the live cells of its

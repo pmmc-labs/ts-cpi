@@ -549,17 +549,11 @@ compose, and a role can leave names for other roles to fill:
   resolving it checks the library's host actions too.
 - **Code the CPI also runs can't be a role.** A role's procedures resolve their
   global names through the environment of whoever runs them, and the CPI's
-  environment comes from its files. So when a process needs a library the CPI
-  also uses, it takes exactly the names it requires from the CPI's
-  environment: `(environment::select e names)` keeps only the named slots, and
-  `process-env` in `examples/life/lib/lists.slight` composes the role onto
-  `(environment::select (environment::self) (environment::required code))`.
-- **Require everything the process reaches.** A library procedure calls other
-  procedures by name, and a closure sent to a process runs with the
-  receiver's environment, so a role must require those names too: a role
-  that calls `sum` also requires `fold`. A name it forgets is `unbound` when
-  the process first reaches it, because `environment::resolve` only sees the
-  names the role lists.
+  environment comes from its files. The Life examples share their library
+  between the CPI and its processes, so they compose each process's role onto
+  `(environment::self)` (`process-env` in `examples/life/lib/lists.slight`):
+  the role still declares what it uses, but the process can see every CPI
+  definition. `DECISIONS.md` has ways to close this gap.
 
 `main` asks the server about a dead cell, swaps the rule's parameters while
 the server runs, and asks again:

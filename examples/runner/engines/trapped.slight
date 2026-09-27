@@ -30,9 +30,6 @@
     (role
         (require actor::recv actor::send)
         (require for-each rule-next second)
-        ; What those library procedures call in turn: the process can reach
-        ; only the names listed here.
-        (require list-ref third)
 
         (defun trapped-cell (rule neighbors state)
             (for-each (lambda (n) (actor::send n (list :state state))) neighbors)

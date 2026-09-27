@@ -40,9 +40,6 @@
     (role
         (require actor::recv actor::send)
         (require life-rule life-width list-ref map range second third wrap)
-        ; What those library procedures call in turn: the process can reach
-        ; only the names listed here.
-        (require range-down)
 
         ; The number of live cells among the three cells centered on `col`.
         (defun rw-triple (row col)
