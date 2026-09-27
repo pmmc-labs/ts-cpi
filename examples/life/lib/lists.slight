@@ -34,13 +34,13 @@
         acc
         (range-down from (- i 1) (cons i acc))))
 
+; One pass, not in tail position: each cons waits on the continuation, which
+; lives on the heap, so long lists are fine. It is faster than building the
+; list backwards and reversing it.
 (defun map (f xs)
-    (reverse (map-onto f xs ())))
-
-(defun map-onto (f xs acc)
     (if (nil? xs)
-        acc
-        (map-onto f (cdr xs) (cons (f (car xs)) acc))))
+        ()
+        (cons (f (car xs)) (map f (cdr xs)))))
 
 (defun for-each (f xs)
     (when (not (nil? xs))

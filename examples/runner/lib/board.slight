@@ -1,20 +1,23 @@
 ; Boards for the Life runner. Loaded after examples/life/lib/lists.slight.
 ;
-; A board is (board width height rows): `rows` is a list of `height` rows,
-; each a list of `width` cells, 1 for alive and 0 for dead. The board is a
-; torus: the row above the first is the last.
+; A board is (board width height rows grid): `rows` is a list of `height`
+; rows, each a list of `width` cells, 1 for alive and 0 for dead; `grid` holds
+; the same cells as a vector of row vectors. Sweeps walk the rows; lookups
+; index the grid. The board is a torus: the row above the first is the last.
 ;
-; A rule is (rule text births survivals): each a 9-entry table, the next
+; A rule is (rule text births survivals): each a 9-entry vector, the next
 ; state of a dead (births) or live (survivals) cell with 0..8 live neighbors.
 
 ; ---------------------------------------------------------------------------
 ; Boards
 ; ---------------------------------------------------------------------------
 
-(defun board-make (width height rows) `(board ,width ,height ,rows))
+(defun board-make (width height rows)
+    (list 'board width height rows (list->vector (map list->vector rows))))
 (defun board-width (b) (second b))
 (defun board-height (b) (third b))
 (defun board-rows (b) (list-ref b 3))
+(defun board-grid (b) (list-ref b 4))
 
 ; (f row col) gives each cell.
 (defun board-from (width height f)
@@ -24,7 +27,7 @@
 (defun torus (i n) (% (+ (% i n) n) n))
 
 (defun board-cell (b row col)
-    (list-ref (list-ref (board-rows b) (torus row (board-height b))) (torus col (board-width b))))
+    (vector-ref (vector-ref (board-grid b) (torus row (board-height b))) (torus col (board-width b))))
 
 ; The (row col) positions of a cell's eight neighbors.
 (defun board-neighbors (b row col)
@@ -46,16 +49,16 @@
 (defun text-of (parts)
     (string-join "" (map value->string parts)))
 
+; One pass, like map in lists.slight.
 (defun map2 (f xs ys)
-    (reverse (map2-onto f xs ys ())))
-
-(defun map2-onto (f xs ys acc)
     (if (nil? xs)
-        acc
-        (map2-onto f (cdr xs) (cdr ys) (cons (f (car xs) (car ys)) acc))))
+        ()
+        (cons (f (car xs) (car ys)) (map2 f (cdr xs) (cdr ys)))))
 
 (defun map3 (f xs ys zs)
-    (map2 (lambda (x yz) (f x (car yz) (second yz))) xs (zip ys zs)))
+    (if (nil? xs)
+        ()
+        (cons (f (car xs) (car ys) (car zs)) (map3 f (cdr xs) (cdr ys) (cdr zs)))))
 
 ; ---------------------------------------------------------------------------
 ; The step: a sweep over rows, O(cells)
@@ -86,7 +89,7 @@
 
 (defun rule-text (rule) (second rule))
 (defun rule-next (rule alive count)
-    (list-ref (if (= alive 1) (list-ref rule 3) (third rule)) count))
+    (vector-ref (if (= alive 1) (list-ref rule 3) (third rule)) count))
 
 ; "B36/S23": born with 3 or 6 neighbors, survives with 2 or 3.
 (defun rule-parse (text)
@@ -94,8 +97,8 @@
     (let births (car parsed))
     (let survivals (second parsed))
     `(rule ,text
-        ,(map (lambda (n) (if (member? n births) 1 0)) (range 0 9))
-        ,(map (lambda (n) (if (member? n survivals) 1 0)) (range 0 9))))
+        ,(list->vector (map (lambda (n) (if (member? n births) 1 0)) (range 0 9)))
+        ,(list->vector (map (lambda (n) (if (member? n survivals) 1 0)) (range 0 9)))))
 
 (defun rule-scan (text i mode births survivals)
     (if (= i (string-length text))
