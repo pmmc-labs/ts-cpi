@@ -33,9 +33,11 @@ export interface HttpBackend {
     listen(port: number, onRequest: (req: HttpRequest, exchange: HttpExchange) => void): Promise<void>;
     // Stops accepting on `port`. Exchanges already handed over stay usable.
     close(port: number): Promise<void>;
-    // Test backends only: the next scripted request, or null. The virtual
-    // clock asks for one when `host::wait` would otherwise idle.
-    nextScripted?(): { port: number; req: HttpRequest; exchange: HttpExchange } | null;
+    // Test backends only, for the virtual clock: when the next scripted request
+    // arrives on host::now (null when the script is done), and that request
+    // once `now` has reached it (null before then).
+    nextDue?(): number | null;
+    nextScripted?(now: number): { port: number; req: HttpRequest; exchange: HttpExchange } | null;
 }
 
 // Splits a request target (`/users/42?x=1`) into decoded path segments and

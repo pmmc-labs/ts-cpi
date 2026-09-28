@@ -57,6 +57,15 @@ pong on it:
 node bin/cpi.ts examples/actors/actors.slight examples/actors/ping-pong.slight
 ```
 
+`examples/gateway/` is a web gateway on `http::` (`SPEC-HTTP.md`): a router
+actor, a pool of pre-warmed workers on one shared queue that grows under load
+and parks when idle, and counters created on first use that sleep and wake
+(tutorial section 10):
+
+```sh
+node bin/cpi.ts examples/gateway/gateway.slight   # then: curl localhost:8080/hello/ada
+```
+
 `examples/life/` holds the Game of Life written 22 different ways, as a tour of
 what the CPI's builtins can do. See [`examples/life/README.md`](examples/life/README.md).
 

@@ -114,10 +114,11 @@ The host provides a **headless** HTTP backend for tests, selected only
 through the `Runtime` constructor, like the headless TUI. Requests come from
 a script and responses are recorded in the order they were written, with
 clients that disconnected recorded as such. Under
-the virtual clock, when the CPI calls `host::wait` with no request held, the
-next scripted request arrives instead of time passing. A test can therefore
-drive a gateway through bursts and quiet periods deterministically and assert
-every response.
+the virtual clock, each scripted request says how long after the previous one
+it arrives. Requests due at the same moment arrive together, as a burst, and
+`host::wait` moves the clock to the next arrival as it does to a sleeper's
+deadline. A test can therefore drive a gateway through bursts and quiet
+periods deterministically and assert every response.
 
 The real backend uses Node's `node:http` on the loopback interface.
 

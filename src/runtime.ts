@@ -731,6 +731,10 @@ export class Runtime implements Handlers {
 
     private async waitReal(timeoutMs: number | null): Promise<ActionResult> {
         const until = timeoutMs === null ? null : this.now() + timeoutMs;
+        // One turn of the event loop first, so input the host has not read yet
+        // (a request on a socket, a key) is taken in even by (host::wait 0).
+        // Without it a CPI that is never idle never sees new input.
+        await new Promise<void>((resolve) => setImmediate(resolve));
         for (;;) {
             const earliest = this.earliestDeadline();
             if (this.inputQueue.length > 0 || this.heldRequests.length > 0) break;
@@ -763,18 +767,30 @@ export class Runtime implements Handlers {
             const next = this.tui?.nextScripted?.() ?? null;
             if (next !== null) this.inputQueue.push(next);
         }
-        if (this.inputQueue.length === 0 && this.heldRequests.length === 0 && this.listeners.size > 0) {
-            const next = this.http?.nextScripted?.() ?? null;
-            if (next !== null) this.heldRequests.push({ ...next, arrived: this.now() });
-        }
+        if (this.inputQueue.length === 0) this.takeScriptedRequests();
         if (this.inputQueue.length > 0 || this.heldRequests.length > 0) return V(this.settle());
-        const earliest = this.earliestDeadline();
+        // Nothing yet: move the clock to the next sleeper's deadline or the
+        // next scripted request, whichever is first, unless the timeout is.
+        const due = this.listeners.size > 0 ? this.http?.nextDue?.() ?? null : null;
+        const times = [this.earliestDeadline(), due].filter((t): t is number => t !== null);
+        const earliest = times.length > 0 ? Math.min(...times) : null;
         if (earliest === null || (timeoutMs !== null && this.virtualNow + timeoutMs < earliest)) {
             if (timeoutMs !== null) this.virtualNow += timeoutMs;
             return V(NIL);
         }
         this.virtualNow = Math.max(this.virtualNow, earliest); // never move time backward
+        this.takeScriptedRequests();
         return V(this.settle());
+    }
+
+    // Holds every scripted request due by now (a burst arrives together).
+    private takeScriptedRequests(): void {
+        if (this.listeners.size === 0) return;
+        for (;;) {
+            const next = this.http?.nextScripted?.(this.now()) ?? null;
+            if (next === null) return;
+            this.heldRequests.push({ ...next, arrived: this.now() });
+        }
     }
 
     private earliestDeadline(): number | null {

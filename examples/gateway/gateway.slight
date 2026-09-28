@@ -1,0 +1,429 @@
+; A web gateway.
+;
+; HTTP requests arrive as messages (SPEC-HTTP). A router actor forwards each
+; to the endpoint its first path segment names, with that segment removed,
+; and the endpoint answers through the request's reply address. The CPI is
+; the supervisor: it schedules the processes, answers /system requests
+; itself, and decides when workers wake, sleep and multiply.
+;
+;     /hello/<name>     a pool of identical workers on one shared queue
+;     /counter/<name>   one counter per name, created on first use
+;     /counter          the names counted so far
+;     /system/stats     the CPI's view of the processes
+;     /system/quit      stops the gateway
+;
+; Three patterns, one per kind of endpoint:
+;
+; - Pre-warmed workers. One hello worker runs its warm-up and is parked as a
+;   template. Every hello worker is unparked from it, already warm, onto the
+;   shared queue: a mailbox with several receivers is a work queue.
+; - Scaling. When requests wait in the hello queue, the CPI adds a worker, up
+;   to hello-max. A worker idle for idle-ms is parked into cold storage, down
+;   to hello-min, and the next scale-up unparks it from there.
+; - Lazy, sleeping endpoints. The counters endpoint asks the CPI for a child
+;   the first time a name is used. A counter idle for idle-ms is parked; its
+;   mailbox is durable, so requests wait for it, and the CPI unparks it when
+;   one does. Its count survives, because it is in the parked continuation.
+;
+; Run it, then try it with curl:
+;
+;     node bin/cpi.ts examples/gateway/gateway.slight
+;     curl localhost:8080/hello/ada
+;     curl localhost:8080/counter/ada
+;     curl localhost:8080/system/stats
+;     curl localhost:8080/system/quit
+
+(const gateway-port 8080)
+(const request-timeout 2000)
+(const quota 200)         ; ticks a process may run per turn
+(const idle-ms 2000)      ; a worker idle this long is put to sleep
+(const check-ms 500)      ; how long the CPI waits when nothing is ready
+(const hello-min 1)
+(const hello-max 4)
+
+; ---------------------------------------------------------------------------
+; Inside the processes (granted actor)
+; ---------------------------------------------------------------------------
+
+; What every endpoint needs to read a request and answer it.
+; A request is (request reply-to method path query headers body).
+(defun http-library ()
+    (role
+        (require actor::send)
+
+        (defun request-reply-to (req) (car (cdr req)))
+        (defun request-path (req) (car (cdr (cdr (cdr req)))))
+
+        ; The same request with `path` as its path: how a request is passed on
+        ; with the segments already used taken off.
+        (defun request-with-path (req path)
+            (cons 'request
+                (cons (request-reply-to req)
+                    (cons (car (cdr (cdr req)))
+                        (cons path (cdr (cdr (cdr (cdr req)))))))))
+
+        (defun respond (req status body)
+            (actor::send (request-reply-to req)
+                (list 'response status (list (list "content-type" "text/plain")) body)))))
+
+; `routes` is a list of (segment address), fixed when the router starts.
+(defun router-code ()
+    (role
+        (require actor::recv actor::send request-path request-with-path respond)
+
+        (defun router (routes)
+            (let req (actor::recv))
+            (let path (request-path req))
+            (let to (if (nil? path) #false (route-to routes (car path))))
+            (if to
+                (actor::send to (request-with-path req (cdr path)))
+                (respond req 404 "no such endpoint"))
+            (router routes))
+
+        (defun route-to (routes segment)
+            (cond
+                ((nil? routes) #false)
+                ((eq? (car (car routes)) segment) (car (cdr (car routes))))
+                (#true (route-to (cdr routes) segment))))))
+
+; A hello worker. Its warm-up stands in for loading templates or opening
+; connections, and `work` for rendering a page: both just spend ticks.
+(defun hello-code ()
+    (role
+        (require actor::recv request-path respond)
+
+        (defun hello-worker ()
+            (let greeting (warm-up 300 "hello"))
+            (hello-serve greeting))
+
+        (defun hello-serve (greeting)
+            (let req (actor::recv))
+            (let path (request-path req))
+            (work 12)
+            (respond req 200 (string-append greeting ", " (if (nil? path) "world" (car path))))
+            (hello-serve greeting))
+
+        (defun warm-up (n greeting)
+            (if (= n 0) greeting (warm-up (- n 1) greeting)))
+
+        (defun work (n)
+            (if (= n 0) #true (work (- n 1))))))
+
+; The counters endpoint. `children` is a list of (name to), in the order the
+; names were first used, where `to` is the child's address, or
+; (pending req ...) while the CPI makes the child: requests for that name
+; wait there until it exists.
+(defun counters-code ()
+    (role
+        (require actor::recv actor::send actor::self request-path request-with-path respond)
+
+        (defun counters (cpi children)
+            (let msg (actor::recv))
+            (counters cpi
+                (case (car msg)
+                    (:request (counters-request cpi children msg))
+                    (:child (counters-adopt children (car (cdr msg)) (car (cdr (cdr msg)))))
+                    (else children))))
+
+        (defun counters-request (cpi children req)
+            (let path (request-path req))
+            (if (nil? path)
+                (do
+                    (respond req 200 (string-join " " (child-names children)))
+                    children)
+                (counters-forward cpi children (car path) (request-with-path req (cdr path)))))
+
+        (defun counters-forward (cpi children name req)
+            (let entry (find-child children name))
+            (cond
+                ((not entry)
+                    (actor::send cpi (list 'make-counter name (actor::self)))
+                    (append children (list (list name (list 'pending req)))))
+                ((address? (car (cdr entry)))
+                    (actor::send (car (cdr entry)) req)
+                    children)
+                (#true
+                    (replace-child children name (append (car (cdr entry)) (list req))))))
+
+        ; The CPI made the child: pass on what waited for it.
+        (defun counters-adopt (children name to)
+            (send-all to (cdr (car (cdr (find-child children name)))))
+            (replace-child children name to))
+
+        (defun send-all (to reqs)
+            (when (not (nil? reqs))
+                (actor::send to (car reqs))
+                (send-all to (cdr reqs))))
+
+        (defun find-child (children name)
+            (cond
+                ((nil? children) #false)
+                ((eq? (car (car children)) name) (car children))
+                (#true (find-child (cdr children) name))))
+
+        (defun replace-child (children name to)
+            (cond
+                ((nil? children) ())
+                ((eq? (car (car children)) name) (cons (list name to) (cdr children)))
+                (#true (cons (car children) (replace-child (cdr children) name to)))))
+
+        (defun child-names (children)
+            (if (nil? children)
+                ()
+                (cons (car (car children)) (child-names (cdr children)))))))
+
+; One counter. Its state is its arguments.
+(defun counter-code ()
+    (role
+        (require actor::recv respond)
+
+        (defun counter (name visits)
+            (let req (actor::recv))
+            (respond req 200 (string-append name " " (value->string (+ visits 1))))
+            (counter name (+ visits 1)))))
+
+; ---------------------------------------------------------------------------
+; The CPI
+; ---------------------------------------------------------------------------
+
+; A process's environment: its role and the HTTP library, nothing else.
+(defun process-env (code)
+    (environment::resolve (environment::compose (http-library) code) '(actor)))
+
+(defun spawn-on (env name args mailbox)
+    (process::spawn (environment::lookup env name) args env '(actor) mailbox))
+
+; The CPI answers /system requests itself. It cannot call http-library's
+; procedures, which run in processes (DECISIONS.md, Spec issues), so it has
+; its own.
+(defun cpi-respond (req status body)
+    (mailbox::send (car (cdr req))
+        (list 'response status (list (list "content-type" "text/plain")) body)))
+
+; What stays fixed while the gateway runs: the CPI's inbox, the hello queue,
+; the hello template, and the environments hello workers and counters run in.
+(defun world (inbox queue template hello-env counter-env)
+    (vector inbox queue template hello-env counter-env))
+(defun world-inbox (w) (vector-ref w 0))
+(defun world-queue (w) (vector-ref w 1))
+(defun world-template (w) (vector-ref w 2))
+(defun world-hello-env (w) (vector-ref w 3))
+(defun world-counter-env (w) (vector-ref w 4))
+
+; What changes: the processes running, each (pid kind last) where kind is
+; router, counters, hello or (counter name address) and `last` is the
+; host::now of its last turn; the hello workers in cold storage, as parked
+; data; the counters asleep, each (name address parked); and whether the
+; gateway is still running.
+(defun state (procs cold asleep running)
+    (vector procs cold asleep running))
+(defun st-procs (st) (vector-ref st 0))
+(defun st-cold (st) (vector-ref st 1))
+(defun st-asleep (st) (vector-ref st 2))
+(defun st-running? (st) (vector-ref st 3))
+(defun with-procs (st procs) (vector-set st 0 procs))
+(defun with-cold (st cold) (vector-set st 1 cold))
+(defun with-asleep (st asleep) (vector-set st 2 asleep))
+(defun stop (st) (vector-set st 3 #false))
+
+(defun proc-pid (p) (car p))
+(defun proc-kind (p) (car (cdr p)))
+(defun proc-last (p) (car (cdr (cdr p))))
+
+(defun add-proc (st pid kind now)
+    (with-procs st (append (st-procs st) (list (list pid kind now)))))
+
+(defun count-kind (procs kind)
+    (cond
+        ((nil? procs) 0)
+        ((eq? (proc-kind (car procs)) kind) (+ 1 (count-kind (cdr procs) kind)))
+        (#true (count-kind (cdr procs) kind))))
+
+(defun count-counters (procs)
+    (cond
+        ((nil? procs) 0)
+        ((pair? (proc-kind (car procs))) (+ 1 (count-counters (cdr procs))))
+        (#true (count-counters (cdr procs)))))
+
+(defun length (xs)
+    (if (nil? xs) 0 (+ 1 (length (cdr xs)))))
+
+(defun stats (st)
+    (string-join " "
+        (list
+            "hello" (value->string (count-kind (st-procs st) 'hello))
+            "cold" (value->string (length (st-cold st)))
+            "counters" (value->string (count-counters (st-procs st)))
+            "asleep" (value->string (length (st-asleep st))))))
+
+; ---------------------------------------------------------------------------
+; Scheduling: one turn for each ready process, round robin.
+
+(defun ready? (p)
+    (eq? (car (process::state (proc-pid p))) :ready))
+
+(defun any-ready? (procs)
+    (and (not (nil? procs))
+        (or (ready? (car procs)) (any-ready? (cdr procs)))))
+
+(defun run-round (procs now)
+    (cond
+        ((nil? procs) ())
+        ((ready? (car procs))
+            (let stop (process::run (proc-pid (car procs)) quota))
+            (if (or (eq? (car stop) :exited) (eq? (car stop) :failed))
+                (do
+                    (IO::print "[gateway]" (proc-kind (car procs)) "ended:" stop)
+                    (run-round (cdr procs) now))
+                (cons (list (proc-pid (car procs)) (proc-kind (car procs)) now)
+                    (run-round (cdr procs) now))))
+        (#true (cons (car procs) (run-round (cdr procs) now)))))
+
+; ---------------------------------------------------------------------------
+; The CPI's inbox: /system requests, and counters to make.
+
+(defun handle-inbox (w st)
+    (let msg (mailbox::take (world-inbox w)))
+    (if msg
+        (handle-inbox w (handle-message w st msg))
+        st))
+
+(defun handle-message (w st msg)
+    (case (car msg)
+        (:request (handle-system st msg))
+        (:make-counter (make-counter w st (car (cdr msg)) (car (cdr (cdr msg)))))
+        (else st)))
+
+(defun handle-system (st req)
+    (let path (car (cdr (cdr (cdr req)))))
+    (let what (if (nil? path) "" (car path)))
+    (cond
+        ((eq? what "stats")
+            (cpi-respond req 200 (stats st))
+            st)
+        ((eq? what "quit")
+            (cpi-respond req 200 "bye")
+            (stop st))
+        (#true
+            (cpi-respond req 404 "no such system request")
+            st)))
+
+(defun make-counter (w st name root)
+    (let to (mailbox::create #true 100))
+    (let pid (spawn-on (world-counter-env w) 'counter (list name 0) to))
+    (mailbox::send root (list 'child name to))
+    (IO::print "[gateway] counter" name "made")
+    (add-proc st pid (list 'counter name to) (host::now)))
+
+; ---------------------------------------------------------------------------
+; Waking and scaling up.
+
+; One more hello worker while requests wait and the pool is below its
+; maximum: from cold storage if a worker is there, else from the template.
+(defun scale-hello (w st now)
+    (if (and (> (mailbox::size (world-queue w)) 0)
+            (< (count-kind (st-procs st) 'hello) hello-max))
+        (add-hello w st now)
+        st))
+
+(defun add-hello (w st now)
+    (let cold (st-cold st))
+    (let pid (process::unpark (if (nil? cold) (world-template w) (car cold)) (world-hello-env w)))
+    (let st2 (add-proc st pid 'hello now))
+    (IO::print "[gateway] hello +1 from" (if (nil? cold) "the template:" "cold storage:") (stats st2))
+    (if (nil? cold) st2 (with-cold st2 (cdr cold))))
+
+; A counter asleep wakes when a request waits in its mailbox.
+(defun wake-counters (w st now)
+    (wake-each w (st-asleep st) (with-asleep st ()) now))
+
+(defun wake-each (w asleep st now)
+    (cond
+        ((nil? asleep) st)
+        ((> (mailbox::size (car (cdr (car asleep)))) 0)
+            (let a (car asleep))
+            (let pid (process::unpark (car (cdr (cdr a))) (world-counter-env w)))
+            (IO::print "[gateway] counter" (car a) "awake")
+            (wake-each w (cdr asleep) (add-proc st pid (list 'counter (car a) (car (cdr a))) now) now))
+        (#true
+            (wake-each w (cdr asleep) (with-asleep st (append (st-asleep st) (list (car asleep)))) now))))
+
+; ---------------------------------------------------------------------------
+; Sleeping: a hello worker beyond the minimum, or any counter, idle for
+; idle-ms while waiting in recv, is parked.
+
+(defun idle? (p now)
+    (and (>= (- now (proc-last p)) idle-ms)
+        (eq? (car (cdr (process::state (proc-pid p)))) :recv)))
+
+(defun sleep-idle (st now)
+    (sleep-each (st-procs st) (with-procs st ()) now (- (count-kind (st-procs st) 'hello) hello-min)))
+
+; Walks the processes, keeping each or putting it to sleep. `spare` is how
+; many more hello workers may sleep.
+(defun sleep-each (procs st now spare)
+    (cond
+        ((nil? procs) st)
+        ((not (idle? (car procs) now))
+            (sleep-each (cdr procs) (keep (car procs) st) now spare))
+        ((and (eq? (proc-kind (car procs)) 'hello) (> spare 0))
+            (let st2 (with-cold st (cons (process::park (proc-pid (car procs))) (st-cold st))))
+            (IO::print "[gateway] hello -1 to cold storage:" (stats (with-procs st2 (append (st-procs st2) (cdr procs)))))
+            (sleep-each (cdr procs) st2 now (- spare 1)))
+        ((pair? (proc-kind (car procs)))
+            (let kind (proc-kind (car procs)))
+            (IO::print "[gateway] counter" (car (cdr kind)) "asleep")
+            (sleep-each (cdr procs)
+                (with-asleep st (append (st-asleep st)
+                    (list (list (car (cdr kind)) (car (cdr (cdr kind))) (process::park (proc-pid (car procs)))))))
+                now spare))
+        (#true
+            (sleep-each (cdr procs) (keep (car procs) st) now spare))))
+
+(defun keep (p st)
+    (with-procs st (append (st-procs st) (list p))))
+
+; ---------------------------------------------------------------------------
+; The supervisor loop. Requests enter mailboxes only inside host::wait, so
+; it waits every time round: for 0 ms while processes are ready, and for up
+; to check-ms when none are, so idle workers are noticed.
+
+(defun gateway (w st)
+    (if (st-running? st)
+        (do
+            (let now (host::now))
+            (let st2 (handle-inbox w (with-procs st (run-round (st-procs st) now))))
+            (let st3 (sleep-idle (wake-counters w (scale-hello w st2 now) now) now))
+            (host::wait (if (any-ready? (st-procs st3)) 0 check-ms))
+            (gateway w st3))
+        st))
+
+; Starts a hello worker, runs it until its warm-up is done and it waits for
+; its first request, and parks it: the template for every hello worker.
+(defun warm-template (env queue)
+    (let pid (spawn-on env 'hello-worker () queue))
+    (let turns (run-until-blocked pid 1))
+    (IO::print "[gateway] hello template warmed up in" turns "turns")
+    (process::park pid))
+
+(defun run-until-blocked (pid turns)
+    (if (eq? (car (process::run pid quota)) :quota)
+        (run-until-blocked pid (+ turns 1))
+        turns))
+
+(defun main ()
+    (let inbox (mailbox::create #true 100))
+    (let queue (mailbox::create #true 100))
+    (let counters-box (mailbox::create #true 100))
+    (let router-box (mailbox::create #true 100))
+    (let hello-env (process-env (hello-code)))
+    (let w (world inbox queue (warm-template hello-env queue) hello-env (process-env (counter-code))))
+    (let routes (list (list "hello" queue) (list "counter" counters-box) (list "system" inbox)))
+    (let router (spawn-on (process-env (router-code)) 'router (list routes) router-box))
+    (let counters (spawn-on (process-env (counters-code)) 'counters (list inbox ()) counters-box))
+    (let st (state (list (list router 'router 0) (list counters 'counters 0)) () () #true))
+    (http::listen gateway-port router-box request-timeout)
+    (IO::print "[gateway] listening on port" gateway-port)
+    (let final (gateway w (add-hello w st (host::now))))
+    (http::close gateway-port)
+    (IO::print "[gateway] stopped:" (stats final)))

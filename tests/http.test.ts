@@ -228,6 +228,20 @@ test('http: requests wake the longest waiting worker on a shared mailbox', async
     assert.deepEqual(b.http.responses.map((r) => (r as { body: string }).body), ['b']);
 });
 
+test('http: scripted requests due together arrive together; a later one arrives when virtual time reaches it', async () => {
+    const b = await boot(`
+        (defun main ()
+            (let inbox (mailbox::create #true 10))
+            (http::listen 8080 inbox 1000)
+            (host::wait #false)
+            (let burst (list (host::now) (mailbox::size inbox)))
+            (let early (list (host::wait 100) (host::now) (mailbox::size inbox)))
+            (host::wait #false)
+            (list burst early (list (host::now) (mailbox::size inbox))))
+    `, [{ target: '/a' }, { target: '/b' }, { target: '/c', after: 250 }]);
+    assert.equal(value(b), '((0 2) (() 100 2) (250 3))');
+});
+
 // ---------------------------------------------------------------------------
 // The namespace (section 2)
 // ---------------------------------------------------------------------------
@@ -318,4 +332,37 @@ test('http: on the real clock, the host answers 504 while the CPI is busy past t
     assert.equal(result.ok, true, result.ok ? '' : print(result.e));
     assert.equal(rt.deadLetters.length, 1);
     assert.equal(print(rt.deadLetters[0]!.msg), '(response 200 () "late")');
+});
+
+test('http: (host::wait 0) takes in requests while the CPI stays busy', async () => {
+    const port = 38000 + Math.floor(Math.random() * 2000);
+    const rt = new Runtime({ out: () => {} });
+    // The CPI never waits for longer than 0 ms: it polls up to 20000 times.
+    const booted = rt.boot(envOf(`
+        (defun poll (inbox n)
+            (host::wait 0)
+            (cond
+                ((> (mailbox::size inbox) 0) :seen)
+                ((= n 0) :never)
+                (#true (poll inbox (- n 1)))))
+        (defun main ()
+            (let inbox (mailbox::create #true 10))
+            (http::listen ${port} inbox 5000)
+            (let seen (poll inbox 20000))
+            (let req (mailbox::take inbox))
+            (when req (mailbox::send (car (cdr req)) (list 'response 200 () "ok")))
+            seen)
+    `));
+    const answered = (async () => {
+        for (let i = 0; i < 50; i++) {
+            await new Promise((r) => setTimeout(r, 5));
+            const res = await fetch(`http://127.0.0.1:${port}/`).catch(() => null);
+            if (res !== null) return res.status;
+        }
+        return null;
+    })();
+    const result = await booted;
+    assert.equal(result.ok, true, result.ok ? '' : print(result.e));
+    assert.equal(print(result.v), 'seen');
+    assert.equal(await answered, 200);
 });

@@ -603,7 +603,75 @@ keep, so a program decides for itself which names keep their history. The
 roles") does this with a strategy you pass in, and `environment::difference`
 shows what composing one environment onto another would change.
 
-## 10. Common mistakes
+## 10. Serving HTTP
+
+The CPI can accept HTTP requests with the privileged `http::` namespace
+(`SPEC-HTTP.md`). Like keys, requests are messages: `(http::listen port
+address timeout)` sends each one to `address`, inside `host::wait`, as
+
+```lisp
+(request reply-to method path query headers body)
+```
+
+`method` is a lowercase symbol, `path` a list of segments (`/users/42` is
+`("users" "42")`), `query` and `headers` lists of `(name value)` strings, and
+`body` a string. `reply-to` is a **reply address**: sending it
+`(response status headers body)` answers the request. Any process holding it
+can answer with `actor::send`, so a worker needs no special grant, and it can
+be passed along with the request. It takes one response. A later one, like a
+reply after the timeout (when the host has already answered `504`), is a dead
+letter. A request to a full mailbox is answered `503` at once.
+
+`examples/gateway/gateway.slight` puts this together with parking and
+several receivers on one mailbox:
+
+- A **router** process receives every request and forwards it to the endpoint its first path segment names, with that segment removed.
+- **`/hello/<name>`** is served by a pool of identical workers that all receive on one durable mailbox. A mailbox with several receivers is a work queue: each message wakes only the receiver that has waited longest. The first hello worker runs its warm-up, waits for its first request, and is parked as a **template**. Every hello worker is unparked from it, already warm, because parked data can be unparked any number of times.
+- **`/counter/<name>`** makes one counter process per name, the first time the name is used. Only the CPI can create mailboxes and processes, so the counters endpoint sends the CPI a message asking for one, and holds that name's requests until the CPI replies with the new address.
+- The **CPI** is the supervisor. It gives each ready process a turn, answers `/system/stats` and `/system/quit` itself, adds a hello worker while requests wait in the queue, and parks any worker that has been idle for two seconds: spare hello workers into cold storage, and counters into sleep. A counter's mailbox is durable, so a request to a sleeping counter waits for it, and the CPI unparks the counter when one does. Its count survives, because it is in the parked continuation.
+
+```
+$ node bin/cpi.ts examples/gateway/gateway.slight
+$ curl localhost:8080/hello/ada
+hello, ada
+$ curl localhost:8080/counter/ada
+ada 1
+$ curl localhost:8080/counter/ada
+ada 2
+$ curl localhost:8080/system/stats
+hello 1 cold 0 counters 1 asleep 0
+$ curl localhost:8080/system/stats
+hello 1 cold 0 counters 0 asleep 1
+$ curl localhost:8080/counter/ada
+ada 3
+$ curl localhost:8080/system/quit
+bye
+```
+
+The second `stats` came three seconds after the first, by which time the
+counter was asleep. The gateway logged:
+
+```
+[gateway] hello template warmed up in 31 turns
+[gateway] listening on port 8080
+[gateway] hello +1 from the template: hello 1 cold 0 counters 0 asleep 0
+[gateway] counter ada made
+[gateway] counter ada asleep
+[gateway] counter ada awake
+[gateway] stopped: hello 1 cold 0 counters 1 asleep 0
+```
+
+Two things about the supervisor loop matter for any server:
+
+- **It waits every time round.** Requests enter mailboxes only inside `host::wait`, so a CPI that never waits accepts nothing. The gateway calls `(host::wait 0)` while processes are ready, which takes in what has arrived and returns at once, and waits up to half a second when none are, so it notices idle workers.
+- **Handling order is not arrival order.** Two requests taken by two workers finish in whichever order the workers are run.
+
+`tests/gateway.test.ts` drives the gateway with a script: a burst of six
+hello requests, counters, five quiet seconds, and a second visit. It runs on
+the virtual clock with a headless HTTP backend, so every line of the log and
+every response is exact.
+
+## 11. Common mistakes
 
 | Symptom | Cause |
 | --- | --- |
@@ -615,6 +683,7 @@ shows what composing one environment onto another would change.
 | `bad-state` from `process::run` | The process isn't `ready`. Check `process::state` first. |
 | A process never sees a message | Messages sent during a batch arrive when that batch ends, and a blocked process must be `run` again to receive. |
 | `bad-state: input is not a terminal` | `tui::subscribe` needs a real terminal; it fails when input is piped. |
+| A server answers nothing, or only when idle | The CPI must call `host::wait`, at least `(host::wait 0)`, every time round its loop: requests enter mailboxes only there. |
 | `(quota)` on a loop you expected to finish | Quotas count evaluator steps, about 18 per iteration of a simple loop, not calls. |
 
 For the full semantics, see `../../design-xxx/SPEC-CPI.md`. For the choices
