@@ -293,9 +293,10 @@ host:: (privileged)
 -------------------
 
 (host::wait timeout)
-    -> the list of PIDs woken, after waiting until a timer fires, a key
-    arrives or timeout milliseconds pass (#false waits without limit). ()
-    if nothing is pending.
+    -> the list of PIDs woken, after waiting until a timer fires, a key or
+    an HTTP request arrives, or timeout milliseconds pass (#false waits
+    without limit). The PIDs are sleepers whose time came and receivers a
+    delivered key or request woke. () if nothing is pending.
 (host::set-traps effects)
     -> #true. The effects in the list (recv, send, self, join) stop any
     process that uses them with (trap effect args). () turns traps off.
@@ -385,3 +386,29 @@ tui:: (privileged; SPEC-TUI.md)
     -> #true.
 (tui::close)
     -> #true, after restoring the terminal.
+
+http:: (privileged; SPEC-HTTP.md)
+---------------------------------
+
+(http::listen port address timeout)
+    -> #true. Accepts HTTP requests on 127.0.0.1:port and sends each to
+    address, inside host::wait, as
+        (request reply-to method path query headers body)
+    method is a lowercase symbol; path a list of segment strings ("users"
+    "42"); query and headers lists of (name value) strings, header names in
+    lowercase; body a string. A full or closed mailbox gets 503 at once; a
+    request unanswered after timeout milliseconds gets 504.
+    ! bad-state if already listening on port, or it cannot be opened
+(http::close port)
+    -> #true. Stops accepting; delivered requests can still be answered.
+    ! bad-state unless listening on port
+
+A reply address answers its one request. Any process holding it answers
+with actor::send (no grant needed), or the CPI with mailbox::send:
+        (response status headers body)
+status an integer, headers a list of (name value) strings, body a string.
+It takes one message; later ones are dead letters. Anything that is not a
+response gets 500 and is kept as a dead letter. Nothing can receive on a
+reply address: mailbox::size, mailbox::take, and spawning, listening or
+subscribing onto one are bad-state. Requests still waiting when the image
+exits get 503.

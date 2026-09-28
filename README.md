@@ -103,14 +103,15 @@ quota from the keyboard.
 | `src/expander.ts` | The base expander: derived forms to `cond`, eta-expansion, reserved names, placement and shape checks (section 4), and `role`, built into an environment when the file loads. |
 | `src/machine.ts` | The pure `step` function and its state: tail calls, local `defun` groups, catch/throw, host requests, the checkpoint slot (sections 6 to 8). |
 | `src/builtins.ts` | The namespace tables: `process::`, `mailbox::`, `host::`, `environment::`, `actor::`, `IO::print`, `timer::sleep`, with arities. |
-| `src/runtime.ts` | `Runtime`: boots the CPI, the process table, mailboxes, `process::run` batches, traps, parking, the clock, dead letters, the TUI (sections 10 to 12, and SPEC-TUI). |
+| `src/runtime.ts` | `Runtime`: boots the CPI, the process table, mailboxes, `process::run` batches, traps, parking, the clock, dead letters, the TUI and HTTP (sections 10 to 12, SPEC-TUI and SPEC-HTTP). |
 | `src/tui/` | The `tui::` namespace (`SPEC-TUI.md`): views as data (`views.ts`), input events (`events.ts`), and two backends, Ink on a terminal (`terminal.ts`) and headless for tests (`headless.ts`). |
+| `src/http/` | The `http::` namespace (`SPEC-HTTP.md`): the backend interface and request-target parsing (`backend.ts`), and two backends, `node:http` on the loopback interface (`node.ts`) and scripted for tests (`headless.ts`). |
 | `src/loader.ts` | Loads `.slight` files into an environment (section 9). |
 | `bin/cpi.ts` | The command line. |
 
 ## What the prototype does not do yet
 
-- **Terminal input is the only external event source.** `host::wait` wakes on timers and on keys from the TUI; there is no other I/O, networking or event stream yet.
+- **Two external event sources.** `host::wait` wakes on timers, on keys from the TUI and on HTTP requests (`SPEC-HTTP.md`); there is no other I/O, no HTTP client, and no other event stream yet.
 - **Only the terminated lifecycle signal** exists, delivered as an ordinary message appended to the watcher's mailbox. Signals are not delivered ahead of messages.
 - **No acknowledgment** of messages, no selective receive support, and no reader for the dead-letter queue.
 - **Addresses are guessable** counters, not 128-bit random identifiers.

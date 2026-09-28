@@ -22,6 +22,7 @@ import { print, display } from './printer.ts';
 import type { ActionResult, Answer, Handlers, RunCtx } from './builtins.ts';
 import type { TuiBackend, TuiMode } from './tui/backend.ts';
 import { toElement, ViewError } from './tui/views.ts';
+import type { HttpBackend, HttpExchange, HttpRequest, HttpResponse } from './http/backend.ts';
 import { NAMESPACES } from './builtins.ts';
 
 // ---------------------------------------------------------------------------
@@ -35,7 +36,7 @@ const BLOCK = (reason: 'recv' | 'join' | 'host'): ActionResult => ({ kind: 'bloc
 const TRAP = (effect: string, args: Value): ActionResult => ({ kind: 'trap', effect, args });
 
 const ORDINARY_NAMESPACES = new Set(['actor', 'IO', 'timer']);
-const ALL_NAMESPACES = new Set(['process', 'mailbox', 'host', 'environment', 'actor', 'IO', 'timer', 'tui']);
+const ALL_NAMESPACES = new Set(['process', 'mailbox', 'host', 'environment', 'actor', 'IO', 'timer', 'tui', 'http']);
 const TRAPPABLE_EFFECTS = new Set(['recv', 'send', 'self', 'join']);
 
 // ---------------------------------------------------------------------------
@@ -104,12 +105,25 @@ type ProcEntry = {
 // `receivers` are the processes spawned or unparked onto the mailbox that are
 // neither parked nor ended (kept by setStatus). A non-durable mailbox that has
 // had a receiver and has none left is closed: sends to it are dead letters.
+//
+// A reply address (SPEC-HTTP section 4) is a mailbox whose receiver is the
+// host: `reply` is set, and it is closed once it has answered its request.
 type MailboxEntry = {
     durable: boolean;
     capacity: number;
     queue: Value[];
     receivers: Set<ProcEntry>;
     hadReceiver: boolean;
+    reply?: ReplyState;
+};
+
+type ReplyState = {
+    readonly addr: Addr;
+    readonly exchange: HttpExchange;
+    // On host::now: the host answers 504 once it passes.
+    readonly deadline: number;
+    done: boolean;
+    timer?: ReturnType<typeof setTimeout>;
 };
 
 function newMailbox(durable: boolean, capacity: number): MailboxEntry {
@@ -117,7 +131,35 @@ function newMailbox(durable: boolean, capacity: number): MailboxEntry {
 }
 
 function isClosed(mbox: MailboxEntry): boolean {
+    if (mbox.reply !== undefined) return mbox.reply.done;
     return !mbox.durable && mbox.hadReceiver && mbox.receivers.size === 0;
+}
+
+// A request as the message SPEC-HTTP section 3 describes.
+function requestMessage(replyTo: Addr, req: HttpRequest): Value {
+    const pairs = (xs: readonly (readonly [string, string])[]) => list(...xs.map(([n, v]) => list(str(n), str(v))));
+    return list(
+        sym('request'), replyTo, sym(req.method), list(...req.path.map((s) => str(s))),
+        pairs(req.query), pairs(req.headers), str(req.body),
+    );
+}
+
+// `(response status headers body)`, or null if `msg` is not one.
+function toResponse(msg: Value): HttpResponse | null {
+    const parts = listToArray(msg);
+    if (parts === null || parts.length !== 4) return null;
+    const [tag, status, headersV, body] = parts as [Value, Value, Value, Value];
+    if (tag.t !== 'sym' || tag.name !== 'response') return null;
+    if (status.t !== 'int' || status.v < 100n || status.v > 599n || body.t !== 'str') return null;
+    const headerList = listToArray(headersV);
+    if (headerList === null) return null;
+    const headers: [string, string][] = [];
+    for (const h of headerList) {
+        const pair = listToArray(h);
+        if (pair === null || pair.length !== 2 || pair[0]!.t !== 'str' || pair[1]!.t !== 'str') return null;
+        headers.push([pair[0]!.v, pair[1]!.v]);
+    }
+    return { status: Number(status.v), headers, body: body.v };
 }
 
 // DECISION: a mailbox's `grants` are not part of the parked *value* (SPEC-CPI
@@ -143,6 +185,9 @@ export type RuntimeOptions = {
     // Makes the backend `tui::open` draws with. Defaults to the terminal;
     // tests pass a HeadlessTui.
     readonly tui?: () => TuiBackend | Promise<TuiBackend>;
+    // Makes the backend `http::listen` serves with. Defaults to node:http;
+    // tests pass a HeadlessHttp.
+    readonly http?: () => HttpBackend | Promise<HttpBackend>;
 };
 
 export class Runtime implements Handlers {
@@ -159,6 +204,14 @@ export class Runtime implements Handlers {
     private inputQueue: Value[] = [];
     private heldLines: string[] = [];
     private wakeWaiter: (() => void) | null = null;
+
+    // HTTP (SPEC-HTTP): the listeners by port, the requests the host holds
+    // until `host::wait`, and the reply addresses not yet answered.
+    private readonly makeHttp: () => HttpBackend | Promise<HttpBackend>;
+    private http: HttpBackend | null = null;
+    private readonly listeners = new Map<number, { readonly addr: Addr; readonly timeout: number }>();
+    private heldRequests: { port: number; req: HttpRequest; exchange: HttpExchange; arrived: number }[] = [];
+    private readonly openReplies = new Set<MailboxEntry>();
     private nextPid = 1;
     private nextParkKey = 1;
     private cpiEnv: Env | null = null;
@@ -180,6 +233,7 @@ export class Runtime implements Handlers {
         this.out = opts.out;
         this.virtualClock = opts.clock === 'virtual';
         this.makeTui = opts.tui ?? (async () => new (await import('./tui/terminal.ts')).TerminalTui());
+        this.makeHttp = opts.http ?? (async () => new (await import('./http/node.ts')).NodeHttp());
     }
 
     private now(): number {
@@ -205,6 +259,7 @@ export class Runtime implements Handlers {
             return await this.runCpi(env);
         } finally {
             await this.closeTui();
+            await this.closeHttp();
         }
     }
 
@@ -384,6 +439,10 @@ export class Runtime implements Handlers {
     private deliverNow(fromAddr: Addr | null, addr: Addr, msg: Value): ActionResult {
         const mbox = this.mailboxes.get(addr.id);
         if (mbox === undefined) return T('type-error', 'unknown mailbox address', addr);
+        if (mbox.reply !== undefined) {
+            this.deliverReply(fromAddr, mbox, msg);
+            return V(TRUE);
+        }
         if (isClosed(mbox)) {
             this.deadLettersList.push({ from: fromAddr, to: addr, msg });
             return V(TRUE);
@@ -401,6 +460,10 @@ export class Runtime implements Handlers {
         for (const { addr, msg } of outbox) {
             const mbox = this.mailboxes.get(addr.id);
             if (mbox === undefined) continue;
+            if (mbox.reply !== undefined) {
+                this.deliverReply(null, mbox, msg);
+                continue;
+            }
             if (isClosed(mbox)) {
                 this.deadLettersList.push({ from: null, to: addr, msg });
                 continue;
@@ -434,7 +497,9 @@ export class Runtime implements Handlers {
             addr = newAddr();
             this.mailboxes.set(addr.id, newMailbox(false, 1000));
         } else if (mailboxV.t === 'addr') {
-            if (!this.mailboxes.has(mailboxV.id)) return T('type-error', 'unknown mailbox address', mailboxV);
+            const mbox = this.mailboxes.get(mailboxV.id);
+            if (mbox === undefined) return T('type-error', 'unknown mailbox address', mailboxV);
+            if (mbox.reply !== undefined) return T('bad-state', 'a reply address cannot be received on', mailboxV);
             addr = mailboxV;
         } else {
             return T('type-error', 'process::spawn requires an address or #false for mailbox', mailboxV);
@@ -627,6 +692,7 @@ export class Runtime implements Handlers {
         if (addrV.t !== 'addr') return T('type-error', 'mailbox::size requires an address', addrV);
         const mbox = this.mailboxes.get(addrV.id);
         if (mbox === undefined) return T('type-error', 'unknown mailbox address', addrV);
+        if (mbox.reply !== undefined) return T('bad-state', 'a reply address cannot be received on', addrV);
         return V(int(mbox.queue.length));
     }
 
@@ -634,6 +700,7 @@ export class Runtime implements Handlers {
         if (addrV.t !== 'addr') return T('type-error', 'mailbox::take requires an address', addrV);
         const mbox = this.mailboxes.get(addrV.id);
         if (mbox === undefined) return T('type-error', 'unknown mailbox address', addrV);
+        if (mbox.reply !== undefined) return T('bad-state', 'a reply address cannot be received on', addrV);
         if (mbox.queue.length === 0) return V(FALSE);
         return V(mbox.queue.shift()!);
     }
@@ -651,16 +718,25 @@ export class Runtime implements Handlers {
         if (timeoutV.t === 'bool' && timeoutV.v === false) timeoutMs = null;
         else if (timeoutV.t === 'int' && timeoutV.v >= 0n) timeoutMs = Number(timeoutV.v);
         else return T('type-error', 'host::wait requires a non-negative integer timeout or #false', timeoutV);
-        return this.virtualClock ? this.waitVirtual(timeoutMs) : this.waitReal(timeoutMs);
+        if (this.virtualClock) {
+            const result = this.waitVirtual(timeoutMs);
+            this.expireReplies();
+            return result;
+        }
+        return this.waitReal(timeoutMs).then((result) => {
+            this.expireReplies();
+            return result;
+        });
     }
 
     private async waitReal(timeoutMs: number | null): Promise<ActionResult> {
         const until = timeoutMs === null ? null : this.now() + timeoutMs;
         for (;;) {
             const earliest = this.earliestDeadline();
-            if (this.inputQueue.length > 0 || (earliest !== null && earliest <= this.now())) break;
+            if (this.inputQueue.length > 0 || this.heldRequests.length > 0) break;
+            if (earliest !== null && earliest <= this.now()) break;
             if (until !== null && this.now() >= until) break;
-            if (earliest === null && until === null && this.inputAddr === null) break;
+            if (earliest === null && until === null && this.inputAddr === null && this.listeners.size === 0) break;
             const limits = [earliest, until].filter((t): t is number => t !== null).map((t) => t - this.now());
             await this.sleepUntilWoken(limits.length > 0 ? Math.max(1, Math.min(...limits)) : null);
         }
@@ -687,7 +763,11 @@ export class Runtime implements Handlers {
             const next = this.tui?.nextScripted?.() ?? null;
             if (next !== null) this.inputQueue.push(next);
         }
-        if (this.inputQueue.length > 0) return V(this.settle());
+        if (this.inputQueue.length === 0 && this.heldRequests.length === 0 && this.listeners.size > 0) {
+            const next = this.http?.nextScripted?.() ?? null;
+            if (next !== null) this.heldRequests.push({ ...next, arrived: this.now() });
+        }
+        if (this.inputQueue.length > 0 || this.heldRequests.length > 0) return V(this.settle());
         const earliest = this.earliestDeadline();
         if (earliest === null || (timeoutMs !== null && this.virtualNow + timeoutMs < earliest)) {
             if (timeoutMs !== null) this.virtualNow += timeoutMs;
@@ -705,8 +785,12 @@ export class Runtime implements Handlers {
         return earliest;
     }
 
-    // Delivers held input events and wakes due sleepers; returns their PIDs.
+    // Delivers held input events and requests, and wakes due sleepers. Returns
+    // the PIDs that became ready: the sleepers, and the receivers a delivery
+    // woke.
     private settle(): Value {
+        const waiting = new Set<ProcEntry>();
+        for (const set of this.recvWaiters.values()) for (const e of set) waiting.add(e);
         const events = this.inputQueue;
         this.inputQueue = [];
         for (const event of events) {
@@ -714,10 +798,14 @@ export class Runtime implements Handlers {
             const r = this.deliverNow(null, this.inputAddr, event);
             if (r.kind === 'throw') this.deadLettersList.push({ from: null, to: this.inputAddr, msg: event });
         }
+        const requests = this.heldRequests;
+        this.heldRequests = [];
+        for (const r of requests) this.deliverRequest(r.port, r.req, r.exchange, r.arrived);
         const now = this.now();
-        const due = [...this.sleepers].filter((e) => e.sleepDeadline! <= now).sort((a, b) => a.pid - b.pid);
+        const due = [...this.sleepers].filter((e) => e.sleepDeadline! <= now);
         for (const e of due) this.setStatus(e, 'ready');
-        return list(...due.map((e) => pid(e.pid)));
+        const woken = [...waiting].filter((e) => e.status === 'ready');
+        return list(...[...due, ...woken].sort((a, b) => a.pid - b.pid).map((e) => pid(e.pid)));
     }
 
     hostSetTraps(effectsV: Value): ActionResult {
@@ -869,7 +957,7 @@ export class Runtime implements Handlers {
         const mbox = this.mailboxes.get(addrV.id);
         if (mbox === undefined) return T('type-error', 'unknown mailbox address', addrV);
         const pending = ctx.outbox === null ? 0 : ctx.outbox.filter((o) => o.addr.id === addrV.id).length;
-        if (!isClosed(mbox) && mbox.queue.length + pending >= mbox.capacity) {
+        if (mbox.reply === undefined && !isClosed(mbox) && mbox.queue.length + pending >= mbox.capacity) {
             return T('full', 'mailbox is at capacity', addrV);
         }
         ctx.outbox?.push({ addr: addrV, msg: msgV });
@@ -966,6 +1054,7 @@ export class Runtime implements Handlers {
     tuiSubscribe(addrV: Value): ActionResult {
         if (this.tui === null) return T('bad-state', 'the TUI is not open');
         if (addrV.t !== 'addr' || !this.mailboxes.has(addrV.id)) return T('type-error', 'tui::subscribe requires a mailbox address', addrV);
+        if (this.mailboxes.get(addrV.id)!.reply !== undefined) return T('bad-state', 'a reply address cannot be received on', addrV);
         if (!this.tui.canSubscribe()) return T('bad-state', 'input is not a terminal');
         this.inputAddr = addrV;
         this.tui.setSubscribed(true);
@@ -995,6 +1084,122 @@ export class Runtime implements Handlers {
         await tui.close();
         for (const line of this.heldLines) this.out(line);
         this.heldLines = [];
+    }
+
+    // ===========================================================================
+    // http:: (SPEC-HTTP)
+    // ===========================================================================
+
+    async httpListen(portV: Value, addrV: Value, timeoutV: Value): Promise<ActionResult> {
+        if (portV.t !== 'int' || portV.v < 1n || portV.v > 65535n) return T('type-error', 'http::listen requires a port from 1 to 65535', portV);
+        if (addrV.t !== 'addr') return T('type-error', 'http::listen requires a mailbox address', addrV);
+        const mbox = this.mailboxes.get(addrV.id);
+        if (mbox === undefined) return T('type-error', 'unknown mailbox address', addrV);
+        if (mbox.reply !== undefined) return T('bad-state', 'a reply address cannot be received on', addrV);
+        if (timeoutV.t !== 'int' || timeoutV.v < 0n) return T('type-error', 'http::listen requires a non-negative timeout in milliseconds', timeoutV);
+        const port = Number(portV.v);
+        if (this.listeners.has(port)) return T('bad-state', `already listening on port ${port}`, portV);
+        this.http ??= await this.makeHttp();
+        try {
+            await this.http.listen(port, (req, exchange) => {
+                this.heldRequests.push({ port, req, exchange, arrived: this.now() });
+                this.wakeWaiter?.();
+            });
+        } catch (e) {
+            return T('bad-state', `cannot listen on port ${port}: ${e instanceof Error ? e.message : String(e)}`, portV);
+        }
+        this.listeners.set(port, { addr: addrV, timeout: Number(timeoutV.v) });
+        return V(TRUE);
+    }
+
+    async httpClose(portV: Value): Promise<ActionResult> {
+        if (portV.t !== 'int') return T('type-error', 'http::close requires a port', portV);
+        const port = Number(portV.v);
+        if (!this.listeners.has(port)) return T('bad-state', `not listening on port ${port}`, portV);
+        this.listeners.delete(port);
+        await this.http!.close(port);
+        return V(TRUE);
+    }
+
+    // Section 5: makes the request's reply address and sends the request to
+    // its listener's mailbox, or answers 503 if it cannot be delivered.
+    private deliverRequest(port: number, req: HttpRequest, exchange: HttpExchange, arrived: number): void {
+        const listener = this.listeners.get(port);
+        const replyAddr = newAddr();
+        const reply: ReplyState = { addr: replyAddr, exchange, deadline: arrived + (listener?.timeout ?? 0), done: false };
+        const replyBox: MailboxEntry = { ...newMailbox(false, 1), reply };
+        this.mailboxes.set(replyAddr.id, replyBox);
+        this.openReplies.add(replyBox);
+        const msg = requestMessage(replyAddr, req);
+        const target = listener === undefined ? undefined : this.mailboxes.get(listener.addr.id);
+        if (listener === undefined || target === undefined || isClosed(target) || target.queue.length >= target.capacity) {
+            this.deadLettersList.push({ from: null, to: listener?.addr ?? replyAddr, msg });
+            this.answerReply(replyBox, { status: 503, headers: [], body: '' });
+            return;
+        }
+        if (!this.virtualClock) {
+            // The timer is the deadline: re-checking host::now here could see a
+            // millisecond short (it is rounded down) and never fire again.
+            reply.timer = setTimeout(
+                () => this.answerReply(replyBox, { status: 504, headers: [], body: '' }),
+                Math.max(0, reply.deadline - this.now()),
+            );
+        }
+        this.deliverNow(null, listener.addr, msg);
+        // Every request that arrived is delivered, even if its client has
+        // already gone: the reply address is then closed, and a reply to it is
+        // a dead letter.
+        exchange.onAbort(() => this.closeReply(replyBox));
+    }
+
+    // Section 4: a reply address takes one message, which must be a response.
+    private deliverReply(fromAddr: Addr | null, mbox: MailboxEntry, msg: Value): void {
+        this.expireReplies();
+        const reply = mbox.reply!;
+        if (reply.done) {
+            this.deadLettersList.push({ from: fromAddr, to: reply.addr, msg });
+            return;
+        }
+        const res = toResponse(msg);
+        if (res === null) {
+            this.deadLettersList.push({ from: fromAddr, to: reply.addr, msg });
+            this.answerReply(mbox, { status: 500, headers: [], body: '' });
+            return;
+        }
+        this.answerReply(mbox, res);
+    }
+
+    private answerReply(mbox: MailboxEntry, res: HttpResponse): void {
+        const reply = mbox.reply!;
+        if (reply.done) return;
+        this.closeReply(mbox);
+        reply.exchange.respond(res);
+    }
+
+    private closeReply(mbox: MailboxEntry): void {
+        const reply = mbox.reply!;
+        reply.done = true;
+        if (reply.timer !== undefined) clearTimeout(reply.timer);
+        this.openReplies.delete(mbox);
+    }
+
+    // Answers 504 to every request whose timeout has passed on host::now.
+    private expireReplies(): void {
+        const now = this.now();
+        for (const mbox of [...this.openReplies]) {
+            if (mbox.reply!.deadline <= now) this.answerReply(mbox, { status: 504, headers: [], body: '' });
+        }
+    }
+
+    // When the image exits: every request still waiting is answered 503, and
+    // every listener stops.
+    private async closeHttp(): Promise<void> {
+        for (const r of this.heldRequests) r.exchange.respond({ status: 503, headers: [], body: '' });
+        this.heldRequests = [];
+        for (const mbox of [...this.openReplies]) this.answerReply(mbox, { status: 503, headers: [], body: '' });
+        const ports = [...this.listeners.keys()];
+        this.listeners.clear();
+        for (const port of ports) await this.http?.close(port);
     }
 }
 
