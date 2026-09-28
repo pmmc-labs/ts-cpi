@@ -126,6 +126,11 @@ type ReplyState = {
     readonly deadline: number;
     done: boolean;
     timer?: ReturnType<typeof setTimeout>;
+    // For the served log (SPEC-HTTP section 6), times on host::now.
+    readonly port: number;
+    readonly req: HttpRequest;
+    readonly arrived: number;
+    delivered: number | false;
 };
 
 function newMailbox(durable: boolean, capacity: number): MailboxEntry {
@@ -214,6 +219,9 @@ export class Runtime implements Handlers {
     private readonly listeners = new Map<number, { readonly addr: Addr; readonly timeout: number }>();
     private heldRequests: { port: number; req: HttpRequest; exchange: HttpExchange; arrived: number }[] = [];
     private readonly openReplies = new Set<MailboxEntry>();
+    // The served log's address, and the entries held until host::wait.
+    private servedLogAddr: Addr | null = null;
+    private servedLog: Value[] = [];
     private nextPid = 1;
     private nextParkKey = 1;
     private cpiEnv: Env | null = null;
@@ -731,10 +739,12 @@ export class Runtime implements Handlers {
         if (this.virtualClock) {
             const result = this.waitVirtual(timeoutMs);
             this.expireReplies();
+            this.flushServedLog();
             return result;
         }
         return this.waitReal(timeoutMs).then((result) => {
             this.expireReplies();
+            this.flushServedLog();
             return result;
         });
     }
@@ -827,6 +837,7 @@ export class Runtime implements Handlers {
         const requests = this.heldRequests;
         this.heldRequests = [];
         for (const r of requests) this.deliverRequest(r.port, r.req, r.exchange, r.arrived);
+        this.flushServedLog();
         const now = this.now();
         const due = [...this.sleepers].filter((e) => e.sleepDeadline! <= now);
         for (const e of due) this.setStatus(e, 'ready');
@@ -1152,7 +1163,10 @@ export class Runtime implements Handlers {
     private deliverRequest(port: number, req: HttpRequest, exchange: HttpExchange, arrived: number): void {
         const listener = this.listeners.get(port);
         const replyAddr = newAddr();
-        const reply: ReplyState = { addr: replyAddr, exchange, deadline: arrived + (listener?.timeout ?? 0), done: false };
+        const reply: ReplyState = {
+            addr: replyAddr, exchange, deadline: arrived + (listener?.timeout ?? 0), done: false,
+            port, req, arrived, delivered: false,
+        };
         const replyBox: MailboxEntry = { ...newMailbox(false, 1), reply };
         this.mailboxes.set(replyAddr.id, replyBox);
         this.openReplies.add(replyBox);
@@ -1167,15 +1181,20 @@ export class Runtime implements Handlers {
             // The timer is the deadline: re-checking host::now here could see a
             // millisecond short (it is rounded down) and never fire again.
             reply.timer = setTimeout(
-                () => this.answerReply(replyBox, { status: 504, headers: [], body: '' }),
+                () => this.answerReply(replyBox, { status: 504, headers: [], body: '' }, reply.deadline),
                 Math.max(0, reply.deadline - this.now()),
             );
         }
+        reply.delivered = this.now();
         this.deliverNow(null, listener.addr, msg);
         // Every request that arrived is delivered, even if its client has
         // already gone: the reply address is then closed, and a reply to it is
         // a dead letter.
-        exchange.onAbort(() => this.closeReply(replyBox));
+        exchange.onAbort(() => {
+            if (reply.done) return;
+            this.closeReply(replyBox);
+            this.logServed(reply, sym('disconnected'), this.now());
+        });
     }
 
     // Section 4: a reply address takes one message, which must be a response.
@@ -1195,11 +1214,13 @@ export class Runtime implements Handlers {
         this.answerReply(mbox, res);
     }
 
-    private answerReply(mbox: MailboxEntry, res: HttpResponse): void {
+    // `at` is when the answer counts as written: now, or a 504's deadline.
+    private answerReply(mbox: MailboxEntry, res: HttpResponse, at: number = this.now()): void {
         const reply = mbox.reply!;
         if (reply.done) return;
         this.closeReply(mbox);
         reply.exchange.respond(res);
+        this.logServed(reply, int(res.status), at);
     }
 
     private closeReply(mbox: MailboxEntry): void {
@@ -1213,7 +1234,42 @@ export class Runtime implements Handlers {
     private expireReplies(): void {
         const now = this.now();
         for (const mbox of [...this.openReplies]) {
-            if (mbox.reply!.deadline <= now) this.answerReply(mbox, { status: 504, headers: [], body: '' });
+            if (mbox.reply!.deadline <= now) this.answerReply(mbox, { status: 504, headers: [], body: '' }, mbox.reply!.deadline);
+        }
+    }
+
+    httpSubscribeLog(addrV: Value): ActionResult {
+        if (addrV.t !== 'addr') return T('type-error', 'http::subscribe-log requires a mailbox address', addrV);
+        const mbox = this.mailboxes.get(addrV.id);
+        if (mbox === undefined) return T('type-error', 'unknown mailbox address', addrV);
+        if (mbox.reply !== undefined) return T('bad-state', 'a reply address cannot be received on', addrV);
+        this.servedLogAddr = addrV;
+        return V(TRUE);
+    }
+
+    httpUnsubscribeLog(): ActionResult {
+        this.servedLogAddr = null;
+        this.servedLog = [];
+        return V(TRUE);
+    }
+
+    // Section 6: (served port method path status arrived delivered answered),
+    // held until host::wait, and only while a log is subscribed.
+    private logServed(reply: ReplyState, status: Value, at: number): void {
+        if (this.servedLogAddr === null) return;
+        this.servedLog.push(list(
+            sym('served'), int(reply.port), sym(reply.req.method), list(...reply.req.path.map((s) => str(s))),
+            status, int(reply.arrived), reply.delivered === false ? FALSE : int(reply.delivered), int(at),
+        ));
+    }
+
+    private flushServedLog(): void {
+        const entries = this.servedLog;
+        this.servedLog = [];
+        for (const entry of entries) {
+            if (this.servedLogAddr === null) return;
+            const r = this.deliverNow(null, this.servedLogAddr, entry);
+            if (r.kind === 'throw') this.deadLettersList.push({ from: null, to: this.servedLogAddr, msg: entry });
         }
     }
 

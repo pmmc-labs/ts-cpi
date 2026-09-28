@@ -1,4 +1,4 @@
-// An HTTP backend for tests (SPEC-HTTP section 7): requests come from a
+// An HTTP backend for tests (SPEC-HTTP section 8): requests come from a
 // script on the virtual clock, and every response is recorded. Selected only
 // through the Runtime constructor.
 //

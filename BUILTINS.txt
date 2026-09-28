@@ -406,6 +406,14 @@ http:: (privileged; SPEC-HTTP.md)
 (http::close port)
     -> #true. Stops accepting; delivered requests can still be answered.
     ! bad-state unless listening on port
+(http::subscribe-log address)
+    -> #true. Each finished request is then reported to address, inside
+    host::wait, as
+        (served port method path status arrived delivered answered)
+    status is the status written, or disconnected; times are host::now,
+    and delivered is #false for a refused request.
+(http::unsubscribe-log)
+    -> #true.
 
 A reply address answers its one request. Any process holding it answers
 with actor::send (no grant needed), or the CPI with mailbox::send:

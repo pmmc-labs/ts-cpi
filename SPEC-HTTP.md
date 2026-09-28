@@ -37,6 +37,8 @@ endpoint workers, which answer them directly.
 | --- | --- | --- |
 | `(http::listen port addr timeout)` | `#true`. Accepts HTTP requests on `127.0.0.1:port` and sends each to `addr` as a request message (section 3). A request not answered within `timeout` milliseconds is answered `504` by the host. | `bad-state` if already listening on `port`, or the port cannot be opened; `type-error`. |
 | `(http::close port)` | `#true`. Stops accepting on `port`. Requests already delivered can still be answered. | `bad-state` unless listening on `port`. |
+| `(http::subscribe-log addr)` | `#true`. From now on, an entry for each finished request is sent to `addr` (section 6). A second call replaces the first. | `type-error`; `bad-state` if `addr` is a reply address. |
+| `(http::unsubscribe-log)` | `#true`. Stops the served log, and drops entries not yet delivered. | |
 
 The host stops every listener when the image exits, or when the CPI fails
 (SPEC-CPI section 12), and answers requests still waiting with `503`.
@@ -103,12 +105,40 @@ many batches, which delivers what is waiting and returns at once.
 > would be taken. The cost, request latency bounded by how often the CPI
 > waits, is what running workers in other images would remove.
 
-## 6. Time
+## 6. The served log
+
+The host is the only party that sees a request from arrival to answer, so it
+reports each one when it finishes. While a log is subscribed, each request
+answered, refused, timed out or abandoned by its client is reported as:
+
+```lisp
+(served port method path status arrived delivered answered)
+```
+
+| Field | Value |
+| --- | --- |
+| `port`, `method`, `path` | As in the request (section 3); `path` is the whole path. |
+| `status` | The status written, or `disconnected` if the client left first. |
+| `arrived` | When the host had the whole request, on `host::now`. |
+| `delivered` | When it entered the listener's mailbox, inside `host::wait`, or `#false` if it was refused. |
+| `answered` | When the response was written or the client left. For `504`, the deadline. |
+
+- `delivered - arrived` is how long the request waited for the CPI to call `host::wait`: the cost of everything else the CPI does, drawing included. `answered - delivered` is the time the processes took.
+- Entries are delivered only inside `host::wait`, in the order the requests finished. If the log's mailbox is full, the entry is dropped and recorded as a dead letter.
+- Requests finished while no log is subscribed are not reported, and requests still waiting when the image exits are not reported.
+
+> **Rationale.** The CPI cannot time requests itself: a worker answers the
+> reply address directly, and processes cannot read the clock. Reporting
+> finished exchanges as messages keeps the host's part to recording facts,
+> and leaves counting, grouping and charting to the CPI. The requests and
+> this log together are a complete recording of the image's HTTP traffic.
+
+## 7. Time
 
 A request's timeout is measured on `host::now`. Under the virtual clock
 (tests only), it expires when `host::wait` moves the clock past it.
 
-## 7. Testing
+## 8. Testing
 
 The host provides a **headless** HTTP backend for tests, selected only
 through the `Runtime` constructor, like the headless TUI. Requests come from
@@ -122,7 +152,7 @@ periods deterministically and assert every response.
 
 The real backend uses Node's `node:http` on the loopback interface.
 
-## 8. What this changes elsewhere
+## 9. What this changes elsewhere
 
 **SPEC-CPI**
 - §10.2: a mailbox may have the host as its receiver (section 4).
@@ -135,7 +165,7 @@ The real backend uses Node's `node:http` on the loopback interface.
 - `mailbox::` checks reply addresses (section 4).
 - A `Runtime` option selects the HTTP backend, as `tui` does.
 
-## 9. Decisions
+## 10. Decisions
 
 Accepted Sep 28, 2026, each as recommended.
 
@@ -147,6 +177,7 @@ Accepted Sep 28, 2026, each as recommended.
 | D4 | A full or closed mailbox. | Answer `503` at once. | Drop the request, as a key is dropped: the client waits for its own timeout. |
 | D5 | An unanswered request. | Answer `504` after the `listen` timeout, then close the reply address. | No timeout: a lost request holds the connection until the client gives up. |
 | D6 | The body. | A string. Parsing it is the application's job, and path segments stay strings too; both are revisited later. | Parse `application/sexp` bodies into values. That needs a reader the language can call, which is a core change of its own. |
+| D7 | How the CPI learns request timing (added Sep 28, 2026). | A served log delivered as messages (section 6). | Stamp each request with its arrival time, which gives no answer time; or `(http::stats)` aggregated in the host, which fixes what can be charted. |
 
 ## Open issues
 

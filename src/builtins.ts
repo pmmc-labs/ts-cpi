@@ -113,6 +113,8 @@ export interface Handlers {
     // http:: (SPEC-HTTP; privileged, the CPI only)
     httpListen(portV: Value, addrV: Value, timeoutV: Value): Answer;
     httpClose(portV: Value): Answer;
+    httpSubscribeLog(addrV: Value): ActionResult;
+    httpUnsubscribeLog(): ActionResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,5 +195,7 @@ export const NAMESPACES: ReadonlyMap<string, ReadonlyMap<string, ActionSpec>> = 
     ['http', ns({
         'listen': { arity: 3, run: (h, _c, a) => h.httpListen(a[0]!, a[1]!, a[2]!) },
         'close': { arity: 1, run: (h, _c, a) => h.httpClose(a[0]!) },
+        'subscribe-log': { arity: 1, run: (h, _c, a) => h.httpSubscribeLog(a[0]!) },
+        'unsubscribe-log': { arity: 0, run: (h) => h.httpUnsubscribeLog() },
     })],
 ]);

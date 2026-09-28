@@ -146,7 +146,7 @@ test('http: a reply address cannot be received on', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Delivery, backpressure and timeouts (section 5 and 6)
+// Delivery, backpressure and timeouts (sections 5 and 7)
 // ---------------------------------------------------------------------------
 
 test('http: a request to a full mailbox is answered 503 at once and kept as a dead letter', async () => {
@@ -240,6 +240,82 @@ test('http: scripted requests due together arrive together; a later one arrives 
             (list burst early (list (host::now) (mailbox::size inbox))))
     `, [{ target: '/a' }, { target: '/b' }, { target: '/c', after: 250 }]);
     assert.equal(value(b), '((0 2) (() 100 2) (250 3))');
+});
+
+// ---------------------------------------------------------------------------
+// The served log (section 6)
+// ---------------------------------------------------------------------------
+
+test('http: the served log reports each answered request with when it arrived, was delivered and was answered', async () => {
+    const b = await boot(`
+        (defun main ()
+            (let inbox (mailbox::create #true 10))
+            (let log (mailbox::create #true 10))
+            (http::listen 8080 inbox 1000)
+            (http::subscribe-log log)
+            (host::wait #false)
+            (let req (mailbox::take inbox))
+            (timer::sleep 30)
+            (mailbox::send (car (cdr req)) (list 'response 201 () "made"))
+            (let before (mailbox::size log))
+            (host::wait 0)
+            (list before (mailbox::take log)))
+    `, [{ method: 'PUT', target: '/a/b', after: 100 }]);
+    assert.equal(value(b), '(0 (served 8080 put ("a" "b") 201 100 100 130))');
+});
+
+test('http: the served log reports refusals, timeouts and disconnects', async () => {
+    const b = await boot(`
+        (defun drain (log)
+            (let e (mailbox::take log))
+            (if e (cons e (drain log)) ()))
+        (defun main ()
+            (let inbox (mailbox::create #true 1))
+            (let log (mailbox::create #true 10))
+            (http::listen 8080 inbox 50)
+            (http::subscribe-log log)
+            (host::wait #false)
+            (mailbox::take inbox)
+            (host::wait #false)
+            (host::wait 100)
+            (drain log))
+    `, [{ target: '/slow' }, { target: '/full' }, { target: '/gone', after: 10, disconnects: true }]);
+    // /slow is delivered at 0 and times out at 50; /full finds the mailbox
+    // full at 0; /gone arrives at 10, is delivered, and its client has left.
+    assert.equal(value(b), '((served 8080 get ("full") 503 0 #false 0) (served 8080 get ("gone") disconnected 10 10 10) (served 8080 get ("slow") 504 0 0 50))');
+});
+
+test('http: nothing is logged without a subscription, and unsubscribe-log stops it', async () => {
+    const b = await boot(`
+        (defun answer (inbox)
+            (host::wait #false)
+            (mailbox::send (car (cdr (mailbox::take inbox))) (list 'response 200 () ""))
+            (host::wait 0))
+        (defun main ()
+            (let inbox (mailbox::create #true 10))
+            (let log (mailbox::create #true 10))
+            (http::listen 8080 inbox 1000)
+            (answer inbox)
+            (let unsubscribed (mailbox::size log))
+            (http::subscribe-log log)
+            (answer inbox)
+            (let subscribed (mailbox::size log))
+            (http::unsubscribe-log)
+            (answer inbox)
+            (list unsubscribed subscribed (mailbox::size log)))
+    `, [{ target: '/1' }, { target: '/2', after: 10 }, { target: '/3', after: 10 }]);
+    assert.equal(value(b), '(0 1 1)');
+});
+
+test('http: the served log cannot go to a reply address', async () => {
+    const b = await boot(`
+        (defun main ()
+            (let inbox (mailbox::create #true 10))
+            (http::listen 8080 inbox 1000)
+            (host::wait #false)
+            (catch (http::subscribe-log (car (cdr (mailbox::take inbox)))) e (error-tag e)))
+    `, [{ target: '/' }]);
+    assert.equal(value(b), 'bad-state');
 });
 
 // ---------------------------------------------------------------------------
