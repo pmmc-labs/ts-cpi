@@ -1,0 +1,26 @@
+; The reference for the plan's hibernate node (DECISIONS.md, Spec changes):
+; the gateway's counters put to sleep and woken in CPI code, as before the
+; node. tests/gateway.test.ts loads examples/gateway/gateway.slight without
+; its gateway-plan, on-mail and sleep-idle, loads these in their place, and
+; requires the same trace as the gateway with the node.
+
+; No hibernate node: a counter asleep has its mailbox in the plan's inbox,
+; so its first request wakes the CPI.
+(defun gateway-plan (counter-env inboxes asleep)
+    (list (list 'round quota idle-ms) (cons 'inbox (append inboxes (map second asleep)))))
+
+; Mail for a counter asleep: unpark it. The CPI reads its own mailboxes
+; every time it is woken.
+(defun on-mail (w st to)
+    (let a (if (member? to (vector-ref st 8)) #false (find-asleep (st-asleep st) to)))
+    (if a (counter-awake st a (process::unpark (third a) (world-counter-env w))) st))
+
+; The round reports every idle process, counters too: park a counter,
+; keeping its parked data as the third element of its entry in asleep.
+(defun sleep-idle (st p)
+    (cond
+        ((not (eq? (second (process::state (proc-pid p))) :recv)) st)
+        ((eq? (proc-kind p) 'hello) (sleep-hello st p))
+        ((pair? (proc-kind p))
+            (counter-asleep st p (list (second (proc-kind p)) (third (proc-kind p)) (process::park (proc-pid p)))))
+        (#true st)))

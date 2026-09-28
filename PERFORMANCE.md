@@ -131,3 +131,20 @@ plan's inbox, so nothing is polled (`DECISIONS.md`, Spec changes).
 - **With nothing to meter, the CPI is idle.** Without the served log it used 18 ms of CPU in a 25-second run, and the gateway did 17,416 requests a second: processes (42%) and HTTP and Node outside the CPI (29%) are the limit now.
 - **The served log is what still wakes the CPI.** It is delivered in every wait, so the CPI wakes about as often as before, and metrics are still most of its work: the monitor faux actor (`DESIGN-PLAN.md`, step 3) is the next large gain.
 - **Many processes no longer cost.** hello with 477 counters asleep runs at the speed it has with none, now that no sleeping counter is polled. A first version walked the whole list of sleeping counters for each mail event, including mail in the CPI's own inbox, which cost 36% of the CPI's ticks (a CPI tick profile found it).
+
+## After the hibernate node (Sep 28, 2026)
+
+Counters sleep in the plan's hibernate node: the host parks a counter idle
+for two seconds and unparks it at its first request, and the plan no longer
+changes as they come and go. `settle`, inside every wait, found the
+receivers a delivery woke by checking every process waiting in `recv` (10%
+of the CPU with 150 counters awake); it now records them as they wake.
+
+| Scenario | After `plan::run` | After the hibernate node |
+| --- | --- | --- |
+| hello, 8 clients | 3,075/s | 3,220/s |
+| New counters, 8 clients | 100/s, p50 72 ms | 118/s, p50 70 ms |
+| hello after the counters | 2,520/s with 477 asleep | 2,904/s with 555 asleep |
+
+- **A new counter costs 5.6 ms** with one client, against 0.6 ms for one that exists, and eight clients queue behind each other. The CPI's books are lists: each hibernate event walks the process list twice and appends to the list of sleepers, about 25,000 ticks with 700 counters, and the counters endpoint looks names up in a list too.
+- **Every round walks every live process** in the host to find the ready ones; cheap per process, but it grows with the blocked ones.

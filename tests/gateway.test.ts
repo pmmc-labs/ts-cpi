@@ -152,50 +152,95 @@ test('gateway monitor: draws each endpoint and the whole gateway, the last secon
     assert.deepEqual(output, ['[gateway] stopped: hello 1 cold 1 counters 0 asleep 2']);
 });
 
-// DESIGN-PLAN.md, rule 1: the host's plan::run is indistinguishable from its
-// reference program. The same scenario runs twice, once with the builtin and
-// once with the gateway calling plan-run-reference in its place, and every
-// line printed, every response, the metrics and the dead letters must match.
-test('plan::run: the gateway runs exactly as it does under the reference program', async () => {
-    const script: ScriptedRequest[] = [
-        { target: '/hello/ada', after: 100 },
-        { target: '/hello/bob' },
-        { target: '/hello/cy' },
-        { target: '/counter/ada', after: 20 },
-        { target: '/counter/bob' },
-        { target: '/slow', after: 30 },
-        { target: '/hello/di' },
-        // Alone, and off the loop's 500 ms timeouts: only mail for the
-        // counter, asleep by now, wakes the CPI in time.
-        { target: '/counter/ada', after: 3100 },
-        { target: '/system/stats', after: 700 },
-        { target: '/nope' },
-        { target: '/system/metrics', after: 1000 },
-        { target: '/system/quit' },
-    ];
-    async function run(useReference: boolean) {
-        const http = new HeadlessHttp(script);
-        const output: string[] = [];
-        const rt = new Runtime({ out: (line) => output.push(line), clock: 'virtual', http: () => http });
-        let source = readFileSync(gateway, 'utf-8');
-        let env = loadSource(readFileSync(reference, 'utf-8'), reference);
-        if (useReference) {
-            assert.equal(source.split('(plan::run ').length, 2, 'the gateway calls plan::run once');
-            source = source.replace('(plan::run ', '(plan-run-reference ');
+// DESIGN-PLAN.md, rule 1: each host node is indistinguishable from its
+// reference program. A scenario runs twice, once with the host's node and
+// once with the reference in its place, and every line printed, every
+// response with the time it was written, the metrics and the dead letters
+// must match.
+
+const hibernateReference = path.join(dir, '..', '..', 'tests', 'programs', 'gateway-hibernate-reference.slight');
+
+const traceScript: ScriptedRequest[] = [
+    { target: '/hello/ada', after: 100 },
+    { target: '/hello/bob' },
+    { target: '/hello/cy' },
+    { target: '/counter/ada', after: 20 },
+    { target: '/counter/bob' },
+    { target: '/slow', after: 30 },
+    { target: '/hello/di' },
+    // Alone, and off the loop's 500 ms timeouts: only mail for the counter,
+    // asleep by now, wakes it in time.
+    { target: '/counter/ada', after: 3100 },
+    { target: '/system/stats', after: 700 },
+    { target: '/nope' },
+    { target: '/system/metrics', after: 1000 },
+    { target: '/system/quit' },
+];
+
+// The source without the top-level (defun name ...) forms for `names`, each
+// of which must be there exactly once.
+function withoutDefuns(source: string, names: readonly string[]): string {
+    let out = source;
+    for (const name of names) {
+        const head = `\n(defun ${name} `;
+        const start = out.indexOf(head);
+        assert.ok(start >= 0 && out.indexOf(head, start + 1) < 0, `one (defun ${name} ...) in the gateway`);
+        let depth = 0;
+        let i = start + 1;
+        for (; i < out.length; i += 1) {
+            const ch = out[i];
+            if (ch === ';') { while (i < out.length && out[i] !== '\n') i += 1; continue; }
+            if (ch === '"') { i += 1; while (out[i] !== '"') i += out[i] === '\\' ? 2 : 1; continue; }
+            if (ch === '(') depth += 1;
+            if (ch === ')') { depth -= 1; if (depth === 0) break; }
         }
-        env = loadSource(source, gateway, env);
-        env = loadSource(readFileSync(plain, 'utf-8'), plain, env);
-        const result = await rt.boot(env);
-        assert.equal(result.ok, true, result.ok ? '' : print(result.e));
-        const answers = [...http.responses]
-            .sort((a, b) => a.request - b.request)
-            .map((r) => `at ${r.at}: ${'aborted' in r ? 'aborted' : `${r.status} ${r.body}`}`);
-        return { output, answers, deadLetters: rt.deadLetters.map((d) => print(d.msg)) };
+        out = out.slice(0, start) + out.slice(i + 1);
     }
-    const builtin = await run(false);
-    const byReference = await run(true);
+    return out;
+}
+
+// Runs the gateway under `traceScript`: with plan::run or its reference
+// program, and with the hibernate node or the CPI code it replaces.
+async function traceGateway(opts: { planReference: boolean; hibernateReference: boolean }) {
+    const http = new HeadlessHttp(traceScript);
+    const output: string[] = [];
+    const rt = new Runtime({ out: (line) => output.push(line), clock: 'virtual', http: () => http });
+    let source = readFileSync(gateway, 'utf-8');
+    let env = loadSource(readFileSync(reference, 'utf-8'), reference);
+    if (opts.planReference) {
+        assert.equal(source.split('(plan::run ').length, 2, 'the gateway calls plan::run once');
+        source = source.replace('(plan::run ', '(plan-run-reference ');
+    }
+    if (opts.hibernateReference) {
+        source = withoutDefuns(source, ['gateway-plan', 'on-mail', 'sleep-idle']);
+        env = loadSource(readFileSync(hibernateReference, 'utf-8'), hibernateReference, env);
+    }
+    env = loadSource(source, gateway, env);
+    env = loadSource(readFileSync(plain, 'utf-8'), plain, env);
+    const result = await rt.boot(env);
+    assert.equal(result.ok, true, result.ok ? '' : print(result.e));
+    const answers = [...http.responses]
+        .sort((a, b) => a.request - b.request)
+        .map((r) => `at ${r.at}: ${'aborted' in r ? 'aborted' : `${r.status} ${r.body}`}`);
+    return { output, answers, deadLetters: rt.deadLetters.map((d) => print(d.msg)) };
+}
+
+test('plan::run: the gateway runs exactly as it does under the reference program', async () => {
+    // The reference program knows rounds and inboxes, so both runs use the
+    // gateway's CPI code for sleeping counters.
+    const builtin = await traceGateway({ planReference: false, hibernateReference: true });
+    const byReference = await traceGateway({ planReference: true, hibernateReference: true });
     assert.deepEqual(builtin, byReference);
     assert.ok(builtin.output.some((l) => l.includes('counter ada asleep')), builtin.output.join('\n'));
     assert.ok(builtin.answers.some((a) => a.endsWith('200 slow, done')), builtin.answers.join('\n'));
     assert.ok(builtin.answers.includes('at 3250: 200 ada 2'), builtin.answers.join('\n'));
+});
+
+test('hibernate: the gateway runs exactly as it does with counters put to sleep by CPI code', async () => {
+    const node = await traceGateway({ planReference: false, hibernateReference: false });
+    const byReference = await traceGateway({ planReference: false, hibernateReference: true });
+    assert.deepEqual(node, byReference);
+    assert.ok(node.output.includes('[gateway] counter ada asleep'), node.output.join('\n'));
+    assert.ok(node.output.includes('[gateway] counter ada awake'), node.output.join('\n'));
+    assert.ok(node.answers.includes('at 3250: 200 ada 2'), node.answers.join('\n'));
 });

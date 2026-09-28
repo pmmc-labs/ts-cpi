@@ -176,6 +176,12 @@ plan, and hierarchical quotas (DESIGN-001 section 12) as each part's budget.
 - **A wait inside a plan is capped at the round's idle threshold,** so idle processes are reported at most that late; without the cap a long timeout would hide them.
 - **The pool now scales once per wake, not once per round.** In the gateway test's burst it added two workers where the round-by-round loop added three. The pool node (step 4) brings scaling back to every round, in the host.
 
+## Findings from step 2 (the hibernate node, Sep 28, 2026)
+
+- **Stateful nodes are checked against the CPI code they replace.** A node that remembers things between calls has no drop-in reference function, since CPI code can only pass state along. The exact-trace test runs the example both ways: with the node, and with the procedures it replaces loaded in place of the example's.
+- **Membership by env ref keeps voices out of the plan.** The gateway's plan no longer changes as counters sleep and wake. hello with 513 counters asleep ran at 2,789 requests a second, and 2,904 after the host's wait stopped checking every waiting process.
+- **The cost moved to the CPI's lists.** Each event the CPI handles walks its process list, which grows with the processes: about 25,000 ticks per hibernate event with 700 counters. The CPI acts per event now, as intended, so how it keeps its books is the next thing that grows with scale.
+
 ## Open questions
 
 1. **The plan's shape.** Which fields each node kind has, and how the host diffs two plans: by node name, with a changed node's state carried over where its kind allows.

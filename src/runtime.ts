@@ -31,6 +31,8 @@ import { NAMESPACES } from './builtins.ts';
 
 const IDLE = list(sym('idle'));
 const MAIL = list(sym('mail'));
+const HIBERNATED = sym('hibernated');
+const RESUMED = sym('resumed');
 const V = (v: Value): ActionResult => ({ kind: 'value', v });
 const T = (tag: string, message: string, payload: Value = NIL): ActionResult =>
     ({ kind: 'throw', e: makeError(tag, message, payload) });
@@ -189,8 +191,14 @@ type DeadLetter = { readonly from: Addr | null; readonly to: Addr; readonly msg:
 // ---------------------------------------------------------------------------
 
 // A plan (DESIGN-PLAN.md) as the host keeps it: the round's quota and idle
-// threshold, if it has a round, and the CPI's mailboxes whose mail wakes it.
-type Plan = { readonly round: { readonly n: number; readonly idle: number | null } | null; readonly inboxes: readonly Addr[] };
+// threshold, if it has a round; the CPI's mailboxes whose mail wakes it; and
+// the hibernate nodes, each an env ref and an idle threshold.
+type Hibernate = { readonly envV: Value; readonly idle: number };
+type Plan = {
+    readonly round: { readonly n: number; readonly idle: number | null } | null;
+    readonly inboxes: readonly Addr[];
+    readonly hibernate: readonly Hibernate[];
+};
 
 export type RuntimeOptions = {
     // Where `IO::print` lines go while no TUI is open.
@@ -251,7 +259,13 @@ export class Runtime implements Handlers {
     // The last plan plan::run was given, and what it says: a plan is only
     // read again when the CPI passes a different value.
     private planValue: Value | null = null;
-    private plan: Plan = { round: null, inboxes: [] };
+    private plan: Plan = { round: null, inboxes: [], hibernate: [] };
+    // Processes a hibernate node has parked, by address, in the order they
+    // were parked, and the addresses of those with mail waiting.
+    private readonly hibernated = new Map<string, { readonly data: Value; readonly envV: Value; readonly addr: Addr }>();
+    private readonly hibernatedMail = new Set<string>();
+    // While `settle` delivers held input, the receivers a delivery wakes.
+    private wokenBySettle: ProcEntry[] | null = null;
 
     constructor(opts: RuntimeOptions) {
         this.out = opts.out;
@@ -453,6 +467,7 @@ export class Runtime implements Handlers {
         for (const e of waiters) {
             this.setStatus(e, 'ready');
             e.wokenForMessage = true;
+            this.wokenBySettle?.push(e);
             return;
         }
     }
@@ -478,6 +493,7 @@ export class Runtime implements Handlers {
         }
         if (mbox.queue.length >= mbox.capacity) return T('full', 'mailbox is at capacity', addr);
         mbox.queue.push(msg);
+        if (this.hibernated.has(addr.id)) this.hibernatedMail.add(addr.id);
         this.wakeRecv(addr);
         return V(TRUE);
     }
@@ -498,6 +514,7 @@ export class Runtime implements Handlers {
                 continue;
             }
             mbox.queue.push(msg);
+            if (this.hibernated.has(addr.id)) this.hibernatedMail.add(addr.id);
         }
         for (const { addr } of outbox) this.wakeRecv(addr);
     }
@@ -568,9 +585,14 @@ export class Runtime implements Handlers {
         return V(list(list(...round.events), int(round.ready)));
     }
 
-    private runRound(n: number, idle: number | null): { events: Value[]; ready: number } {
+    // One round. A member of a hibernate node is never reported idle: once
+    // it has waited `idle` ms it is parked at the end of the round, if it is
+    // still waiting then, since a message sent later in the round may have
+    // woken it.
+    private runRound(n: number, idle: number | null, hibernate: readonly Hibernate[] = []): { events: Value[]; ready: number } {
         const now = this.now();
         const events: Value[] = [];
+        const sleepy: { entry: ProcEntry; node: Hibernate }[] = [];
         for (const entry of this.live) {
             if (entry.status === 'ready') {
                 const stop = this.runBatch(entry, n);
@@ -578,14 +600,50 @@ export class Runtime implements Handlers {
                 if (why.name === 'exited' || why.name === 'failed' || why.name === 'trap') {
                     events.push(list(pid(entry.pid), stop));
                 }
-            } else if (idle !== null && entry.status === 'blocked-recv' && !entry.idleReported && now - entry.recvSince! >= idle) {
-                entry.idleReported = true;
-                events.push(list(pid(entry.pid), IDLE));
+            } else if (entry.status === 'blocked-recv') {
+                const node = hibernate.length === 0 ? undefined : this.hibernateNodeOf(entry, hibernate);
+                if (node !== undefined) {
+                    if (now - entry.recvSince! >= node.idle) sleepy.push({ entry, node });
+                } else if (idle !== null && !entry.idleReported && now - entry.recvSince! >= idle) {
+                    entry.idleReported = true;
+                    events.push(list(pid(entry.pid), IDLE));
+                }
             }
+        }
+        for (const { entry, node } of sleepy) {
+            if (entry.status !== 'blocked-recv') continue;
+            const parked = this.processPark(pid(entry.pid));
+            if (parked.kind !== 'value') continue;
+            this.hibernated.set(entry.addr.id, { data: parked.v, envV: node.envV, addr: entry.addr });
+            events.push(list(pid(entry.pid), list(HIBERNATED, entry.addr)));
         }
         let ready = 0;
         for (const entry of this.live) if (entry.status === 'ready') ready += 1;
         return { events, ready };
+    }
+
+    // The hibernate node a process belongs to: the one for its env ref, if
+    // it receives on a durable mailbox (a parked receiver does not keep a
+    // non-durable one open, so its messages would be lost).
+    private hibernateNodeOf(entry: ProcEntry, hibernate: readonly Hibernate[]): Hibernate | undefined {
+        const node = hibernate.find((h) => h.envV === entry.envRef);
+        return node !== undefined && this.mailboxes.get(entry.addr.id)?.durable === true ? node : undefined;
+    }
+
+    // Unparks each hibernated process with mail, in the order they were
+    // parked, while the plan has a hibernate node for its env ref.
+    private resumeHibernated(hibernate: readonly Hibernate[]): Value[] {
+        if (this.hibernatedMail.size === 0) return [];
+        const events: Value[] = [];
+        for (const [id, h] of this.hibernated) {
+            if (!this.hibernatedMail.has(id) || !hibernate.some((node) => node.envV === h.envV)) continue;
+            const unparked = this.processUnpark(h.data, h.envV);
+            if (unparked.kind !== 'value') continue;
+            this.hibernated.delete(id);
+            this.hibernatedMail.delete(id);
+            events.push(list(unparked.v, list(RESUMED, h.addr)));
+        }
+        return events;
     }
 
     processResume(pidV: Value, v: Value): ActionResult {
@@ -877,8 +935,8 @@ export class Runtime implements Handlers {
     // the PIDs that became ready: the sleepers, and the receivers a delivery
     // woke.
     private settle(): Value {
-        const waiting = new Set<ProcEntry>();
-        for (const set of this.recvWaiters.values()) for (const e of set) waiting.add(e);
+        const woken: ProcEntry[] = [];
+        this.wokenBySettle = woken;
         const events = this.inputQueue;
         this.inputQueue = [];
         for (const event of events) {
@@ -890,11 +948,11 @@ export class Runtime implements Handlers {
         this.heldRequests = [];
         for (const r of requests) this.deliverRequest(r.port, r.req, r.exchange, r.arrived);
         this.flushServedLog();
+        this.wokenBySettle = null;
         const now = this.now();
         const due = [...this.sleepers].filter((e) => e.sleepDeadline! <= now);
         for (const e of due) this.setStatus(e, 'ready');
-        const woken = [...waiting].filter((e) => e.status === 'ready');
-        return list(...[...due, ...woken].sort((a, b) => a.pid - b.pid).map((e) => pid(e.pid)));
+        return list(...[...due, ...woken.filter((e) => e.status === 'ready')].sort((a, b) => a.pid - b.pid).map((e) => pid(e.pid)));
     }
 
     hostSetTraps(effectsV: Value): ActionResult {
@@ -931,25 +989,25 @@ export class Runtime implements Handlers {
         if (timeoutV.t === 'bool' && timeoutV.v === false) timeout = null;
         else if (timeoutV.t === 'int' && timeoutV.v >= 0n) timeout = Number(timeoutV.v);
         else return T('type-error', 'plan::run requires a non-negative integer timeout or #false', timeoutV);
-        const { round, inboxes } = this.plan;
+        const { round, inboxes, hibernate } = this.plan;
         const deadline = timeout === null ? null : this.now() + timeout;
         for (;;) {
-            const r = round === null ? { events: [], ready: 0 } : this.runRound(round.n, round.idle);
+            const r = round === null ? { events: [], ready: 0 } : this.runRound(round.n, round.idle, hibernate);
             if (r.events.length > 0) return V(list(...r.events));
-            const mail = this.mailEvents(inboxes);
+            const mail = [...this.mailEvents(inboxes), ...this.resumeHibernated(hibernate)];
             if (mail.length > 0) return V(list(...mail));
             if (deadline !== null && this.now() >= deadline) return V(NIL);
             if (r.ready > 0) {
                 await this.hostWait(int(0));
                 continue;
             }
-            const idle = round?.idle ?? null;
-            const limits = [idle, deadline === null ? null : deadline - this.now()].filter((t): t is number => t !== null);
+            const idles = [round?.idle ?? null, ...hibernate.map((h) => h.idle)];
+            const limits = [...idles, deadline === null ? null : deadline - this.now()].filter((t): t is number => t !== null);
             const limit = limits.length === 0 ? null : Math.min(...limits);
             const before = this.now();
             const answer = await this.hostWait(limit === null ? FALSE : int(limit));
             const woken = answer.kind === 'value' ? answer.v : NIL;
-            if (woken !== NIL || this.mailEvents(inboxes).length > 0) continue;
+            if (woken !== NIL || this.mailEvents(inboxes).length > 0 || this.hibernatedMail.size > 0) continue;
             if (limit !== null && this.now() - before >= limit) continue;
             return V(NIL);
         }
@@ -961,6 +1019,7 @@ export class Runtime implements Handlers {
         if (nodes === null) return bad('a plan is a list of nodes', planV);
         let round: Plan['round'] = null;
         const inboxes: Addr[] = [];
+        const hibernate: Hibernate[] = [];
         for (const node of nodes) {
             const parts = listToArray(node);
             const kind = parts?.[0];
@@ -974,6 +1033,13 @@ export class Runtime implements Handlers {
                 else if (idleV!.t === 'int' && idleV!.v >= 0n) idle = Number(idleV!.v);
                 else return bad('a round\'s idle is a non-negative integer or #false', node);
                 round = { n: Number(nV!.v), idle };
+            } else if (kind.name === 'hibernate') {
+                const [, envV, idleV] = parts;
+                if (parts.length !== 3 || envV!.t !== 'env' || idleV!.t !== 'int' || idleV!.v < 0n) {
+                    return bad('a hibernate node is (hibernate env idle), with idle >= 0', node);
+                }
+                if (hibernate.some((h) => h.envV === envV)) return bad('a plan has one hibernate node per env', node);
+                hibernate.push({ envV: envV!, idle: Number(idleV!.v) });
             } else if (kind.name === 'inbox') {
                 for (const a of parts.slice(1)) {
                     if (a.t !== 'addr' || !this.mailboxes.has(a.id)) return bad('an inbox is (inbox address ...)', node);
@@ -983,7 +1049,7 @@ export class Runtime implements Handlers {
                 return bad(`unknown plan node: ${kind.name}`, node);
             }
         }
-        return { round, inboxes };
+        return { round, inboxes, hibernate };
     }
 
     private mailEvents(inboxes: readonly Addr[]): Value[] {

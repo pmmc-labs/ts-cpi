@@ -116,9 +116,10 @@ parked ones leave the process list. The causes are in the supervisor loop:
 
 Since then (Sep 28, 2026) the loop uses `plan::run`: the host runs the
 processes and waits until the CPI is needed, reporting only processes that
-ended or have been idle, and mail. A sleeping counter's mailbox is in the
-plan's inbox, so its first request wakes the CPI and nothing is polled. All
-three causes are gone; what remains is the metrics (`PERFORMANCE.md`).
+ended or have been idle, and mail. Counters sleep in the plan's hibernate
+node, which parks them and resumes each at its first request, so nothing is
+polled. All three causes are gone; what remains is the metrics
+(`PERFORMANCE.md`).
 
 **Backpressure works.** `overload` got 1672 immediate `503`s from the host
 and 328 answers, with a p50 of 5.5 ms.

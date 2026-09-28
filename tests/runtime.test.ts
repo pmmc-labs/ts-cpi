@@ -456,6 +456,79 @@ test('plan::run: a plan is a list of known nodes, at most one round, and the tim
     assert.equal(print(v), '(type-error type-error type-error type-error type-error type-error ())');
 });
 
+test('plan::run: a hibernate node parks a member idle in recv, and its first message resumes it where it was', async () => {
+    const v = await ok(`
+        (defun counter (n) (actor::recv) (counter (+ n 1)))
+        (defun main ()
+            (let env (environment::self))
+            (let box (mailbox::create #true 10))
+            (let p (process::spawn counter (list 0) env '(actor) box))
+            (let plan (list (list 'round 100 #false) (list 'hibernate env 1000)))
+            (let t0 (host::now))
+            (let r1 (plan::run plan 5000))
+            (let slept (- (host::now) t0))
+            (let s1 (process::state p))
+            (mailbox::send box :one)
+            (let r2 (plan::run plan 5000))
+            (let q (car (car r2)))
+            (let r3 (plan::run plan 500))
+            (list
+                (car (car r1)) (car (car (cdr (car r1)))) (eq? (car (cdr (car (cdr (car r1))))) box) (cdr r1) slept s1
+                q (car (car (cdr (car r2)))) (eq? (car (cdr (car (cdr (car r2))))) box)
+                r3 (process::checkpoint q) (process::state q)))
+    `);
+    assert.equal(print(v), '(#<pid 1> hibernated #true () 1000 (parked) #<pid 2> resumed #true () (1) (blocked recv))');
+});
+
+test('plan::run: hibernate leaves non-members to the round, which reports them idle', async () => {
+    const v = await ok(`
+        (defun waiter () (actor::recv))
+        (defun main ()
+            (let env (environment::self))
+            (let other (environment::define env 'unused 1))
+            (let box (mailbox::create #true 10))
+            (let member (process::spawn waiter () env '(actor) box))
+            (let outsider (process::spawn waiter () other '(actor) #false))
+            (let r (plan::run (list (list 'round 100 1000) (list 'hibernate env 1000)) 5000))
+            (list (map-first r) (map-what r)))
+        (defun map-first (xs) (if (nil? xs) () (cons (car (car xs)) (map-first (cdr xs)))))
+        (defun map-what (xs) (if (nil? xs) () (cons (car (car (cdr (car xs)))) (map-what (cdr xs)))))
+    `);
+    assert.equal(print(v), '((#<pid 2> #<pid 1>) (idle hibernated))');
+});
+
+test('plan::run: a member woken later in the same round is not parked', async () => {
+    const v = await ok(`
+        (defun waiter () (actor::recv) :got)
+        (defun sender (to) (actor::send to :hi) :sent)
+        (defun main ()
+            (let env (environment::self))
+            (let box (mailbox::create #true 10))
+            (let w (process::spawn waiter () env '(actor) box))
+            (process::run w 100)
+            (let s (process::spawn sender (list box) env '(actor) #false))
+            (let plan (list (list 'round 100 #false) (list 'hibernate env 0)))
+            (let r1 (plan::run plan #false))
+            (let r2 (plan::run plan #false))
+            (list r1 r2))
+    `);
+    assert.equal(print(v), '(((#<pid 2> (exited sent))) ((#<pid 1> (exited got))))');
+});
+
+test('plan::run: a hibernate node is (hibernate env idle), one per env', async () => {
+    const v = await ok(`
+        (defun main ()
+            (let env (environment::self))
+            (list
+                (catch (plan::run (list (list 'hibernate 5 100)) 0) e (error-tag e))
+                (catch (plan::run (list (list 'hibernate env -1)) 0) e (error-tag e))
+                (catch (plan::run (list (list 'hibernate env)) 0) e (error-tag e))
+                (catch (plan::run (list (list 'hibernate env 10) (list 'hibernate env 20)) 0) e (error-tag e))
+                (plan::run (list (list 'hibernate env 10)) 0)))
+    `);
+    assert.equal(print(v), '(type-error type-error type-error type-error ())');
+});
+
 test('process::run-ready: n must be a positive integer, and idle a non-negative integer or #false', async () => {
     const v = await ok(`
         (defun main ()

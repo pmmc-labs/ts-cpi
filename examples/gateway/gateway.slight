@@ -283,18 +283,18 @@
 ;              router, counters, hello, slow or (counter name address), and
 ;              charged the ticks already added to its endpoint's metrics
 ;   cold       hello workers in cold storage, as parked data
-;   asleep     counters asleep, each (name address parked)
+;   asleep     counters asleep, each (name address): the plan's hibernate
+;              node holds them
 ;   running    #false once the gateway has been told to stop
 ;   hello-max  the most hello workers there may be
 ;   events     what the CPI has done, newest first, each (seq time text)
 ;   metrics    see Metrics below
-;   plan       what the host runs (DESIGN-PLAN.md): the round, and the
-;              mailboxes whose mail wakes the CPI, which are its own, the
-;              UI's, and those of the counters asleep
+;   plan       what the host runs: see gateway-plan
 ;   inboxes    the CPI's and the UI's mailboxes
+;   counter-env the environment counters run in
 
-(defun state (procs inboxes)
-    (with-asleep (vector procs () () #true hello-max-default () (new-metrics) () inboxes) ()))
+(defun state (procs inboxes counter-env)
+    (with-asleep (vector procs () () #true hello-max-default () (new-metrics) () inboxes counter-env) ()))
 (defun st-procs (st) (vector-ref st 0))
 (defun st-cold (st) (vector-ref st 1))
 (defun st-asleep (st) (vector-ref st 2))
@@ -308,8 +308,15 @@
 ; The plan changes only when a counter falls asleep or wakes, so the host
 ; reads it again only then.
 (defun with-asleep (st asleep)
-    (vector-set (vector-set st 2 asleep) 7
-        (list (list 'round quota idle-ms) (cons 'inbox (append (vector-ref st 8) (map second asleep))))))
+    (vector-set (vector-set st 2 asleep) 7 (gateway-plan (vector-ref st 9) (vector-ref st 8) asleep)))
+
+; The plan the host runs (DESIGN-PLAN.md): a round for every process; a
+; hibernate node, which parks a counter idle for idle-ms and resumes it at
+; its first request; and the mailboxes whose mail wakes the CPI, its own and
+; the UI's. The counters asleep are the hibernate node's, not the plan's, so
+; the plan stays the same as they come and go.
+(defun gateway-plan (counter-env inboxes asleep)
+    (list (list 'round quota idle-ms) (list 'hibernate counter-env idle-ms) (cons 'inbox inboxes)))
 (defun stop (st) (vector-set st 3 #false))
 (defun with-metrics (st m) (vector-set st 6 m))
 
@@ -629,11 +636,10 @@
     (let what (second event))
     (let p (find-proc (st-procs st) (car event)))
     (cond
-        ; The CPI reads its own mailboxes every time it is woken; mail for a
-        ; counter asleep wakes it.
-        ((eq? (car what) :mail)
-            (if (member? (car event) (vector-ref st 8)) st (wake-counter w st (car event))))
+        ((eq? (car what) :mail) (on-mail w st (car event)))
+        ((eq? (car what) :resumed) (counter-awake st (find-asleep (st-asleep st) (second what)) (car event)))
         ((not p) st)
+        ((eq? (car what) :hibernated) (counter-asleep st p (list (second (proc-kind p)) (second what))))
         ((eq? (car what) :idle) (sleep-idle st p))
         ((or (eq? (car what) :exited) (eq? (car what) :failed))
             (log-event (remove-proc (charge st p) (proc-pid p))
@@ -703,16 +709,19 @@
     (log-event added
         (string-join " " (list "hello +1 from" (if (nil? cold) "the template:" "cold storage:") (stats added)))))
 
-; A counter asleep wakes when the plan reports mail in its mailbox, which is
-; in the plan's inbox while it sleeps.
-(defun wake-counter (w st to)
-    (let a (find-asleep (st-asleep st) to))
-    (if a
-        (do
-            (let pid (process::unpark (third a) (world-counter-env w)))
-            (let awake (with-asleep st (fold (lambda (acc b) (if (eq? b a) acc (cons b acc))) () (reverse (st-asleep st)))))
-            (add-proc (log-event awake (string-append "counter " (car a) " awake")) pid (list 'counter (car a) (second a))))
-        st))
+; The CPI reads its own mailboxes every time it is woken, so mail there
+; needs nothing more.
+(defun on-mail (w st to) st)
+
+; A counter `a` from asleep is running again as `pid`.
+(defun counter-awake (st a pid)
+    (let awake (with-asleep st (fold (lambda (acc b) (if (eq? b a) acc (cons b acc))) () (reverse (st-asleep st)))))
+    (add-proc (log-event awake (string-append "counter " (car a) " awake")) pid (list 'counter (car a) (second a))))
+
+; The counter process `p` is asleep, as `a` in asleep.
+(defun counter-asleep (st p a)
+    (log-event (with-asleep (remove-proc (charge st p) (proc-pid p)) (append (st-asleep st) (list a)))
+        (string-append "counter " (car a) " asleep")))
 
 (defun find-asleep (asleep to)
     (cond
@@ -721,20 +730,23 @@
         (#true (find-asleep (cdr asleep) to))))
 
 ; ---------------------------------------------------------------------------
-; Sleeping: a hello worker beyond the minimum, or any counter, reported idle
-; by the round, is parked.
+; Sleeping: a hello worker beyond the minimum, reported idle by the round, is
+; parked into cold storage. Counters sleep in the plan's hibernate node.
+; The round reports a process idle at its turn, and a message sent later in
+; the round may have woken it since, so it is parked only if it still waits.
 
 (defun sleep-idle (st p)
     (cond
-        ((and (eq? (proc-kind p) 'hello) (> (count-kind (st-procs st) 'hello) hello-min))
+        ((not (eq? (second (process::state (proc-pid p))) :recv)) st)
+        ((eq? (proc-kind p) 'hello) (sleep-hello st p))
+        (#true st)))
+
+(defun sleep-hello (st p)
+    (if (> (count-kind (st-procs st) 'hello) hello-min)
+        (do
             (let parked (with-cold (remove-proc (charge st p) (proc-pid p)) (cons (process::park (proc-pid p)) (st-cold st))))
             (log-event parked (string-append "hello -1 to cold storage: " (stats parked))))
-        ((pair? (proc-kind p))
-            (let kind (proc-kind p))
-            (let asleep (list (second kind) (third kind) (process::park (proc-pid p))))
-            (log-event (with-asleep (remove-proc (charge st p) (proc-pid p)) (append (st-asleep st) (list asleep)))
-                (string-append "counter " (second kind) " asleep")))
-        (#true st)))
+        st))
 
 ; ---------------------------------------------------------------------------
 ; Starting, and the supervisor loop.
@@ -770,7 +782,7 @@
     (let router (spawn-on (process-env (router-code)) 'router (list routes) router-box))
     (let counters (spawn-on (process-env (counters-code)) 'counters (list inbox ()) counters-box))
     (let slow (spawn-on (process-env (slow-code)) 'slow-worker () slow-box))
-    (let st (log-event (state (list (list router 'router 0) (list counters 'counters 0) (list slow 'slow 0)) (cons inbox (cons log-box ui-inboxes)))
+    (let st (log-event (state (list (list router 'router 0) (list counters 'counters 0) (list slow 'slow 0)) (cons inbox (cons log-box ui-inboxes)) (world-counter-env w))
         (string-append "hello template warmed up in " (value->string (second warm)) " turns")))
     (http::listen gateway-port router-box request-timeout)
     (http::subscribe-log log-box)
@@ -782,8 +794,8 @@
 ; what the last plan::run returned.
 ;
 ; The host runs the plan until the CPI is needed: a process ended or went
-; idle, mail reached the CPI's inbox, its served log, the UI or a counter
-; asleep, or `wait` passed. The CPI then does its own work, lets the UI step, and hands the
+; idle, a counter fell asleep or woke, mail reached the CPI's inbox, its
+; served log or the UI, or `wait` passed. The CPI then does its own work, lets the UI step, and hands the
 ; plan back. It times each part with host::now: its own work, the UI, and
 ; the plan, which is running processes and waiting together.
 (defun gateway (w st ui events)

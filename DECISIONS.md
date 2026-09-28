@@ -574,6 +574,41 @@ Found while building:
 1. **The early return does not cover mail for a parked receiver.** A request for a sleeping counter reaches its mailbox from the counters process inside a round, not as an external event, so no wait ends early for it. Before counters' mailboxes were put in the inbox, such a request waited for the next timeout: 400 ms in the test scenario.
 2. **Whole plans cost the size of the plan on every edit, in interpreted code.** With 500 counters asleep, each counter falling asleep rebuilds a 600-address inbox list in the CPI, and the host reads it again. Sleeping counters are voices, not the desk's setup: they belong in a watcher node's own state (`DESIGN-PLAN.md`, step 2), not in the plan.
 
+### The hibernate node (2026-09-28)
+
+*Status.* Agreed and implemented 2026-09-28. The host unparks, as DESIGN-001's mailbox watcher does ("the mailbox watcher resumes the actor, and the resume policy picks an environment"). A node that keeps state between calls has as its reference the CPI code it replaces, not a drop-in function (option B). Tests in `tests/runtime.test.ts` ("hibernate") and `tests/gateway.test.ts` ("hibernate: the gateway runs exactly as it does …").
+
+*Motivation.* Step 2 of `DESIGN-PLAN.md`. After `plan::run`, the gateway put a sleeping counter's mailbox in the plan's inbox, so every counter falling asleep or waking rebuilt the plan in interpreted code, and the CPI did the parking and unparking itself.
+
+*How a stateful node is checked.* `run-ready` and `plan::run` are stateless between calls, so their references are drop-in functions. A hibernate node remembers its sleepers, and CPI code can remember nothing between calls except what it passes along. The options were a reference that threads its state (`(ref plan timeout state)` returning `(events state)`), which makes the program calling it carry the state, or **the CPI code the node replaces** (chosen): the test runs the example both ways and compares the exact trace.
+
+**Section 10.6, Plans.** Add a node:
+
+> | `(hibernate env idle)` | A process running with env ref `env`, receiving on a durable mailbox, that has waited in `(recv)` for `idle` milliseconds is parked at the end of the round, if it is still waiting then, and kept by the node: `(pid (hibernated addr))`. The first message to `addr` unparks it with `env`, as a new process, reported as `(new-pid (resumed addr))` with the inbox's mail. One node per env ref. The round never reports a member idle. |
+
+and to the reference behaviour: "A wait inside `plan::run` is capped at the smallest idle threshold in the plan."
+
+The reference is `tests/programs/gateway-hibernate-reference.slight`: the gateway's `gateway-plan`, `on-mail` and `sleep-idle` as they were before the node, parking a counter reported `(idle)` and unparking it on mail in the inbox.
+
+Rationale:
+
+- **Voices in the node, not the plan.** The plan names the members by their env ref, so it does not change as counters sleep and wake, and the CPI builds nothing per counter.
+- **The host resumes.** A sleeping actor is woken by the message that needs it, with no trip through the CPI; the CPI hears of it as an event, to keep its books.
+- **Durable mailboxes only.** A parked receiver does not keep a non-durable mailbox open (section 10.2), so parking one would lose its messages; such a process is left to the round.
+- **Parking at the end of the round.** A message sent later in the round may wake a member reported idle at its turn; parking then would fail. The gateway's CPI code had the same race (`process::park` on a woken process throws `bad-state`), fixed by checking that the process still waits.
+
+Implementation (ts-cpi):
+
+- `runRound` collects members idle long enough and parks those still in `recv` after the round; the parked data, env ref and address are kept in `hibernated`, in the order they were parked. A message queued for a hibernated address (in `deliverNow` or `flushOutbox`) marks it; `plan::run` unparks marked ones in parked order where it reports inbox mail.
+- The gateway: counters asleep are `(name address)`; `handle-event` keeps its books on `hibernated` and `resumed`; `gateway-plan`, `on-mail` and `sleep-idle` are what the reference replaces.
+- `settle` (inside every wait) found the receivers a delivery woke by checking every process waiting in `recv`; it now records them as deliveries wake them. It cost 10% of the CPU with 150 counters awake.
+- Tests: park and resume, with the continuation intact (the checkpoint shows the count went on); non-members reported idle by the round; a member woken later in the round not parked; malformed nodes. The exact-trace test catches parking at twice the idle time and resuming after a wait instead of at once.
+
+Found while building:
+
+1. **The CPI's lists are now the cost of each event.** Each hibernate event walks the process list twice (`find-proc`, `remove-proc`) and appends to the list of sleepers: about 25,000 ticks with 700 counters. Per event, not per round, but it grows with the processes. A new counter costs 5.6 ms with one client (0.6 ms for an existing one), and the counters endpoint's own `find-child` is linear too. This is the prompt's question about data structures in CPI code.
+2. **Every round walks every live process** to find the ready ones and check idle times, in the host: cheap per process, but it grows with blocked processes, as `settle` did.
+
 ## Spec issues
 
 - A library that the CPI and its processes both use cannot be a role, because the CPI's environment comes from its files and a role's procedures resolve their globals through the environment of whoever runs them. Processes that need such a library get a role composed onto `environment::self`: they can see every CPI definition, and the host actions the library uses are neither declared nor checked by `environment::resolve`. Two ways to close it, both spec changes: read each loaded file as a role (open question 5 above), so the CPI's environment is a composition of library roles it can also give to processes; or add a projection, `(environment::select e names)`, so a process takes exactly the names its role requires. Found by migrating the examples (the CPI-Roles field notes). A plain projection was tried on Sep 27, 2026 and reverted (commit `d9d1cbf` and its revert): because library procedures call each other by name, every role had to list what its library calls reach in turn (18 names for version 08's universe), and a forgotten one surfaced only at run time, once as a supervisor restarting a failing worker forever.
