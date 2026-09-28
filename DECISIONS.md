@@ -642,6 +642,35 @@ Found while building:
 1. **The hello pool rarely scales now.** The CPI adds a worker only when it is woken while requests wait, and nothing wakes it during a burst: in the test's burst one worker drained six requests. On one thread more workers add no throughput, so it matters for the pool node (step 4) and for parallel schedulers.
 2. **The `plan::run` trace test runs without the monitor node,** which its reference program does not know; the node is checked against its own reference instead.
 
+### The pool node (2026-09-28)
+
+*Status.* Implemented 2026-09-28 as step 4 of `DESIGN-PLAN.md`, taken before step 3b because after 3a the CPI, woken about once a second, barely scaled the hello pool. Checked as the hibernate node was: against the CPI code it replaces, here a whole supervisor loop run on a small scenario. Tests in `tests/pool.test.ts`; `tests/gateway.test.ts` updated.
+
+**Section 10.6, Plans.** Add a node:
+
+> | `(pool name template env min max idle)` | Workers unparked from the parked data `template` with env ref `env`, receiving on the template's address. When the node is installed, workers are added from the template until there are `min`; `plan::run` returns their events before running anything. After each round: a member that has waited in `(recv)` for `idle` milliseconds, considered once per wait and still waiting, is parked into the pool's cold storage while there are more than `min`, reported as `(pid (left name))`; then, if the template's mailbox holds a message and there are fewer than `max`, one worker is added, from cold storage (the most recently parked first) or else from the template, reported as `(pid (joined name from))` where `from` is `cold` or `template`. A member that ends leaves the pool. The round never reports a member idle. One node per name; its members and cold storage outlive plan edits, so `max` can be changed by giving a new plan. |
+
+and to the reference behaviour: waits inside `plan::run` are also capped at each pool's idle threshold.
+
+The reference is `tests/programs/pool-reference.slight`: `(ref-run quota template env min max idle deadline)`, a CPI loop over `process::run-ready` that keeps the members and cold storage in its arguments and prints each event at the time `plan::run` would return it.
+
+Rationale:
+
+- **Scaling is per round again,** as it was when the CPI ran every round, without the CPI running every round: in the gateway test's burst the pool again grows to three workers, and every log line, answer and monitor row that depended on it is back to its original value.
+- **The pool is the node's.** Its members and cold storage live in the host, so the plan does not change as workers come and go; the CPI keeps a count of each for its stats.
+- **Considered once per wait,** like the round's own `(idle)`: with one shared queue a member left at `min` cannot be reconsidered without having run, because a backlog would wake it first, so this only makes the rule easy to state.
+
+Implementation (ts-cpi):
+
+- `Runtime` keeps pools by name, each with its members (a set of process entries) and cold storage (parked data, newest first), and `poolOf` from process to pool. `runRound` collects members idle long enough; `tendPools` parks them and adds a worker after the hibernate node has parked its members; `setStatus` drops a member that ends or is parked by anyone. Installing a plan fills pools to their minimum and returns those events first.
+- The gateway: its hello pool is `(pool "hello" template hello-env hello-min hello-max idle-ms)`; the monitor's `+` and `-` keys change `hello-max` and build the plan again; `scale-hello`, `add-hello` and `sleep-hello` are gone; `cold` is a count kept from `joined` and `left`.
+- Tests: the node and the reference loop run a scenario (the pool filled, grown under a burst, parked when idle, taken back from cold storage twice, workers counting their work so a worker back from cold storage shows which one it was) and must print the same events at the same times and do the same work in the same order; malformed pool nodes. Of four mutations, growing by two a round, parking below `min` and taking cold storage oldest first were caught; considering idle members every round cannot be observed, for the reason above.
+
+Found while building:
+
+1. **Within a round, hibernate members are parked before pools are tended,** so in the gateway test "counter ada asleep" now comes before "hello -1": both happen at 2150 ms.
+2. **An expired reply is answered at the host's next wait,** not at its deadline, on the virtual clock: with no hello pool, the `plan::run` trace test's first hello request times out at 2100 ms and is answered 504 at 2150 ms, when the wait capped by the idle threshold ends.
+
 ## Spec issues
 
 - A library that the CPI and its processes both use cannot be a role, because the CPI's environment comes from its files and a role's procedures resolve their globals through the environment of whoever runs them. Processes that need such a library get a role composed onto `environment::self`: they can see every CPI definition, and the host actions the library uses are neither declared nor checked by `environment::resolve`. Two ways to close it, both spec changes: read each loaded file as a role (open question 5 above), so the CPI's environment is a composition of library roles it can also give to processes; or add a projection, `(environment::select e names)`, so a process takes exactly the names its role requires. Found by migrating the examples (the CPI-Roles field notes). A plain projection was tried on Sep 27, 2026 and reverted (commit `d9d1cbf` and its revert): because library procedures call each other by name, every role had to list what its library calls reach in turn (18 names for version 08's universe), and a forgotten one surfaced only at run time, once as a supervisor restarting a failing worker forever.

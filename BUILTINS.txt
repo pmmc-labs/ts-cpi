@@ -332,6 +332,13 @@ faux actor: the host takes each message sent to self as it arrives
 new second itself, and sends to a summary each second:
 (metrics second status endpoints). What each number means is written as
 an actor in tests/programs/monitor-reference.slight.
+(pool name template env min max idle) keeps workers unparked from the
+parked data template, with env, on the template's address: at least min
+(filled when the node is installed), one more each round while that queue
+has messages and there are fewer than max, from cold storage first; a
+member that has waited in recv for idle ms is parked into cold storage
+while there are more than min. Events: (pid (joined name template|cold)),
+(pid (left name)).
 
 (plan::run plan timeout)
     -> the events the CPI must act on, after running the plan until there

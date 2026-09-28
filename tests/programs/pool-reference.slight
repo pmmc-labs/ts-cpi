@@ -1,0 +1,84 @@
+; The reference for the plan's pool node (DECISIONS.md, Spec changes): a
+; supervisor loop in CPI code that runs rounds and keeps a pool of workers on
+; one queue, as the host does for (pool name template env min max idle).
+; tests/pool.test.ts runs a scenario under it and under plan::run with the
+; node, and requires the same events at the same times and the same work
+; done in the same order.
+;
+; (ref-run quota template env min max idle deadline) runs until `deadline`
+; on host::now, printing each event as plan::run would return it: first the
+; round's own events, then members parked into cold storage, then a worker
+; added. The pool's state is its members, oldest first, and its cold
+; storage, newest first.
+
+(defun ref-run (quota template env min max idle deadline)
+    (let filled (ref-fill template env min () ()))
+    (ref-print (car (cdr (cdr filled))))
+    (ref-loop quota template env min max idle deadline (car filled) (car (cdr filled))))
+
+; Adds workers until there are `min`, from the template: (members cold events).
+(defun ref-fill (template env min members cold)
+    (if (>= (ref-length members) min)
+        (list members cold ())
+        (do
+            (let joined (ref-join template env members cold))
+            (let rest (ref-fill template env min (car joined) (car (cdr joined))))
+            (list (car rest) (car (cdr rest)) (append (car (cdr (cdr joined))) (car (cdr (cdr rest))))))))
+
+; One worker more, from cold storage if there is one: (members cold events).
+(defun ref-join (template env members cold)
+    (let from (if (nil? cold) 'template 'cold))
+    (let pid (process::unpark (if (nil? cold) template (car cold)) env))
+    (list (append members (list pid)) (if (nil? cold) () (cdr cold)) (list (list pid (list 'joined "w" from)))))
+
+(defun ref-loop (quota template env min max idle deadline members cold)
+    (when (< (host::now) deadline)
+        (do
+            (let r (process::run-ready quota idle))
+            ; The round reports every process idle; members are the pool's.
+            (let own (ref-filter (lambda (e) (not (and (eq? (car (car (cdr e))) :idle) (ref-member? (car e) members)))) (car r)))
+            (let idle-members (ref-filter (lambda (e) (and (eq? (car (car (cdr e))) :idle) (ref-member? (car e) members))) (car r)))
+            (let parked (ref-park idle-members min members cold))
+            (let queue (car (cdr (cdr (cdr (cdr template))))))
+            (let joined
+                (if (and (> (mailbox::size queue) 0) (< (ref-length (car parked)) max))
+                    (ref-join template env (car parked) (car (cdr parked)))
+                    (list (car parked) (car (cdr parked)) ())))
+            (let events (append own (append (car (cdr (cdr parked))) (car (cdr (cdr joined))))))
+            (ref-print events)
+            (cond
+                ((not (nil? events)) #true)
+                ((>= (host::now) deadline) #true)
+                ((> (car (cdr r)) 0) (host::wait 0))
+                (#true (host::wait (ref-min idle (- deadline (host::now))))))
+            (ref-loop quota template env min max idle deadline (car joined) (car (cdr joined))))))
+
+; Parks each idle member still waiting in recv, while there are more than
+; `min`, into cold storage: (members cold events).
+(defun ref-park (idle-events min members cold)
+    (cond
+        ((nil? idle-events) (list members cold ()))
+        ((and (> (ref-length members) min) (eq? (car (cdr (process::state (car (car idle-events))))) :recv))
+            (let pid (car (car idle-events)))
+            (let data (process::park pid))
+            (let rest (ref-park (cdr idle-events) min (ref-filter (lambda (m) (not (eq? m pid))) members) (cons data cold)))
+            (list (car rest) (car (cdr rest)) (cons (list pid (list 'left "w")) (car (cdr (cdr rest))))))
+        (#true (ref-park (cdr idle-events) min members cold))))
+
+(defun ref-print (events)
+    (when (not (nil? events))
+        (IO::print (host::now) (car events))
+        (ref-print (cdr events))))
+
+(defun ref-filter (keep? xs)
+    (cond
+        ((nil? xs) ())
+        ((keep? (car xs)) (cons (car xs) (ref-filter keep? (cdr xs))))
+        (#true (ref-filter keep? (cdr xs)))))
+
+(defun ref-member? (x xs)
+    (and (not (nil? xs)) (or (eq? x (car xs)) (ref-member? x (cdr xs)))))
+
+(defun ref-length (xs) (if (nil? xs) 0 (+ 1 (ref-length (cdr xs)))))
+
+(defun ref-min (a b) (if (< a b) a b))

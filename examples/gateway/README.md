@@ -5,7 +5,7 @@ actor forwards each request to the endpoint its first path segment names:
 
 | Path | Endpoint |
 | --- | --- |
-| `/hello/<name>` | A pool of workers on one shared queue, unparked from a pre-warmed template, grown while requests wait and parked into cold storage when idle. |
+| `/hello/<name>` | A pool of workers on one shared queue, unparked from a pre-warmed template, grown while requests wait and parked into cold storage when idle: the plan's `pool` node. |
 | `/counter/<name>` | One counter per name, made the first time the name is used, parked when idle and woken when a request waits in its durable mailbox. |
 | `/counter` | The names counted so far. |
 | `/slow` | About half a second of ticks per request, on one worker. |
@@ -36,23 +36,23 @@ clock.
 │ requests       9 · 2xx       9 · 4xx     0 · 503     0 · 504     0 · 5xx     0 · gone     0                          │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  endpoint  workers                queue  req/s  wait p95  work p95   ticks/s req/s, 20 s          p95, 20 s
- hello     ○◌ 1/5                     0      1      <1ms      <1ms       307                   █▂                   ▁▁
+ hello     ○◌◌ 1/5                    0      1      <1ms      <1ms       307                   █▂                   ▁▁
  counter   ● 0  ○ 0  ◌ 2              0      0         -         -         0                   █                    ▁
  slow      ○                          0      0         -         -         0
  router    ○                          0      0         -         -       120
  system    the CPI                    0      0         -         -         0
  other                                0      0         -         -         0
- total     ● 0  ○ 4  ◌ 3              0      1      <1ms      <1ms       427                   █▁                   ▁▁
+ total     ● 0  ○ 4  ◌ 4              0      1      <1ms      <1ms       427                   █▁                   ▁▁
 
  since start requests                queue                req/s              wait ms              work ms
                         min     avg    max   min     avg    max   min     avg    max   min     avg    max
- hello              7     0     0.5      3     0     2.3      6     0     0.0      0     0     0.0      0
+ hello              7     0     0.1      2     0     2.3      6     0     0.0      0     0     0.0      0
  counter            2     0     0.0      0     0     0.6      2     0     0.0      0     0     0.0      0
  slow               0     0     0.0      0     0     0.0      0     -       -      -     -       -      -
- router             0     0     0.6      6     0     0.0      0     -       -      -     -       -      -
+ router             0     0     0.7      6     0     0.0      0     -       -      -     -       -      -
  system             0     0     0.2      1     0     0.0      0     -       -      -     -       -      -
  other              0     0     0.0      0     0     0.0      0     -       -      -     -       -      -
- total              9     0     1.4      6     0     3.0      8     0     0.0      0     0     0.0      0
+ total              9     0     1.1      6     0     3.0      8     0     0.0      0     0     0.0      0
 ```
 
 (From `tests/gateway.test.ts`, on the virtual clock, where no time passes

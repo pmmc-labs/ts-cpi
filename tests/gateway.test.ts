@@ -53,14 +53,19 @@ test('gateway: scales hello workers, makes counters on first use, parks the idle
         '[gateway] hello template warmed up in 31 turns',
         '[gateway] listening on port 8080',
         '[gateway] hello +1 from the template: hello 1 cold 0 counters 0 asleep 0',
-        // The CPI adds a worker only when it is woken while requests wait,
-        // and nothing wakes it during the burst: the one worker drains it.
+        // The plan's pool adds a worker each round while requests wait.
+        '[gateway] hello +1 from the template: hello 2 cold 0 counters 0 asleep 0',
+        '[gateway] hello +1 from the template: hello 3 cold 0 counters 0 asleep 0',
         '[gateway] counter ada made',
         '[gateway] counter bob made',
+        // Hello workers and counters go idle in the same round; the host
+        // parks hibernate members before it tends the pools.
         '[gateway] counter ada asleep',
         '[gateway] counter bob asleep',
+        '[gateway] hello -1 to cold storage: hello 2 cold 1 counters 0 asleep 2',
+        '[gateway] hello -1 to cold storage: hello 1 cold 2 counters 0 asleep 2',
         '[gateway] counter ada awake',
-        '[gateway] stopped: hello 1 cold 0 counters 1 asleep 1',
+        '[gateway] stopped: hello 1 cold 2 counters 1 asleep 1',
     ]);
 
     // Each request's answer, in request order.
@@ -74,15 +79,15 @@ test('gateway: scales hello workers, makes counters on first use, parks the idle
         '200 hello, di',
         '200 hello, ed',
         '200 hello, flo',
-        '200 hello 1 cold 0 counters 0 asleep 0',
+        '200 hello 3 cold 0 counters 0 asleep 0',
         '200 ada 1',
         '200 ada 2',
         '200 bob 1',
         '200 ada bob',
-        '200 hello 1 cold 0 counters 0 asleep 2',
+        '200 hello 1 cold 2 counters 0 asleep 2',
         '200 ada 3',
         '404 no such endpoint',
-        '200 hello 1 cold 0 counters 1 asleep 1',
+        '200 hello 1 cold 2 counters 1 asleep 1',
         [
             '200 requests 15 2xx 14 4xx 1 503 0 504 0 5xx 0 gone 0',
             'hello total 6 last-second 0 wait-p95 - work-p95 - total-p95 - ticks 0',
@@ -122,29 +127,30 @@ test('gateway monitor: draws each endpoint and the whole gateway, the last secon
 
     // A frame only when there is something new: one at the start, one for
     // each of the monitor's summaries at seconds 1, 2 and 3, and one for each
-    // event (the + key, two counters made, the last before quitting).
-    assert.equal(tui.frames.length, 8);
+    // time the CPI was woken with events to log (the pool filled to its
+    // minimum, the + key, two workers added, two counters made, two parked).
+    assert.equal(tui.frames.length, 11);
     const last = tui.frames[tui.frames.length - 1]!.split('\n').map((l) => l.trimEnd());
     const has = (text: string) => assert.ok(last.some((l) => l.includes(text)), `no line with ${JSON.stringify(text)} in\n${last.join('\n')}`);
     has('gateway :8080 · up 0:03 · hello max  5');
     has('requests       9 · 2xx       9 · 4xx     0 · 503     0 · 504     0 · 5xx     0 · gone     0');
     // One mark per hello worker: one idle, two parked; counters as counts.
     // The host draws the sparklines: 1 of 6 requests fills 2 of 8 steps.
-    has(' hello     ○◌ 1/5                     0      1      <1ms      <1ms       307                   █▂                   ▁▁');
+    has(' hello     ○◌◌ 1/5                    0      1      <1ms      <1ms       307                   █▂                   ▁▁');
     has(' counter   ● 0  ○ 0  ◌ 2              0      0         -         -         0                   █                    ▁');
-    has(' total     ● 0  ○ 4  ◌ 3              0      1      <1ms      <1ms       427                   █▁                   ▁▁');
+    has(' total     ● 0  ○ 4  ◌ 4              0      1      <1ms      <1ms       427                   █▁                   ▁▁');
     // Since the start: 7 hello requests over 3 seconds, 6 in the busiest.
     // The monitor samples queues after every round.
-    has(' hello              7     0     0.5      3     0     2.3      6     0     0.0      0     0     0.0      0');
-    has(' total              9     0     1.4      6     0     3.0      8     0     0.0      0     0     0.0      0');
+    has(' hello              7     0     0.1      2     0     2.3      6     0     0.0      0     0     0.0      0');
+    has(' total              9     0     1.1      6     0     3.0      8     0     0.0      0     0     0.0      0');
     assert.ok(!last.some((l) => l.includes('asleep')), 'events are not shown');
 
     // Events go to the dead-letter queue, the key's among them, and only
     // the final line is printed.
     const events = rt.deadLetters.map((d) => print(d.msg));
-    assert.equal(events.length, 10);
+    assert.equal(events.length, 12);
     assert.ok(events.some((e) => e.includes('"hello max 5"')), events.join('\n'));
-    assert.deepEqual(output, ['[gateway] stopped: hello 1 cold 1 counters 0 asleep 2']);
+    assert.deepEqual(output, ['[gateway] stopped: hello 1 cold 2 counters 0 asleep 2']);
 });
 
 // DESIGN-PLAN.md, rule 1: each host node is indistinguishable from its
@@ -212,9 +218,10 @@ async function traceGateway(opts: { planReference: boolean; hibernateReference: 
         env = loadSource(readFileSync(hibernateReference, 'utf-8'), hibernateReference, env);
     }
     if (opts.monitor === false) {
-        // An inbox node naming no mailbox: the plan without the monitor.
-        source = withoutDefuns(source, ['monitor-node']);
-        env = loadSource("(defun monitor-node (w envs) (list 'inbox))", 'test', env);
+        // An inbox node naming no mailbox: the plan without the monitor and
+        // the hello pool, so hello requests wait until they time out.
+        source = withoutDefuns(source, ['monitor-node', 'hello-pool']);
+        env = loadSource("(defun monitor-node (w envs) (list 'inbox)) (defun hello-pool (st) (list 'inbox))", 'test', env);
     }
     env = loadSource(source, gateway, env);
     env = loadSource(readFileSync(plain, 'utf-8'), plain, env);
@@ -229,13 +236,17 @@ async function traceGateway(opts: { planReference: boolean; hibernateReference: 
 test('plan::run: the gateway runs exactly as it does under the reference program', async () => {
     // The reference program knows rounds and inboxes, so both runs use the
     // gateway's CPI code for sleeping counters, and neither has the monitor
-    // node, which tests/monitor.test.ts checks against its own reference.
+    // or the pool node, which tests/monitor.test.ts and tests/pool.test.ts
+    // check against their own references.
     const builtin = await traceGateway({ planReference: false, hibernateReference: true, monitor: false });
     const byReference = await traceGateway({ planReference: true, hibernateReference: true, monitor: false });
     assert.deepEqual(builtin, byReference);
     assert.ok(builtin.output.some((l) => l.includes('counter ada asleep')), builtin.output.join('\n'));
     assert.ok(builtin.answers.some((a) => a.endsWith('200 slow, done')), builtin.answers.join('\n'));
     assert.ok(builtin.answers.includes('at 3250: 200 ada 2'), builtin.answers.join('\n'));
+    // Without a pool, hello requests expire: answered 504 at the host's
+    // first wait after their 2 s deadline (2100), which ends at 2150.
+    assert.ok(builtin.answers[0] === 'at 2150: 504 ', builtin.answers.join('\n'));
 });
 
 test('hibernate: the gateway runs exactly as it does with counters put to sleep by CPI code', async () => {

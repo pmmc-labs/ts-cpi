@@ -241,7 +241,7 @@
         ((eq? name "hello")
             (let hello (of-kind (st-procs st) 'hello))
             (let ready (ready-count hello))
-            (append (dots ready (- (length hello) ready) (length (st-cold st)))
+            (append (dots ready (- (length hello) ready) (st-cold st))
                 (list (string-append " " (value->string (length hello)) "/" (value->string (st-hello-max st))))))
         ((eq? name "counter")
             (let procs (counter-procs (st-procs st)))
@@ -252,7 +252,7 @@
         ((eq? name "system") (dim "the CPI"))
         ((eq? name "total")
             (let ready (ready-count (st-procs st)))
-            (counts ready (- (length (st-procs st)) ready) (+ (length (st-cold st)) (length (st-asleep st)))))
+            (counts ready (- (length (st-procs st)) ready) (+ (st-cold st) (length (st-asleep st)))))
         (#true "")))
 
 (defun kind-dots (st kind)

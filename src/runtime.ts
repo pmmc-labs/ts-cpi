@@ -33,6 +33,10 @@ import { NAMESPACES } from './builtins.ts';
 const IDLE = list(sym('idle'));
 const MAIL = list(sym('mail'));
 const HIBERNATED = sym('hibernated');
+const JOINED = sym('joined');
+const LEFT = sym('left');
+const COLD = sym('cold');
+const TEMPLATE = sym('template');
 const RESUMED = sym('resumed');
 const V = (v: Value): ActionResult => ({ kind: 'value', v });
 const T = (tag: string, message: string, payload: Value = NIL): ActionResult =>
@@ -207,12 +211,27 @@ type MonitorNode = {
     readonly ticks: readonly (readonly [string, readonly Value[]])[];
     readonly queues: readonly (readonly [string, Addr])[];
 };
+// A pool node: workers unparked from `template` with `env`, receiving on
+// the template's address, between `min` and `max` of them.
+type PoolNode = {
+    readonly name: string;
+    readonly template: Value;
+    readonly envV: Value;
+    readonly min: number;
+    readonly max: number;
+    readonly idle: number;
+    readonly queue: Addr;
+};
 type Plan = {
     readonly round: { readonly n: number; readonly idle: number | null } | null;
     readonly inboxes: readonly Addr[];
     readonly hibernate: readonly Hibernate[];
     readonly monitors: readonly MonitorNode[];
+    readonly pools: readonly PoolNode[];
 };
+// A pool as the host keeps it, by name: its members, oldest first, and its
+// cold storage, parked workers newest first.
+type Pool = { node: PoolNode; readonly members: Set<ProcEntry>; readonly cold: Value[] };
 
 export type RuntimeOptions = {
     // Where `IO::print` lines go while no TUI is open.
@@ -273,7 +292,12 @@ export class Runtime implements Handlers {
     // The last plan plan::run was given, and what it says: a plan is only
     // read again when the CPI passes a different value.
     private planValue: Value | null = null;
-    private plan: Plan = { round: null, inboxes: [], hibernate: [], monitors: [] };
+    private plan: Plan = { round: null, inboxes: [], hibernate: [], monitors: [], pools: [] };
+    private readonly pools = new Map<string, Pool>();
+    private readonly poolOf = new Map<ProcEntry, Pool>();
+    // Events from installing a plan (a pool filled to its minimum), returned
+    // by plan::run before it runs anything.
+    private installEvents: Value[] = [];
     // Installed monitor nodes, by their address: the aggregate, the node,
     // and ticks used since the last second, by row.
     private readonly monitors = new Map<string, { monitor: Monitor; node: MonitorNode; ticks: Map<string, number> }>();
@@ -433,6 +457,10 @@ export class Runtime implements Handlers {
         if (before === 'blocked-join' && entry.joinTarget !== undefined) this.joinWaiters.get(entry.joinTarget)?.delete(entry);
         if (before === 'blocked-host') this.sleepers.delete(entry);
         entry.status = status;
+        if ((status === 'ended' || status === 'parked') && this.poolOf.size > 0) {
+            this.poolOf.get(entry)?.members.delete(entry);
+            this.poolOf.delete(entry);
+        }
         if (status === 'ended' || status === 'parked') {
             this.live.delete(entry);
             this.mailboxes.get(entry.addr.id)?.receivers.delete(entry);
@@ -620,6 +648,7 @@ export class Runtime implements Handlers {
         const now = this.now();
         const events: Value[] = [];
         const sleepy: { entry: ProcEntry; node: Hibernate }[] = [];
+        const spare: ProcEntry[] = [];
         for (const entry of this.live) {
             if (entry.status === 'ready') {
                 const before = entry.ticks;
@@ -631,8 +660,15 @@ export class Runtime implements Handlers {
                     events.push(list(pid(entry.pid), stop));
                 }
             } else if (entry.status === 'blocked-recv') {
+                const pool = this.poolOf.size === 0 ? undefined : this.poolOf.get(entry);
                 const node = hibernate.length === 0 ? undefined : this.hibernateNodeOf(entry, hibernate);
-                if (node !== undefined) {
+                if (pool !== undefined) {
+                    // Considered once per wait, as the round's own idle report is.
+                    if (!entry.idleReported && now - entry.recvSince! >= pool.node.idle) {
+                        entry.idleReported = true;
+                        spare.push(entry);
+                    }
+                } else if (node !== undefined) {
                     if (now - entry.recvSince! >= node.idle) sleepy.push({ entry, node });
                 } else if (idle !== null && !entry.idleReported && now - entry.recvSince! >= idle) {
                     entry.idleReported = true;
@@ -647,6 +683,7 @@ export class Runtime implements Handlers {
             this.hibernated.set(entry.addr.id, { data: parked.v, envV: node.envV, addr: entry.addr });
             events.push(list(pid(entry.pid), list(HIBERNATED, entry.addr)));
         }
+        if (this.pools.size > 0) events.push(...this.tendPools(spare));
         let ready = 0;
         for (const entry of this.live) if (entry.status === 'ready') ready += 1;
         return { events, ready };
@@ -1015,6 +1052,12 @@ export class Runtime implements Handlers {
             this.plan = parsed;
             this.planValue = planV;
             this.installMonitors(parsed.monitors);
+            this.installPools(parsed.pools);
+        }
+        if (this.installEvents.length > 0) {
+            const events = this.installEvents;
+            this.installEvents = [];
+            return V(list(...events));
         }
         let timeout: number | null;
         if (timeoutV.t === 'bool' && timeoutV.v === false) timeout = null;
@@ -1034,7 +1077,7 @@ export class Runtime implements Handlers {
                 await this.hostWait(int(0));
                 continue;
             }
-            const idles = [round?.idle ?? null, ...hibernate.map((h) => h.idle)];
+            const idles = [round?.idle ?? null, ...hibernate.map((h) => h.idle), ...this.plan.pools.map((p) => p.idle)];
             const seconds = [...this.monitors.values()].map((m) => (m.monitor.currentSecond + 1) * 1000 - this.now());
             const limits = [...idles, ...seconds, deadline === null ? null : deadline - this.now()].filter((t): t is number => t !== null);
             const limit = limits.length === 0 ? null : Math.min(...limits);
@@ -1055,6 +1098,7 @@ export class Runtime implements Handlers {
         const inboxes: Addr[] = [];
         const hibernate: Hibernate[] = [];
         const monitors: MonitorNode[] = [];
+        const pools: PoolNode[] = [];
         for (const node of nodes) {
             const parts = listToArray(node);
             const kind = parts?.[0];
@@ -1068,6 +1112,11 @@ export class Runtime implements Handlers {
                 else if (idleV!.t === 'int' && idleV!.v >= 0n) idle = Number(idleV!.v);
                 else return bad('a round\'s idle is a non-negative integer or #false', node);
                 round = { n: Number(nV!.v), idle };
+            } else if (kind.name === 'pool') {
+                const read = this.readPool(parts);
+                if (typeof read === 'string') return bad(read, node);
+                if (pools.some((p) => p.name === read.name)) return bad('a plan has one pool node per name', node);
+                pools.push(read);
             } else if (kind.name === 'monitor') {
                 const read = this.readMonitor(parts);
                 if (typeof read === 'string') return bad(read, node);
@@ -1089,7 +1138,83 @@ export class Runtime implements Handlers {
                 return bad(`unknown plan node: ${kind.name}`, node);
             }
         }
-        return { round, inboxes, hibernate, monitors };
+        return { round, inboxes, hibernate, monitors, pools };
+    }
+
+    // (pool name template env min max idle), where template is parked data.
+    private readPool(parts: readonly Value[]): PoolNode | string {
+        const shape = 'a pool node is (pool name template env min max idle), with 0 <= min <= max';
+        const [, nameV, template, envV, minV, maxV, idleV] = parts;
+        if (parts.length !== 7 || nameV?.t !== 'str' || envV?.t !== 'env') return shape;
+        if (minV?.t !== 'int' || maxV?.t !== 'int' || idleV?.t !== 'int') return shape;
+        if (minV.v < 0n || maxV.v < minV.v || idleV.v < 0n) return shape;
+        const data = listToArray(template!);
+        const key = data?.[1];
+        const queue = data?.[4];
+        if (data === null || data.length !== 5 || key?.t !== 'int' || !this.parkTable.has(Number(key.v)) || queue?.t !== 'addr') {
+            return 'a pool\'s template is parked data';
+        }
+        return {
+            name: nameV.v, template: template!, envV, min: Number(minV.v), max: Number(maxV.v), idle: Number(idleV.v), queue,
+        };
+    }
+
+    // Keeps each pool's state across plans, and fills a pool to its minimum
+    // from the template; the events are returned before anything runs.
+    private installPools(nodes: readonly PoolNode[]): void {
+        for (const [name, pool] of this.pools) {
+            if (nodes.some((n) => n.name === name)) continue;
+            for (const m of pool.members) this.poolOf.delete(m);
+            this.pools.delete(name);
+        }
+        for (const node of nodes) {
+            let pool = this.pools.get(node.name);
+            if (pool === undefined) {
+                pool = { node, members: new Set(), cold: [] };
+                this.pools.set(node.name, pool);
+            }
+            pool.node = node;
+            while (pool.members.size < node.min) {
+                const joined = this.joinPool(pool);
+                if (joined === null) break;
+                this.installEvents.push(joined);
+            }
+        }
+    }
+
+    // After a round: parks each member that has been idle long enough and
+    // still waits in recv into cold storage, while the pool has more than its
+    // minimum, and adds one worker while its queue has a backlog and it has
+    // fewer than its maximum.
+    private tendPools(spare: readonly ProcEntry[]): Value[] {
+        const events: Value[] = [];
+        for (const pool of this.pools.values()) {
+            for (const entry of spare) {
+                if (this.poolOf.get(entry) !== pool || entry.status !== 'blocked-recv' || pool.members.size <= pool.node.min) continue;
+                const parked = this.processPark(pid(entry.pid));
+                if (parked.kind !== 'value') continue;
+                pool.cold.unshift(parked.v);
+                events.push(list(pid(entry.pid), list(LEFT, str(pool.node.name))));
+            }
+            const backlog = this.mailboxes.get(pool.node.queue.id)!.queue.length;
+            if (backlog > 0 && pool.members.size < pool.node.max) {
+                const joined = this.joinPool(pool);
+                if (joined !== null) events.push(joined);
+            }
+        }
+        return events;
+    }
+
+    // One worker more, from cold storage if there is one: its event.
+    private joinPool(pool: Pool): Value | null {
+        const fromCold = pool.cold.length > 0;
+        const unparked = this.processUnpark(fromCold ? pool.cold[0]! : pool.node.template, pool.node.envV);
+        if (unparked.kind !== 'value' || unparked.v.t !== 'pid') return null;
+        if (fromCold) pool.cold.shift();
+        const entry = this.procs.get(unparked.v.id)!;
+        pool.members.add(entry);
+        this.poolOf.set(entry, pool);
+        return list(unparked.v, list(JOINED, str(pool.node.name), fromCold ? COLD : TEMPLATE));
     }
 
     // (monitor self to (rows name ...) (routes name ...) (bins ms ...)

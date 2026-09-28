@@ -189,6 +189,11 @@ plan, and hierarchical quotas (DESIGN-001 section 12) as each part's budget.
 - **The CPI is now woken about once a second** plus events, so anything it still decides by looking around when woken, like growing the hello pool, happens rarely. That is the pool node's job (step 4).
 - **Next in step 3:** the view as a template the node fills in and draws (3b), with the CPI sending it the facts only it knows.
 
+## Findings from step 4 (the pool node, Sep 28, 2026)
+
+- **Scaling is per round again without the CPI.** The gateway test's burst grows the pool to three workers, as it did when the CPI ran every round, and every output that depended on it is back to its original value. Under load the pool reaches its maximum; throughput is unchanged, as more workers on one thread share the same interpreter.
+- **The gateway's CPI now decides only what needs deciding:** making a counter for a new name, answering `/system` requests, and the plan's settings (the most hello workers). Everything done per round, per request or per idle process is a node's.
+
 ## Open questions
 
 1. **The plan's shape.** Which fields each node kind has, and how the host diffs two plans: by node name, with a changed node's state carried over where its kind allows.

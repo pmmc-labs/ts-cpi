@@ -171,3 +171,16 @@ The monitor draws when there is a new summary or event.
 - **Metrics in the host cost about nothing:** throughput with the monitor node is what it was with no served log at all (17,416/s).
 - **Many processes no longer matter for hello:** 17,463/s with 628 counters asleep and 169 awake.
 - **What is left:** new counters (the CPI's list bookkeeping and the counters endpoint's linear lookups, 5 to 6 ms each), `/slow` (capacity, for `parallel::`), and the interpreter itself, which now sets the speed of everything.
+
+## After the pool node (Sep 28, 2026)
+
+The hello pool is the plan's pool node, grown each round while requests
+wait. Throughput is unchanged, since more workers on one thread share the
+same interpreter; what changed is that the pool scales again.
+
+| Scenario | After the monitor node | After the pool node |
+| --- | --- | --- |
+| hello, 8 clients | 17,878/s, 1 worker | 17,476/s, 4 workers (the maximum) |
+| hello after the counters | 17,463/s | 17,169/s |
+| `/slow` beside hello | hello 15,090/s | hello 15,364/s |
+| The CPI's share of the CPU, hello | 0.1% | 0.1% |
