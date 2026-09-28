@@ -6,7 +6,7 @@
 // shape (arities, and which method an action calls).
 
 import type {
-    Addr, Env, ErrorContext, ErrorValue, Scope, State, Value,
+    Addr, Env, ErrorContext, ErrorValue, Pair, Scope, State, Sym, Value,
 } from './types.ts';
 import {
     NIL, TRUE, FALSE, sym, int, str, cons, list, listToArray, newAddr, pid,
@@ -29,6 +29,7 @@ import { NAMESPACES } from './builtins.ts';
 // Small ActionResult constructors
 // ---------------------------------------------------------------------------
 
+const IDLE = list(sym('idle'));
 const V = (v: Value): ActionResult => ({ kind: 'value', v });
 const T = (tag: string, message: string, payload: Value = NIL): ActionResult =>
     ({ kind: 'throw', e: makeError(tag, message, payload) });
@@ -101,6 +102,10 @@ type ProcEntry = {
     // Woken from recv by a message it has not yet had a turn to take. If it
     // ends first, the wake-up passes to the next waiter (see `endProcess`).
     wokenForMessage?: boolean;
+    // When it last blocked in recv, and whether process::run-ready has
+    // reported it idle since (set by setStatus).
+    recvSince?: number;
+    idleReported?: boolean;
     watchers: Array<{ t: 'pid'; pid: number } | { t: 'addr'; addr: Addr }>;
 };
 
@@ -392,7 +397,11 @@ export class Runtime implements Handlers {
         } else {
             this.live.add(entry);
         }
-        if (status === 'blocked-recv') indexed(this.recvWaiters, entry.addr.id).add(entry);
+        if (status === 'blocked-recv') {
+            indexed(this.recvWaiters, entry.addr.id).add(entry);
+            entry.recvSince = this.now();
+            entry.idleReported = false;
+        }
         if (status === 'blocked-join') {
             const mode = entry.state.mode;
             const target = mode.m === 'host' ? mode.args[0] : undefined;
@@ -534,6 +543,36 @@ export class Runtime implements Handlers {
             return T('bad-state', 'process::run requires a ready process', pidV);
         }
         return V(this.runBatch(entry, n));
+    }
+
+    // (process::run-ready n idle): the same as the CPI calling process::run
+    // on each process that is ready when its turn comes, in PID order, and
+    // keeping the stop reasons it must act on. `live` holds processes in the
+    // order they were made, which is PID order, and a round adds none.
+    processRunReady(nV: Value, idleV: Value): ActionResult {
+        if (nV.t !== 'int' || nV.v < 1n) return T('type-error', 'process::run-ready requires an integer n >= 1', nV);
+        let idle: number | null;
+        if (idleV.t === 'bool' && idleV.v === false) idle = null;
+        else if (idleV.t === 'int' && idleV.v >= 0n) idle = Number(idleV.v);
+        else return T('type-error', 'process::run-ready requires a non-negative integer idle or #false', idleV);
+        const n = Number(nV.v);
+        const now = this.now();
+        const events: Value[] = [];
+        for (const entry of this.live) {
+            if (entry.status === 'ready') {
+                const stop = this.runBatch(entry, n);
+                const why = (stop as Pair).car as Sym;
+                if (why.name === 'exited' || why.name === 'failed' || why.name === 'trap') {
+                    events.push(list(pid(entry.pid), stop));
+                }
+            } else if (idle !== null && entry.status === 'blocked-recv' && !entry.idleReported && now - entry.recvSince! >= idle) {
+                entry.idleReported = true;
+                events.push(list(pid(entry.pid), IDLE));
+            }
+        }
+        let ready = 0;
+        for (const entry of this.live) if (entry.status === 'ready') ready += 1;
+        return V(list(list(...events), int(ready)));
     }
 
     processResume(pidV: Value, v: Value): ActionResult {

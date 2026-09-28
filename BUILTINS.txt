@@ -241,6 +241,14 @@ process:: (privileged)
         (quota)  (blocked recv)  (blocked join pid)  (blocked host)
         (exited value)  (failed error)  (trap effect args)
     ! bad-state unless the process is ready
+(process::run-ready n idle)
+    -> (events ready), after one round: process::run with n ticks for each
+    process that is ready when its turn comes, in PID order. events are
+    (pid what) for what the CPI must act on: (exited value), (failed error),
+    (trap effect args), or (idle) for a process that has waited in recv at
+    least idle ms (once per wait; #false for never). ready is how many
+    processes are still ready.
+    ! type-error unless n >= 1 and idle is an integer >= 0 or #false
 (process::state pid)
     -> (ready), (blocked recv), (blocked join pid), (blocked host),
     (trapped), (parked), or (ended how value).

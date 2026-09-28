@@ -114,6 +114,11 @@ parked ones leave the process list. The causes are in the supervisor loop:
 - **Lists are rebuilt.** Keeping a process appends it to a new list, so rebuilding the process list each round is quadratic. Parking and waking walk the lists the same way.
 - **The quota is fixed.** Each ready process gets 200 ticks per round, so a process's throughput is capped at 200 times the loop rate. `slow` got about 135,000 ticks a second of a possible 17 million, and every slow request timed out. Hello stayed fast beside it: preemption worked, but the slow worker starved.
 
+Since then (Sep 28, 2026) the loop uses `process::run-ready`: the host runs
+the round and reports only processes that ended or have been idle, so the
+first two causes are gone. What remains per loop is the metrics and polling
+the sleeping counters' mailboxes (`PERFORMANCE.md`).
+
 **Backpressure works.** `overload` got 1672 immediate `503`s from the host
 and 328 answers, with a p50 of 5.5 ms.
 

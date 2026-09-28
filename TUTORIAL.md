@@ -388,6 +388,35 @@ key is pressed (section 8). Changing the policy means changing this loop: give
 some processes bigger quotas, run the busiest first, or detect deadlock when
 nothing is ready and nothing is pending.
 
+A loop like this one is interpreted, so with many processes it costs more
+than the turns it runs. `(process::run-ready n idle)` is the same round run
+by the host: `process::run` with `n` ticks for each process that is `ready`
+when its turn comes, in PID order. It returns `(events ready)`, where
+`events` has only what the CPI must act on: `(pid (exited v))`,
+`(pid (failed e))`, `(pid (trap ...))`, and `(pid (idle))` for a process that
+has waited in `recv` for at least `idle` milliseconds. `ready` is how many
+processes can still run, which is what the loop needs to decide whether to
+wait:
+
+```lisp
+(defun scheduler (pids)
+    (when (not (all-ended? pids))
+        (do
+            (let round (process::run-ready 20 #false))
+            (print-events (car round))
+            (when (and (not (all-ended? pids)) (= (car (cdr round)) 0))
+                (host::wait #false))
+            (scheduler pids))))
+
+(defun print-events (events)
+    (when (not (nil? events))
+        (IO::print :event (car events))
+        (print-events (cdr events))))
+```
+
+With the same two players, this prints their messages and then
+`event (#<pid 2> (exited done))` and `event (#<pid 1> (exited done))`.
+
 ## 7. Traps, parking and timers
 
 These three are short; each has a test program you can run.
@@ -631,7 +660,7 @@ one mailbox. `gateway.slight` is a library, run by `plain.slight` or by
 - A **router** process receives every request and forwards it to the endpoint its first path segment names, with that segment removed.
 - **`/hello/<name>`** is served by a pool of identical workers that all receive on one durable mailbox. A mailbox with several receivers is a work queue: each message wakes only the receiver that has waited longest. The first hello worker runs its warm-up, waits for its first request, and is parked as a **template**. Every hello worker is unparked from it, already warm, because parked data can be unparked any number of times.
 - **`/counter/<name>`** makes one counter process per name, the first time the name is used. Only the CPI can create mailboxes and processes, so the counters endpoint sends the CPI a message asking for one, and holds that name's requests until the CPI replies with the new address.
-- The **CPI** is the supervisor. It gives each ready process a turn, answers `/system/stats` and `/system/quit` itself, adds a hello worker while requests wait in the queue, and parks any worker that has been idle for two seconds: spare hello workers into cold storage, and counters into sleep. A counter's mailbox is durable, so a request to a sleeping counter waits for it, and the CPI unparks the counter when one does. Its count survives, because it is in the parked continuation.
+- The **CPI** is the supervisor. It has the host give each ready process a turn (`process::run-ready`), answers `/system/stats` and `/system/quit` itself, adds a hello worker while requests wait in the queue, and parks any worker the round reports idle for two seconds: spare hello workers into cold storage, and counters into sleep. A counter's mailbox is durable, so a request to a sleeping counter waits for it, and the CPI unparks the counter when one does. Its count survives, because it is in the parked continuation.
 
 ```
 $ node bin/cpi.ts examples/gateway/gateway.slight examples/gateway/plain.slight

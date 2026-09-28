@@ -60,3 +60,51 @@ process's batch, or the CPI's own code.
 1. **The control plane is where the time goes.** CPI code is interpreted, 100 to 2,000 times slower than host code, so anything the CPI does per request, per message or per turn outweighs the work it manages. The CPI should act per event it needs to decide on, not per turn: the host should run the turns, and do per-request arithmetic like histograms. The charts and tables showed the same division of labour for drawing.
 2. **Parallelism for processes alone would not help the gateway today.** Process batches are 5 to 11% of the CPU. If a single CPI still had to start every turn, more threads running turns would wait on it. Parallelism pays once the CPI is out of the per-turn path, or when the work itself is heavy (`/slow`).
 3. **Two single-thread fixes change the balance first.** A host builtin that runs every ready process for a round and returns only the stop reasons the CPI must act on (no polling, no per-turn interpretation), and code converted to arrays once at load instead of on every evaluation.
+
+## Where the CPI's own ticks go
+
+A probe (not kept: a copy of `runCpi` counting each step against the CPI
+procedures on the continuation) split the CPI's ticks by what they were
+for. Hello at 8 clients, before `process::run-ready`:
+
+| | CPI ticks per request | Where they go |
+| --- | --- | --- |
+| The gateway | 9,400 | about 75% metrics: the served log 31%, sampling queues 30%, charging each turn's ticks 12%, all through `update-endpoint`, which rebuilds the endpoint list with `map` |
+| Metrics stubbed | 1,700 | scheduling: the round 41%, the idle check 15 to 26%, keeping processes with `append` 11 to 15%, 9 `process::state` calls a round |
+
+A process needs about 430 ticks for the same request.
+
+## After `process::run-ready` (Sep 28, 2026)
+
+The host runs the round and reports only processes that ended, trapped or
+went idle (`DECISIONS.md`, Spec changes). Same machine and tools as the
+baseline, `tools/profile_gateway.sh`:
+
+| hello load | Before | After | Metrics stubbed, before | Metrics stubbed, after |
+| --- | --- | --- | --- | --- |
+| 1 client | 890/s, p50 1.1 ms | 1,263/s, p50 0.8 ms | 3,218/s | 7,062/s, p50 0.1 ms |
+| 8 clients | 1,627/s, p50 5.0 ms | 2,606/s, p50 3.0 ms | 5,941/s | 13,602/s, p50 0.6 ms |
+| 32 clients | 1,570/s, p50 20 ms | 2,491/s, p50 12.7 ms | 5,811/s | 13,040/s, p50 2.3 ms |
+| CPU: the CPI / process batches | 79% / 4.5% | 76% / 5.4% | 57% / 13% | 25% / 26% |
+
+The "metrics stubbed" columns replace `record-served`, `add-ticks`,
+`sample-queues`, `roll-second` and `add-phases` with procedures that return
+the state unchanged, so they stub more than the baseline's 3,300/s run did.
+
+| Scenario | Before | After |
+| --- | --- | --- |
+| New counters, 8 clients | 23/s, p50 374 ms | 32/s, p50 130 ms |
+| hello after the counters (8 clients) | 889/s with 150 counters | 854/s with 219 (202 asleep); 2,505/s with 292 when the sleeping counters are not polled |
+| `/slow` beside hello | 176,000 ticks/s, every request 504; hello 1,526/s | 308,000 ticks/s, every request 504; hello 2,501/s |
+
+- **Scheduling left the CPI.** With metrics stubbed, the CPI's share of the CPU fell from 57% to 25%, and throughput rose 2.3×. The CPI, the processes, and HTTP and Node outside the CPI now take about a quarter each.
+- **The metrics are now nearly all of the CPI's work:** 5,800 ticks per hello request, 90% of them metrics (the served log about 49%, sampling queues about 40%). They cost 80% of the capacity.
+- **Many processes still hurt, for one reason:** the CPI polls the mailbox of every parked counter every loop to know when to wake it, and rebuilds that list with `append`. Stubbing it restored hello to its speed without counters.
+- **`/slow` is a capacity problem, not a scheduling one.** A request needs about 9 million ticks, half a second of the whole CPU. With four clients queued on one worker and a 2 s timeout it cannot keep up at any quota: at a quota of 4,000 (probe) it took a quarter of the CPU from hello and still timed out. That is what `parallel::` is for.
+
+**The interpreter, probed.** Converting code lists to arrays once, instead of
+at every evaluation (a probe caching the array on the pair), made
+`tools/bench/interpreter.slight` 10 to 14% faster, which matches
+`listToArray`'s share of the profile. With the CPI out of the per-turn path,
+process batches are a quarter of the CPU, so the interpreter's speed now
+sets throughput directly.

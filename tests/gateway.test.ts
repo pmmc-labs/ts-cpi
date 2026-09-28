@@ -84,8 +84,10 @@ test('gateway: scales hello workers, makes counters on first use, parks the idle
         '200 hello 1 cold 2 counters 1 asleep 1',
         [
             '200 requests 15 2xx 14 4xx 1 503 0 504 0 5xx 0 gone 0',
-            'last-second loops 5 run 0 other 0 draw 0 wait 1050 frames 0 build 0',
-            'since-start loops 29 run 0 other 0 draw 0 wait 6250 frames 0 build 0',
+            // A message to the CPI's inbox during a round (counter bob, the
+            // stats at 5250) is handled in one more loop, without waiting.
+            'last-second loops 6 run 0 other 0 draw 0 wait 1050 frames 0 build 0',
+            'since-start loops 31 run 0 other 0 draw 0 wait 6250 frames 0 build 0',
             'hello total 6 last-second 0 wait-p95 - work-p95 - total-p95 - ticks 0',
             'counter total 5 last-second 1 wait-p95 <1ms work-p95 <1ms total-p95 <1ms ticks 229',
             'slow total 0 last-second 0 wait-p95 - work-p95 - total-p95 - ticks 0',

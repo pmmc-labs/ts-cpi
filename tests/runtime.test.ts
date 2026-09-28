@@ -265,6 +265,110 @@ test('process::ticks: a non-PID is a type-error', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// process::run-ready (DECISIONS.md, Spec changes, 2026-09-28)
+// ---------------------------------------------------------------------------
+
+test('process::run-ready: one batch for each ready process, reporting only exits, failures and traps', async () => {
+    const v = await ok(`
+        (defun one () 1)
+        (defun spin (n) (spin (+ n 1)))
+        (defun bad () (car 5))
+        (defun waiter () (actor::recv))
+        (defun main ()
+            (let a (process::spawn one () (environment::self) '() #false))
+            (let b (process::spawn spin (list 0) (environment::self) '() #false))
+            (let c (process::spawn bad () (environment::self) '() #false))
+            (let d (process::spawn waiter () (environment::self) '(actor) #false))
+            (let r (process::run-ready 50 #false))
+            (let events (car r))
+            (list
+                (car (car events)) (car (car (cdr (car events)))) (car (cdr (car (cdr (car events)))))
+                (car (car (cdr events))) (car (car (cdr (car (cdr events)))))
+                (cdr (cdr events))
+                (car (cdr r))
+                (process::state b) (process::ticks b) (process::state d)))
+    `);
+    assert.equal(print(v), '(#<pid 1> exited 1 #<pid 3> failed () 1 (ready) 50 (blocked recv))');
+});
+
+test('process::run-ready: processes run in PID order, so one woken during the round runs in it only if it comes later', async () => {
+    const v = await ok(`
+        (defun waiter () (actor::recv))
+        (defun sender (to1 to2)
+            (actor::send to1 :early)
+            (actor::send to2 :late))
+        (defun main ()
+            (let box (mailbox::create #true 10))
+            (let w1 (process::spawn waiter () (environment::self) '(actor) #false))
+            (let s (process::spawn sender (list (process::address w1) box) (environment::self) '(actor) #false))
+            (let w2 (process::spawn waiter () (environment::self) '(actor) box))
+            (process::run w1 100)
+            (process::run w2 100)
+            (let r1 (process::run-ready 100 #false))
+            (let r2 (process::run-ready 100 #false))
+            (let r3 (process::run-ready 100 #false))
+            (list r1 r2 r3))
+    `);
+    assert.equal(print(v), [
+        '((((#<pid 2> (exited #true)) (#<pid 3> (exited late))) 1)',
+        '(((#<pid 1> (exited early))) 0)',
+        '(() 0))',
+    ].join(' '));
+});
+
+test('process::run-ready: a trapped effect is reported, and the process waits for process::resume', async () => {
+    const v = await ok(`
+        (defun sender (to) (actor::send to :hi) :sent)
+        (defun main ()
+            (host::set-traps '(send))
+            (let box (mailbox::create #true 10))
+            (let p (process::spawn sender (list box) (environment::self) '(actor) #false))
+            (let r1 (process::run-ready 100 #false))
+            (let event (car (car r1)))
+            (let state (process::state p))
+            (process::resume p #true)
+            (let r2 (process::run-ready 100 #false))
+            (list (car (car (cdr event))) (car (cdr (car (cdr event)))) (car (cdr r1)) state r2))
+    `);
+    assert.equal(print(v), '(trap send 0 (trapped) (((#<pid 1> (exited sent))) 0))');
+});
+
+test('process::run-ready: a process waiting in recv for idle ms is reported once, and again only after it has run', async () => {
+    const v = await ok(`
+        (defun waiter () (actor::recv) (waiter))
+        (defun main ()
+            (let w (process::spawn waiter () (environment::self) '(actor) #false))
+            (let r1 (process::run-ready 100 1000))
+            (host::wait 500)
+            (let r2 (process::run-ready 100 1000))
+            (host::wait 600)
+            (let r3 (process::run-ready 100 1000))
+            (host::wait 5000)
+            (let r4 (process::run-ready 100 1000))
+            (mailbox::send (process::address w) :wake)
+            (let r5 (process::run-ready 100 1000))
+            (host::wait 1000)
+            (let r6 (process::run-ready 100 #false))
+            (let r7 (process::run-ready 100 1000))
+            (list r1 r2 r3 r4 r5 r6 r7))
+    `);
+    assert.equal(print(v), '((() 0) (() 0) (((#<pid 1> (idle))) 0) (() 0) (() 0) (() 0) (((#<pid 1> (idle))) 0))');
+});
+
+test('process::run-ready: n must be a positive integer, and idle a non-negative integer or #false', async () => {
+    const v = await ok(`
+        (defun main ()
+            (list
+                (catch (process::run-ready 0 #false) e (error-tag e))
+                (catch (process::run-ready :x #false) e (error-tag e))
+                (catch (process::run-ready 10 -1) e (error-tag e))
+                (catch (process::run-ready 10 #true) e (error-tag e))
+                (process::run-ready 10 0)))
+    `);
+    assert.equal(print(v), '(type-error type-error type-error type-error (() 0))');
+});
+
+// ---------------------------------------------------------------------------
 // Park, then unpark and continue
 // ---------------------------------------------------------------------------
 

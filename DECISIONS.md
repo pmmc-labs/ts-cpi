@@ -424,6 +424,73 @@ The ticks one batch used are the difference around it:
 
 Rationale: a total, not a per-batch figure, so reading it never loses anything: a CPI that skips a reading still gets the right sum later, and a process that has ended still reports what it cost.
 
+### `process::run-ready` (2026-09-28)
+
+*Status.* Agreed and implemented 2026-09-28: the round is specified as the loop the CPI could write, and runs every ready process (no groups yet). Tests in `tests/runtime.test.ts` ("process::run-ready"); the gateway's supervisor loop uses it. Measurements in `PERFORMANCE.md`.
+
+*Motivation.* The performance baseline (`PERFORMANCE.md`, Sep 28, 2026) found the gateway's CPI spending 9,400 ticks of its own per hello request, against 430 in the processes. A quarter of that was the scheduling loop: `process::state` on every process every round, per-turn tick charging, idle checks, and the process list rebuilt with `append`. The CPI is interpreted, 100 to 2,000 times slower than host code, so a loop over turns belongs in the host, and the CPI should act only on the events it must decide on.
+
+*Options.*
+
+- **A. Readiness only**: a `process::ready` that returns the ready PIDs, or `host::wait` reporting every wake. The CPI still makes one host request per turn.
+- **B. A round in the host, defined as a CPI loop** (recommended, and chosen). One request runs a batch for every ready process and returns only the stop reasons the CPI must act on. The policy (the quota, the idle threshold, what to do with each event) stays in the CPI, and `process::run` remains for a scheduler that wants every turn.
+- **C. A round over a group** of processes. Better for per-group quotas, and for schedulers on several threads later, but it needs a way to name groups. Left until `parallel::`.
+
+**Section 10.1, Processes.** Add a row after `process::run`:
+
+| Signature | Result | Errors |
+| --- | --- | --- |
+| `(process::run-ready n idle)` | Runs one round (section 11) and returns `(events ready)`: the events the CPI must act on, in the order they happened, and how many processes are `ready` after the round. `idle` is a number of milliseconds, or `#false`. | `type-error` unless `n ≥ 1` is an integer and `idle` a non-negative integer or `#false`. |
+
+**Section 11, Running processes.** Add after the stop-reason table:
+
+> `(process::run-ready n idle)` runs one **round**. It is the same as the CPI calling `(process::run pid n)` on each process that is `ready` when its turn comes, in increasing PID order, each at most once, and keeping the results it must act on. A process woken during the round by a message sent in it therefore runs in the same round if its PID is higher than the sender's, and in the next round otherwise. Each event is `(pid what)`, where `what` is:
+>
+> - a stop reason that ends or stops the process: `(exited v)`, `(failed e)` or `(trap <effect> <args>)`;
+> - `(idle)`: the process has been blocked in `(recv)` for at least `idle` milliseconds since it last blocked there. Each blocking is reported at most once, so a process reported idle is reported again only after it has run. With `idle` `#false`, no process is reported idle.
+>
+> `(quota)` and `(blocked …)` are not reported: the process is still `ready`, or will become `ready` when what it waits for arrives.
+
+Replace the rationale with:
+
+> **Rationale.** Returning a stop reason, as an exokernel returns a trap, keeps scheduling in control plane code: round robin, refill quotas, hierarchical quotas and deadlock detection are all loops over these results. The CPI waits while the host runs a batch, so there is one thread of control and scheduling is deterministic. `process::run-ready` is one such loop run by the host, because a loop over turns in interpreted code costs more than the turns: the policy stays in the CPI, as the quota, the idle threshold and what it does with each event, and a CPI that needs a different loop writes it with `process::run`.
+
+**Example.** A supervisor that parks processes idle for two seconds:
+
+```lisp
+(defun supervise (procs)
+    (let round (process::run-ready 200 2000))
+    (let procs2 (fold handle-event procs (car round)))
+    (host::wait (if (> (car (cdr round)) 0) 0 500))
+    (supervise procs2))
+
+(defun handle-event (procs event)
+    (let what (car (cdr event)))
+    (cond
+        ((eq? (car what) :idle) (park-one procs (car event)))
+        ((eq? (car what) :failed) (restart procs (car event)))
+        (#true (forget procs (car event)))))
+```
+
+Rationale:
+
+- **The same as a loop the CPI could write.** Nothing a CPI could observe with `process::run` changes: the order, the quotas, the stop reasons and the message timing are those of the loop. Scheduling stays deterministic, and a recording of a round is a recording of the loop.
+- **Events, not turns.** The CPI sees a process only when it must decide about it: when it ends, traps or goes idle. With the gateway's metrics stubbed, this took the CPI from 1,700 ticks per request to about 200.
+- **Idle in the host.** The host knows when a process last blocked; the CPI only knew when it last ran a turn, and had to ask `process::state` about each process every round to find the idle ones.
+
+Implementation (ts-cpi):
+
+- `Runtime.processRunReady` walks `live`, which holds processes in the order they were made (PID order); a round makes none, and a process that ends during it is skipped. Each ready process gets `runBatch`, as `process::run` does.
+- `setStatus` records `recvSince` and clears `idleReported` whenever a process blocks in `recv`, so the idle check is one comparison per blocked process per round.
+- The gateway: its CPI work comes before the round, so a process it wakes or adds runs in the same loop and the round's `ready` count is still right when it waits. The round cannot count the CPI's own inbox, which processes send to during the round, so the loop also waits 0 ms while the inbox has mail: without that, `/system` requests and new counters waited up to half a second. Ticks are charged to endpoints once a second and when a process is parked or ends, instead of every turn.
+- Tests: one batch per ready process, only exits, failures and traps reported, with the count of ready processes; PID order, and a process woken during the round runs in it only if it comes later; a trap waits for `process::resume`; idle reported once, then again only after running, and never with `#false`; argument errors. `tests/gateway.test.ts` gains two loops (the CPI's inbox handled one loop later), and its ticks per endpoint are unchanged.
+
+Open questions:
+
+1. **Sleeping actors are still polled.** The gateway checks `mailbox::size` for every parked counter every loop, and with 200 asleep this halves hello throughput again (`PERFORMANCE.md`). The round could report "a message arrived for a parked receiver" as an event, which is DECISIONS' earlier open question on a mailbox watcher (DESIGN-001 section 6).
+2. **The CPI's own mailboxes** are not processes, so the round cannot report mail for them. A CPI that handles requests itself checks its inbox after the round.
+3. **Groups and quotas per group**, for `parallel::`.
+
 ## Spec issues
 
 - A library that the CPI and its processes both use cannot be a role, because the CPI's environment comes from its files and a role's procedures resolve their globals through the environment of whoever runs them. Processes that need such a library get a role composed onto `environment::self`: they can see every CPI definition, and the host actions the library uses are neither declared nor checked by `environment::resolve`. Two ways to close it, both spec changes: read each loaded file as a role (open question 5 above), so the CPI's environment is a composition of library roles it can also give to processes; or add a projection, `(environment::select e names)`, so a process takes exactly the names its role requires. Found by migrating the examples (the CPI-Roles field notes). A plain projection was tried on Sep 27, 2026 and reverted (commit `d9d1cbf` and its revert): because library procedures call each other by name, every role had to list what its library calls reach in turn (18 names for version 08's universe), and a forgotten one surfaced only at run time, once as a supervisor restarting a failing worker forever.

@@ -52,6 +52,7 @@ export interface Handlers {
     // 10.1 process::
     spawn(f: Value, args: Value, env: Value, grants: Value, mailbox: Value): ActionResult;
     processRun(pidV: Value, nV: Value): ActionResult;
+    processRunReady(nV: Value, idleV: Value): ActionResult;
     processResume(pidV: Value, v: Value): ActionResult;
     processResumeThrow(pidV: Value, e: Value): ActionResult;
     processKill(pidV: Value, reason: Value): ActionResult;
@@ -129,6 +130,7 @@ export const NAMESPACES: ReadonlyMap<string, ReadonlyMap<string, ActionSpec>> = 
     ['process', ns({
         'spawn':         { arity: 5, run: (h, _c, a) => h.spawn(a[0]!, a[1]!, a[2]!, a[3]!, a[4]!) },
         'run':           { arity: 2, run: (h, _c, a) => h.processRun(a[0]!, a[1]!) },
+        'run-ready':     { arity: 2, run: (h, _c, a) => h.processRunReady(a[0]!, a[1]!) },
         'resume':        { arity: 2, run: (h, _c, a) => h.processResume(a[0]!, a[1]!) },
         'resume-throw':  { arity: 2, run: (h, _c, a) => h.processResumeThrow(a[0]!, a[1]!) },
         'kill':          { arity: 2, run: (h, _c, a) => h.processKill(a[0]!, a[1]!) },

@@ -30,8 +30,8 @@
 ;   one does. Its count survives, because it is in the parked continuation.
 ;
 ; The CPI also keeps metrics: the host reports every finished request on the
-; served log (http::subscribe-log), and process::ticks gives each turn's
-; cost. Run it, then try it with curl:
+; served log (http::subscribe-log), and process::ticks gives each
+; process's cost. Run it, then try it with curl:
 ;
 ;     node bin/cpi.ts examples/gateway/gateway.slight examples/gateway/plain.slight
 ;     curl localhost:8080/hello/ada
@@ -279,9 +279,9 @@
 ; ---------------------------------------------------------------------------
 ; The CPI's state, a vector:
 ;
-;   procs      the processes running, each (pid kind last): kind is router,
-;              counters, hello, slow or (counter name address), and last the
-;              host::now of its last turn
+;   procs      the processes running, each (pid kind charged): kind is
+;              router, counters, hello, slow or (counter name address), and
+;              charged the ticks already added to its endpoint's metrics
 ;   cold       hello workers in cold storage, as parked data
 ;   asleep     counters asleep, each (name address parked)
 ;   running    #false once the gateway has been told to stop
@@ -306,13 +306,19 @@
 
 (defun proc-pid (p) (car p))
 (defun proc-kind (p) (second p))
-(defun proc-last (p) (third p))
+(defun proc-charged (p) (third p))
 
-(defun add-proc (st pid kind now)
-    (with-procs st (append (st-procs st) (list (list pid kind now)))))
+(defun add-proc (st pid kind)
+    (with-procs st (append (st-procs st) (list (list pid kind 0)))))
 
-(defun keep (p st)
-    (with-procs st (append (st-procs st) (list p))))
+(defun find-proc (procs pid)
+    (cond
+        ((nil? procs) #false)
+        ((eq? (proc-pid (car procs)) pid) (car procs))
+        (#true (find-proc (cdr procs) pid))))
+
+(defun remove-proc (st pid)
+    (with-procs st (fold (lambda (acc p) (if (eq? (proc-pid p) pid) acc (cons p acc))) () (reverse (st-procs st)))))
 
 (defun log-event (st text)
     (let events (st-events st))
@@ -504,7 +510,18 @@
 
 (defun add-ticks (st name n)
     (let add (lambda (ep) (add-ep-ticks ep n)))
-    (update-endpoint (update-endpoint st name add) "total" add))
+    (if (= n 0) st (update-endpoint (update-endpoint st name add) "total" add)))
+
+; Adds the ticks a process has used since it was last charged to its
+; endpoint. Its entry in procs is not updated: see charge-all.
+(defun charge (st p)
+    (add-ticks st (kind-endpoint (proc-kind p)) (- (process::ticks (proc-pid p)) (proc-charged p))))
+
+; Charges every process, once a second and not every turn: the round runs
+; the turns in the host, so the CPI sees their ticks only as totals.
+(defun charge-all (st)
+    (with-procs (fold charge st (st-procs st))
+        (map (lambda (p) (list (proc-pid p) (proc-kind p) (process::ticks (proc-pid p)))) (st-procs st))))
 
 ; Each endpoint's queue now: the requests waiting in the mailbox its router
 ; route leads to (a counter's own mailbox is not counted). `total` is them all.
@@ -527,11 +544,12 @@
         st sizes))
 
 ; Starts a new second when host::now reaches one, closing the seconds
-; between on every endpoint.
-(defun roll-second (st now)
-    (let m (st-metrics st))
+; between on every endpoint, after charging the ticks used since the last.
+(defun roll-second (st0 now)
     (let s (/ now 1000))
-    (let gap (min2 history-length (- s (vector-ref m 4))))
+    (let gap (min2 history-length (- s (vector-ref (st-metrics st0) 4))))
+    (let st (if (> gap 0) (charge-all st0) st0))
+    (let m (st-metrics st))
     (if (> gap 0)
         (with-metrics st
             (vector (m-status m)
@@ -588,33 +606,28 @@
             "total-p95" (bin-label (vector-ref s 5)) "ticks" (value->string (vector-ref s 6)))))
 
 ; ---------------------------------------------------------------------------
-; Scheduling: one turn for each ready process, round robin, charging each
-; turn's ticks to its endpoint.
+; Scheduling: the host runs one turn for each ready process
+; (process::run-ready) and reports what the CPI must act on: a process that
+; ended, or one idle in recv for idle-ms, which it may put to sleep.
 
 (defun ready? (p)
     (eq? (car (process::state (proc-pid p))) :ready))
 
-(defun any-ready? (procs)
-    (and (not (nil? procs))
-        (or (ready? (car procs)) (any-ready? (cdr procs)))))
+; Returns (st ready), where ready is how many processes are still ready.
+(defun run-round (st)
+    (let r (process::run-ready quota idle-ms))
+    (list (fold handle-event st (car r)) (second r)))
 
-(defun run-round (st now)
-    (run-each (st-procs st) (with-procs st ()) now))
-
-(defun run-each (procs st now)
+(defun handle-event (st event)
+    (let p (find-proc (st-procs st) (car event)))
+    (let what (second event))
     (cond
-        ((nil? procs) st)
-        ((ready? (car procs))
-            (let p (car procs))
-            (let before (process::ticks (proc-pid p)))
-            (let stop (process::run (proc-pid p) quota))
-            (let charged (add-ticks st (kind-endpoint (proc-kind p)) (- (process::ticks (proc-pid p)) before)))
-            (if (or (eq? (car stop) :exited) (eq? (car stop) :failed))
-                (run-each (cdr procs)
-                    (log-event charged (string-join " " (list (value->string (proc-kind p)) "ended:" (value->string stop))))
-                    now)
-                (run-each (cdr procs) (keep (list (proc-pid p) (proc-kind p) now) charged) now)))
-        (#true (run-each (cdr procs) (keep (car procs) st) now))))
+        ((not p) st)
+        ((eq? (car what) :idle) (sleep-idle st p))
+        ((or (eq? (car what) :exited) (eq? (car what) :failed))
+            (log-event (remove-proc (charge st p) (proc-pid p))
+                (string-join " " (list (value->string (proc-kind p)) "ended:" (value->string what)))))
+        (#true st)))
 
 ; ---------------------------------------------------------------------------
 ; The CPI's mailboxes: /system requests and counters to make in its inbox,
@@ -653,7 +666,7 @@
     (let to (mailbox::create #true 100))
     (let pid (spawn-on (world-counter-env w) 'counter (list name 0) to))
     (mailbox::send root (list 'child name to))
-    (add-proc (log-event st (string-append "counter " name " made")) pid (list 'counter name to) (host::now)))
+    (add-proc (log-event st (string-append "counter " name " made")) pid (list 'counter name to)))
 
 (defun read-served-log (w st)
     (let entry (mailbox::take (world-log-box w)))
@@ -666,67 +679,49 @@
 
 ; One more hello worker while requests wait and the pool is below its
 ; maximum: from cold storage if a worker is there, else from the template.
-(defun scale-hello (w st now)
+(defun scale-hello (w st)
     (if (and (> (mailbox::size (world-queue w)) 0)
             (< (count-kind (st-procs st) 'hello) (st-hello-max st)))
-        (add-hello w st now)
+        (add-hello w st)
         st))
 
-(defun add-hello (w st now)
+(defun add-hello (w st)
     (let cold (st-cold st))
     (let pid (process::unpark (if (nil? cold) (world-template w) (car cold)) (world-hello-env w)))
-    (let added (add-proc (if (nil? cold) st (with-cold st (cdr cold))) pid 'hello now))
+    (let added (add-proc (if (nil? cold) st (with-cold st (cdr cold))) pid 'hello))
     (log-event added
         (string-join " " (list "hello +1 from" (if (nil? cold) "the template:" "cold storage:") (stats added)))))
 
 ; A counter asleep wakes when a request waits in its mailbox.
-(defun wake-counters (w st now)
-    (wake-each w (st-asleep st) (with-asleep st ()) now))
+(defun wake-counters (w st)
+    (wake-each w (st-asleep st) (with-asleep st ())))
 
-(defun wake-each (w asleep st now)
+(defun wake-each (w asleep st)
     (cond
         ((nil? asleep) st)
         ((> (mailbox::size (second (car asleep))) 0)
             (let a (car asleep))
             (let pid (process::unpark (third a) (world-counter-env w)))
             (wake-each w (cdr asleep)
-                (add-proc (log-event st (string-append "counter " (car a) " awake")) pid (list 'counter (car a) (second a)) now)
-                now))
+                (add-proc (log-event st (string-append "counter " (car a) " awake")) pid (list 'counter (car a) (second a)))))
         (#true
-            (wake-each w (cdr asleep) (with-asleep st (append (st-asleep st) (list (car asleep)))) now))))
+            (wake-each w (cdr asleep) (with-asleep st (append (st-asleep st) (list (car asleep))))))))
 
 ; ---------------------------------------------------------------------------
-; Sleeping: a hello worker beyond the minimum, or any counter, idle for
-; idle-ms while waiting in recv, is parked.
+; Sleeping: a hello worker beyond the minimum, or any counter, reported idle
+; by the round, is parked.
 
-(defun idle? (p now)
-    (and (>= (- now (proc-last p)) idle-ms)
-        (eq? (second (process::state (proc-pid p))) :recv)))
-
-(defun sleep-idle (st now)
-    (sleep-each (st-procs st) (with-procs st ()) now (- (count-kind (st-procs st) 'hello) hello-min)))
-
-; Walks the processes, keeping each or putting it to sleep. `spare` is how
-; many more hello workers may sleep.
-(defun sleep-each (procs st now spare)
+(defun sleep-idle (st p)
     (cond
-        ((nil? procs) st)
-        ((not (idle? (car procs) now))
-            (sleep-each (cdr procs) (keep (car procs) st) now spare))
-        ((and (eq? (proc-kind (car procs)) 'hello) (> spare 0))
-            (let parked (with-cold st (cons (process::park (proc-pid (car procs))) (st-cold st))))
-            (sleep-each (cdr procs)
-                (log-event parked
-                    (string-append "hello -1 to cold storage: " (stats (with-procs parked (append (st-procs parked) (cdr procs))))))
-                now (- spare 1)))
-        ((pair? (proc-kind (car procs)))
-            (let kind (proc-kind (car procs)))
-            (let asleep (list (second kind) (third kind) (process::park (proc-pid (car procs)))))
-            (sleep-each (cdr procs)
-                (log-event (with-asleep st (append (st-asleep st) (list asleep))) (string-append "counter " (second kind) " asleep"))
-                now spare))
-        (#true
-            (sleep-each (cdr procs) (keep (car procs) st) now spare))))
+        ((and (eq? (proc-kind p) 'hello) (> (count-kind (st-procs st) 'hello) hello-min))
+            (let parked (with-cold (remove-proc (charge st p) (proc-pid p)) (cons (process::park (proc-pid p)) (st-cold st))))
+            (log-event parked (string-append "hello -1 to cold storage: " (stats parked))))
+        ((pair? (proc-kind p))
+            (let kind (proc-kind p))
+            (let asleep (list (second kind) (third kind) (process::park (proc-pid p))))
+            (log-event (with-asleep (remove-proc (charge st p) (proc-pid p)) (append (st-asleep st) (list asleep)))
+                (string-append "counter " (second kind) " asleep")))
+        (#true st)))
 
 ; ---------------------------------------------------------------------------
 ; Starting, and the supervisor loop.
@@ -764,30 +759,36 @@
         (string-append "hello template warmed up in " (value->string (second warm)) " turns")))
     (http::listen gateway-port router-box request-timeout)
     (http::subscribe-log log-box)
-    (list w (add-hello w (log-event st (string-append "listening on port " (value->string gateway-port))) (host::now))))
+    (list w (add-hello w (log-event st (string-append "listening on port " (value->string gateway-port))))))
 
 ; The supervisor loop. `ui` is (step . ui-state): once each time round, the
 ; loop calls (step ui-state w st now), which returns (ui-state st wait), where
 ; `wait` is the longest the loop may wait before calling it again.
 ;
 ; Requests enter mailboxes only inside host::wait, so the loop waits every
-; time round: for 0 ms while processes are ready, else for up to `wait`. It
-; times each part of the round with host::now: running processes, the rest
-; of its own work, the UI, and waiting.
+; time round: for 0 ms while processes are ready, else for up to `wait`. The
+; CPI's own work comes before the round, so a process it wakes or adds runs
+; in the same loop, and the round's count of ready processes is still right
+; when the loop waits. The round cannot count the CPI's own inbox, which its
+; processes may send to while it runs, so the loop checks that itself. Queues
+; are sampled after the round, as the backlog the round left. It times each
+; part with host::now: its own work, running processes, the UI, and waiting.
 (defun gateway (w st ui)
     (if (st-running? st)
         (do
             (let t0 (host::now))
-            (let st1 (run-round (roll-second st t0) t0))
+            (let st1 (wake-counters w (scale-hello w (read-served-log w (handle-inbox w (roll-second st t0))))))
             (let t1 (host::now))
-            (let st2 (sample-queues w (sleep-idle (wake-counters w (scale-hello w (read-served-log w (handle-inbox w st1)) t1) t1) t1)))
+            (let round (run-round st1))
             (let t2 (host::now))
-            (let stepped ((car ui) (cdr ui) w st2 t2))
-            (let st3 (second stepped))
+            (let st2 (sample-queues w (car round)))
             (let t3 (host::now))
-            (host::wait (if (any-ready? (st-procs st3)) 0 (third stepped)))
+            (let stepped ((car ui) (cdr ui) w st2 t3))
+            (let st4 (second stepped))
             (let t4 (host::now))
-            (gateway w (add-phases st3 (- t1 t0) (- t2 t1) (- t3 t2) (- t4 t3)) (cons (car ui) (car stepped))))
+            (host::wait (if (or (> (second round) 0) (> (mailbox::size (world-inbox w)) 0)) 0 (third stepped)))
+            (let t5 (host::now))
+            (gateway w (add-phases st4 (- t2 t1) (+ (- t1 t0) (- t3 t2)) (- t4 t3) (- t5 t4)) (cons (car ui) (car stepped))))
         st))
 
 ; A UI step that prints each event once: `seen` is the newest one printed.
