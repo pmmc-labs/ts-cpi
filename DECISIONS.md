@@ -671,6 +671,47 @@ Found while building:
 1. **Within a round, hibernate members are parked before pools are tended,** so in the gateway test "counter ada asleep" now comes before "hello -1": both happen at 2150 ms.
 2. **An expired reply is answered at the host's next wait,** not at its deadline, on the virtual clock: with no hello pool, the `plan::run` trace test's first hello request times out at 2100 ms and is answered 504 at 2150 ms, when the wait capped by the idle threshold ends.
 
+### View templates: the monitor node draws (2026-09-28)
+
+*Status.* Agreed and implemented 2026-09-28, as part 3b of `DESIGN-PLAN.md` step 3, with the smaller of the vocabularies proposed (option B): placeholders give raw values, and formatting is what components already do. Tests in `tests/monitor.test.ts` ("with a view"); `tests/gateway.test.ts` updated.
+
+*Motivation.* After step 3a the CPI still built the whole monitor view in interpreted code once a second. The measured cost was small (the gateway ran at 18,000 requests a second under the live monitor); the reason is the design: the display belongs to the host, and the CPI should only state what it knows.
+
+*Options for the vocabulary.* A. Placeholders that format everything the old view did (colour thresholds for percentile labels, one mark per worker, tenths, offsets): the screen unchanged, but much of one monitor's taste moved into the host. **B. Raw values, formatted by what components already do** (chosen): a small, reusable vocabulary and a plainer screen (counts instead of marks, percentile labels uncoloured). C. Leave the view in the CPI.
+
+**SPEC-TUI, a new section: view templates.** To fold in beside section 3:
+
+> A **view template** is a view (section 3.1) that may contain placeholder elements, which a host node fills in before rendering. The plan's monitor node (SPEC-CPI section 10.6) takes one in a `(view template)` section. Each placeholder is replaced by a value:
+>
+> | Placeholder | Value |
+> | --- | --- |
+> | `(Metric row field)` | A number or text for `row` (one of the node's rows, or `"total"`). Fields: `requests` and `ticks` in the last full second; `wait-p50`, `wait-p95`, `work-p50`, `work-p95` and `total-p95`, the bin label of that percentile in the last full second (`"<1ms"` … `"<1s"`, `">=1s"`, or `"-"` with no requests); `total`, requests since the start; `queue`, the row's queue length now; `ready`, `waiting` and `parked`, how many of the row's processes (those running in the row's environments) are ready, not ready, or parked by the plan's pools and hibernate nodes; and `queue-`, `rate-`, `wait-` and `work-` with `min`, `avg` or `max`, the running summaries since the start, `avg` to one decimal place as text, `"-"` when there is nothing yet. |
+> | `(Series row field)` | A list of numbers, one per second of history, oldest first: `requests` or `ticks`, or a percentile (`wait-p95`, `work-p95`, `total-p95`) as its bin counted from 1, 0 for a second without requests. For a chart's `data` prop. |
+> | `(Status name)` | The count of requests by status: `"requests"`, `"2xx"` (all below 400), `"4xx"`, `"503"`, `"504"`, `"5xx"` (other 5xx), `"gone"`. |
+> | `(Fact name)` | The value last sent to the node as `(set name value)`, or `"-"`. |
+> | `(Uptime)` | How long the image has run, as `m:ss`. |
+>
+> A placeholder may stand wherever its value may: a number or text wherever a `Text` child or table cell may be, a list as a chart's `data`. A template is checked when the plan is read, by filling it with zeros: a placeholder the node cannot fill, or a view that would not render, is a `type-error` from `plan::run`.
+>
+> The node draws when it is installed and whenever there is something new: its summary for a new second, a fact, or a worker added, parked or woken by a plan node. Drawing happens inside `plan::run`; the CPI does not draw.
+
+Rationale:
+
+- **The CPI states what it knows; the host draws.** The only fact in the gateway's view is the most hello workers, sent when it changes.
+- **Workers counted from environments.** Each row's processes are those running in the row's environments (the node's `ticks` section), so the host counts them without the CPI's books.
+- **Checked by rendering.** The node's frame must equal `tui::render` of the same template filled in by hand; the test does exactly that.
+
+Implementation (ts-cpi):
+
+- `Monitor.fill` replaces placeholders; the node keeps facts and a `dirty` flag, set by a summary, a fact, or `workersChanged` (a hibernate, resume, join or leave). `plan::run` draws dirty monitors at the top of each loop through the TUI backend. `readMonitor` checks the template, and now requires `bins`.
+- The gateway: `monitor.slight` builds the template once and passes it through `start-gateway` to the monitor node; its UI step sends `(set "hello-max" n)` when that changes, and draws nothing. The gateway's view-only procedures are gone.
+
+Found while building:
+
+1. **Quitting waited for one more `plan::run`.** Since step 1, the gateway's loop handed the plan back once more after `/system/quit` before checking it should stop, so the image quit at the next event, up to a second later. The loop now checks first.
+2. **A monitor without bins** drew `">=undefined"` for every percentile; bins are now required.
+3. **The last frame can be stale by up to the idle threshold:** idle workers are noticed when the host next wakes, and if that is a quit, the CPI stops before the node draws again.
+
 ## Spec issues
 
 - A library that the CPI and its processes both use cannot be a role, because the CPI's environment comes from its files and a role's procedures resolve their globals through the environment of whoever runs them. Processes that need such a library get a role composed onto `environment::self`: they can see every CPI definition, and the host actions the library uses are neither declared nor checked by `environment::resolve`. Two ways to close it, both spec changes: read each loaded file as a role (open question 5 above), so the CPI's environment is a composition of library roles it can also give to processes; or add a projection, `(environment::select e names)`, so a process takes exactly the names its role requires. Found by migrating the examples (the CPI-Roles field notes). A plain projection was tried on Sep 27, 2026 and reverted (commit `d9d1cbf` and its revert): because library procedures call each other by name, every role had to list what its library calls reach in turn (18 names for version 08's universe), and a forgotten one surfaced only at run time, once as a supervisor restarting a failing worker forever.

@@ -724,9 +724,11 @@ every response is exact.
 The gateway doesn't read these itself. Its plan has a **monitor node**, a
 faux actor: the served log is sent to its address, and the host counts
 requests, times, ticks and queue lengths there, with no CPI code run per
-request, and sends the CPI a summary each second. `monitor.slight` shows
-the summary live, per endpoint, with sparklines of the last 20 seconds,
-drawing only when something is new. `/system/metrics` returns the same
+request, and sends the CPI a summary each second. `monitor.slight` gives the
+node a view template, a view with placeholders such as `(Metric "hello"
+requests)` where the numbers go, and the node draws it live, per endpoint,
+with sparklines of the last 20 seconds, whenever something is new: the CPI
+builds no frames. `/system/metrics` returns the same
 numbers as text, and the curl scripts in `examples/gateway/scenarios/` play bursts,
 ramps and overloads against a running gateway. The gateway's `README.md` has
 what they showed: the processes are cheap, and the pressure comes from the

@@ -184,3 +184,10 @@ same interpreter; what changed is that the pool scales again.
 | hello after the counters | 17,463/s | 17,169/s |
 | `/slow` beside hello | hello 15,090/s | hello 15,364/s |
 | The CPI's share of the CPU, hello | 0.1% | 0.1% |
+
+## After view templates (Sep 28, 2026)
+
+The monitor node draws the view itself, from a template the CPI gives it
+once; the CPI builds no frames. Live on a terminal, the gateway served
+17,625 hello requests a second at 8 clients under the monitor, the same as
+without it within noise (17,476/s): the CPI's share of the CPU stays 0.1%.

@@ -391,18 +391,18 @@
 (const endpoint-names '("hello" "counter" "slow" "router" "system" "other" "total"))
 
 ; The monitor node: its own address, the CPI's inbox for its summaries, and
-; what it counts. `envs` are each row's environments, as (row env ...).
-(defun monitor-node (w envs)
-    (list 'monitor (world-monitor-box w) (world-inbox w)
-        (cons 'rows endpoint-rows) (cons 'routes endpoint-routes) (cons 'bins bin-bounds) (list 'history history-length)
-        (cons 'ticks envs)
-        (list 'queues (list "hello" (world-queue w)) (list "counter" (world-counters-box w)) (list "slow" (world-slow-box w))
-            (list "router" (world-router-box w)) (list "system" (world-inbox w)))))
+; what it counts. `envs` are each row's environments, as (row env ...), and
+; `view` a view template for it to draw, or #false.
+(defun monitor-node (w envs view)
+    (append
+        (list 'monitor (world-monitor-box w) (world-inbox w)
+            (cons 'rows endpoint-rows) (cons 'routes endpoint-routes) (cons 'bins bin-bounds) (list 'history history-length)
+            (cons 'ticks envs)
+            (list 'queues (list "hello" (world-queue w)) (list "counter" (world-counters-box w)) (list "slow" (world-slow-box w))
+                (list "router" (world-router-box w)) (list "system" (world-inbox w))))
+        (if view (list (list 'view view)) ())))
 
 (defun bin-label (i) (if (< i 0) "-" (nth bin-labels i)))
-
-(defun tenths (n)
-    (string-append (value->string (/ n 10)) "." (value->string (% n 10))))
 
 ; The last summary: status counts (requests, 2xx and 3xx, 4xx, 503, 504,
 ; other 5xx, clients gone), each row as (name endpoint), and its second.
@@ -422,10 +422,6 @@
 ; and of work, the 95th of total, ticks.
 (defun ep-total (ep) (vector-ref ep 0))
 (defun ep-history (ep) (vector-ref ep 6))
-(defun ep-wait-acc (ep) (vector-ref ep 7))
-(defun ep-work-acc (ep) (vector-ref ep 8))
-(defun ep-queue-acc (ep) (vector-ref ep 9))
-(defun ep-rate-acc (ep) (vector-ref ep 10))
 
 ; The last full second's summary.
 (defun ep-last (ep)
@@ -440,17 +436,6 @@
         ((nil? eps) (vector 0 0 () () () 0 () (vector 0 0 0 0) (vector 0 0 0 0) (vector 0 0 0 0) (vector 0 0 0 0)))
         ((eq? (car (car eps)) name) (second (car eps)))
         (#true (endpoint-in (cdr eps) name))))
-
-; Each endpoint's queue now: the requests waiting in the mailbox its router
-; route leads to (a counter's own mailbox is not counted). `total` is them all.
-(defun endpoint-queue (w name)
-    (cond
-        ((eq? name "hello") (mailbox::size (world-queue w)))
-        ((eq? name "counter") (mailbox::size (world-counters-box w)))
-        ((eq? name "slow") (mailbox::size (world-slow-box w)))
-        ((eq? name "router") (mailbox::size (world-router-box w)))
-        ((eq? name "system") (mailbox::size (world-inbox w)))
-        (#true 0)))
 
 ; The metrics as text, for /system/metrics: the last summary.
 (defun metrics-text (st)
@@ -475,9 +460,6 @@
 ; Scheduling: the host runs the plan (plan::run), round after round, and
 ; returns what the CPI must act on: a process that ended, one idle in recv
 ; for idle-ms, which it may put to sleep, or mail in one of its mailboxes.
-
-(defun ready? (p)
-    (eq? (car (process::state (proc-pid p))) :ready))
 
 (defun handle-events (w st events)
     (fold (lambda (acc event) (handle-event w acc event)) st events))
@@ -594,9 +576,10 @@
 
 ; Makes the mailboxes, warms the template, starts the router, the counters
 ; endpoint and one hello worker, and starts listening. `ui-inboxes` are the
-; UI's mailboxes (its keys), whose mail wakes the CPI as its own does.
+; UI's mailboxes (its keys), whose mail wakes the CPI as its own does, and
+; `view` a view template for the monitor node to draw, or #false.
 ; Returns (world state).
-(defun start-gateway (ui-inboxes)
+(defun start-gateway (ui-inboxes view)
     (let inbox (mailbox::create #true 100))
     (let queue (mailbox::create #true 100))
     (let router-box (mailbox::create #true 100))
@@ -618,7 +601,7 @@
             (list "slow" slow-env) (list "router" router-env)))
     (let st (log-event
         (state (list (list router 'router) (list counters 'counters) (list slow 'slow)) (cons inbox ui-inboxes)
-            (world-counter-env w) (monitor-node w envs) (list (car warm) hello-env))
+            (world-counter-env w) (monitor-node w envs view) (list (car warm) hello-env))
         (string-append "hello template warmed up in " (value->string (second warm)) " turns")))
     (http::listen gateway-port router-box request-timeout)
     (http::subscribe-log monitor-box)
@@ -632,15 +615,15 @@
 ; The host runs the plan until the CPI is needed: a process ended or went
 ; idle, a counter fell asleep or woke, the monitor sent its summary for the
 ; second, mail reached the CPI's inbox or the UI's, or `wait` passed. The CPI
-; then does its own work, lets the UI step, and hands the plan back.
+; then does its own work, lets the UI step, and hands the plan back, unless
+; it has been told to stop.
 (defun gateway (w st ui events)
-    (if (st-running? st)
-        (do
-            (let st1 (handle-inbox w (handle-events w st events)))
-            (let stepped ((car ui) (cdr ui) w st1 (host::now)))
-            (let next (plan::run (st-plan (second stepped)) (third stepped)))
-            (gateway w (second stepped) (cons (car ui) (car stepped)) next))
-        st))
+    (let st1 (handle-inbox w (handle-events w st events)))
+    (let stepped ((car ui) (cdr ui) w st1 (host::now)))
+    (let st2 (second stepped))
+    (if (st-running? st2)
+        (gateway w st2 (cons (car ui) (car stepped)) (plan::run (st-plan st2) (third stepped)))
+        st2))
 
 ; A UI step that prints each event once: `seen` is the newest one printed.
 (defun print-events (seen w st now)

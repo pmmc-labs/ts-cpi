@@ -3,7 +3,7 @@
 ;     node bin/cpi.ts examples/gateway/gateway.slight examples/gateway/plain.slight
 
 (defun main ()
-    (let started (start-gateway ()))
+    (let started (start-gateway () #false))
     (let final (gateway (car started) (second started) (cons print-events 0) ()))
     (http::close gateway-port)
     (IO::print "[gateway] stopped:" (stats final)))

@@ -3,6 +3,9 @@
 // and sends a summary each second. It must be indistinguishable from the
 // actor in tests/programs/monitor-reference.slight given the same messages,
 // which is where the meaning of every number is written down.
+//
+// It can also draw: `fill` puts its numbers, and the facts the CPI has set,
+// into a view template in place of placeholder elements (SPEC-TUI).
 
 import type { Value } from './types.ts';
 import { FALSE, int, list, listToArray, str, sym, vec } from './values.ts';
@@ -26,6 +29,28 @@ type Endpoint = {
     rateAcc: Acc;
 };
 
+// What the host knows that the aggregate doesn't, for filling a view: each
+// row's queue length now, its processes ready, waiting and parked, and how
+// long the image has run.
+export type ViewContext = {
+    readonly queue: (row: string) => number;
+    readonly workers: (row: string) => readonly [number, number, number];
+    readonly uptime: number;
+};
+
+// A placeholder that names no row, field or status the monitor has.
+export class TemplateError extends Error {
+    readonly at: Value;
+    constructor(message: string, at: Value) {
+        super(message);
+        this.at = at;
+    }
+}
+
+const LAST_FIELDS = ['requests', 'wait-p50', 'wait-p95', 'work-p50', 'work-p95', 'total-p95', 'ticks'];
+const BIN_FIELDS = new Set(['wait-p50', 'wait-p95', 'work-p50', 'work-p95', 'total-p95']);
+const STATUS_NAMES = ['requests', '2xx', '4xx', '503', '504', '5xx', 'gone'];
+
 export type MonitorConfig = {
     readonly rows: readonly string[];
     readonly routes: ReadonlySet<string>;
@@ -48,6 +73,10 @@ export class Monitor {
     private readonly status = [0, 0, 0, 0, 0, 0, 0];
     private readonly endpoints = new Map<string, Endpoint>();
     private readonly config: MonitorConfig;
+    // Values the CPI has set with (set name value), for (Fact name).
+    private readonly facts = new Map<string, Value>();
+    // Whether there is something new to draw: a summary or a fact.
+    dirty = true;
 
     constructor(config: MonitorConfig) {
         this.config = config;
@@ -85,6 +114,14 @@ export class Monitor {
                 const s = parts[1];
                 return s?.t === 'int' ? this.nextSecond(Number(s.v)) : null;
             }
+            case 'set': {
+                const [, name, value] = parts;
+                if (name?.t === 'str' && value !== undefined) {
+                    this.facts.set(name.v, value);
+                    this.dirty = true;
+                }
+                return null;
+            }
             default:
                 return null;
         }
@@ -113,6 +150,7 @@ export class Monitor {
         if (gap <= 0) return null;
         for (const ep of this.endpoints.values()) for (let i = 0; i < gap; i += 1) this.closeSecond(ep);
         this.second = s;
+        this.dirty = true;
         return this.summary();
     }
 
@@ -127,6 +165,90 @@ export class Monitor {
             ])));
         }
         return list(sym('metrics'), int(this.second), ints(this.status), list(...eps));
+    }
+
+    // The view template with each placeholder replaced by its value:
+    //   (Metric row field)   a number, a bin label or "-"
+    //   (Series row field)   a list of numbers, one per second of history, oldest first
+    //   (Status name)        a count of requests by status
+    //   (Fact name)          what the CPI set with (set name value), or "-"
+    //   (Uptime)             how long the image has run, as m:ss
+    // Throws TemplateError for a placeholder it cannot fill.
+    fill(v: Value, ctx: ViewContext): Value {
+        if (v.t !== 'pair') return v;
+        const items = listToArray(v);
+        if (items === null) return v;
+        const head = items[0];
+        if (head?.t === 'sym') {
+            switch (head.name) {
+                case 'Metric': return this.metric(v, items, ctx);
+                case 'Series': return this.series(v, items);
+                case 'Status': {
+                    const i = items[1]?.t === 'str' ? STATUS_NAMES.indexOf(items[1].v) : -1;
+                    if (items.length !== 2 || i < 0) throw new TemplateError(`(Status name), name one of ${STATUS_NAMES.join(' ')}`, v);
+                    return int(this.status[i]!);
+                }
+                case 'Fact': {
+                    const name = items[1];
+                    if (items.length !== 2 || name?.t !== 'str') throw new TemplateError('(Fact name), name a string', v);
+                    return this.facts.get(name.v) ?? str('-');
+                }
+                case 'Uptime': {
+                    const s = Math.floor(ctx.uptime / 1000);
+                    return str(`${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`);
+                }
+            }
+        }
+        return list(...items.map((x) => this.fill(x, ctx)));
+    }
+
+    private row(v: Value, items: readonly Value[]): [string, string, Endpoint] {
+        const [, rowV, fieldV] = items;
+        if (items.length !== 3 || rowV?.t !== 'str' || fieldV?.t !== 'sym') throw new TemplateError('(Metric row field) or (Series row field)', v);
+        const ep = this.endpoints.get(rowV.v);
+        if (ep === undefined) throw new TemplateError(`no row ${rowV.v}`, v);
+        return [rowV.v, fieldV.name, ep];
+    }
+
+    // The last full second, since the start, or now.
+    private metric(v: Value, items: readonly Value[], ctx: ViewContext): Value {
+        const [row, field, ep] = this.row(v, items);
+        const last = ep.history[0] ?? [0, -1, -1, -1, -1, -1, 0];
+        const i = LAST_FIELDS.indexOf(field);
+        if (i >= 0) return BIN_FIELDS.has(field) ? str(this.binLabel(last[i]!)) : int(last[i]!);
+        switch (field) {
+            case 'total': return int(ep.total);
+            case 'queue': return int(ctx.queue(row));
+            case 'ready': return int(ctx.workers(row)[0]);
+            case 'waiting': return int(ctx.workers(row)[1]);
+            case 'parked': return int(ctx.workers(row)[2]);
+        }
+        const [what, stat] = field.split('-');
+        const acc = { queue: ep.queueAcc, rate: ep.rateAcc, wait: ep.waitAcc, work: ep.workAcc }[what ?? ''];
+        if (acc === undefined || (stat !== 'min' && stat !== 'avg' && stat !== 'max')) throw new TemplateError(`no field ${field}`, v);
+        if (acc[0] === 0) return str('-');
+        if (stat === 'min') return int(acc[2]);
+        if (stat === 'max') return int(acc[3]);
+        const tenths = Math.floor((acc[1] * 10) / acc[0]);
+        return str(`${Math.floor(tenths / 10)}.${tenths % 10}`);
+    }
+
+    // Requests or ticks per second, or a percentile as its bin counted from
+    // 1, with 0 for a second without requests.
+    private series(v: Value, items: readonly Value[]): Value {
+        const [, field, ep] = this.row(v, items);
+        const i = LAST_FIELDS.indexOf(field);
+        if (i < 0 || field === 'wait-p50' || field === 'work-p50') throw new TemplateError(`no series ${field}`, v);
+        const values = [...ep.history].reverse().map((h) => (BIN_FIELDS.has(field) ? h[i]! + 1 : h[i]!));
+        return list(...values.map((x) => int(x)));
+    }
+
+    // "<1ms" ... "<1s", ">=1s": the bin's bound, or "-" for no requests.
+    private binLabel(i: number): string {
+        const bins = this.config.bins;
+        const unit = (ms: number) => (ms >= 1000 && ms % 1000 === 0 ? `${ms / 1000}s` : `${ms}ms`);
+        if (i < 0) return '-';
+        return i < bins.length ? `<${unit(bins[i]!)}` : `>=${unit(bins[bins.length - 1]!)}`;
     }
 
     // (served port method path status arrived delivered answered)

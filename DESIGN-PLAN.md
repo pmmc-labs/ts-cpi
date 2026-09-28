@@ -189,6 +189,12 @@ plan, and hierarchical quotas (DESIGN-001 section 12) as each part's budget.
 - **The CPI is now woken about once a second** plus events, so anything it still decides by looking around when woken, like growing the hello pool, happens rarely. That is the pool node's job (step 4).
 - **Next in step 3:** the view as a template the node fills in and draws (3b), with the CPI sending it the facts only it knows.
 
+## Findings from step 3b (view templates, Sep 28, 2026)
+
+- **The CPI builds no frames.** It gives the monitor node a view template once and tells it the one fact only it knows (the most hello workers); the node draws in the host when there is something new. Live, the gateway served 17,625 requests a second under the node-drawn monitor.
+- **The vocabulary stayed small:** five placeholders giving raw values. The screen is plainer than the CPI-drawn one (counts instead of per-worker marks, percentile labels uncoloured), which was the agreed price.
+- **Checking a drawing node is easy when the check is a render:** the node's frame must equal `tui::render` of the template filled in by hand.
+
 ## Findings from step 4 (the pool node, Sep 28, 2026)
 
 - **Scaling is per round again without the CPI.** The gateway test's burst grows the pool to three workers, as it did when the CPI ran every round, and every output that depended on it is back to its original value. Under load the pool reaches its maximum; throughput is unchanged, as more workers on one thread share the same interpreter.

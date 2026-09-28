@@ -2,10 +2,13 @@
 ;
 ;     node bin/cpi.ts examples/gateway/gateway.slight examples/gateway/monitor.slight
 ;
-; Keys: q quits, + and - change the most hello workers. The monitor is one
-; more step in the CPI's loop, and draws only when there is something new:
-; the plan's monitor node has sent its summary for a new second, or the CPI
-; has logged an event. While it draws, nothing else runs.
+; Keys: q quits, + and - change the most hello workers.
+;
+; The CPI does not draw. It gives the plan's monitor node a view template,
+; a view with placeholders where the numbers go (DESIGN-PLAN.md, SPEC-TUI),
+; and the node fills it in and draws it in the host whenever it has
+; something new: its summary for a new second, or a fact the CPI tells it.
+; The one fact here is the most hello workers, which only the CPI knows.
 ;
 ; The CPI's events are not shown. Each is sent to a mailbox nobody receives
 ; on, so it ends up in the host's dead-letter queue.
@@ -14,8 +17,8 @@
     (tui::open 'fullscreen)
     (let keys (mailbox::create #true 64))
     (tui::subscribe keys)
-    (let started (start-gateway (list keys)))
-    (let ui (vector keys (dead-letter-box) 0 -1 -1))
+    (let started (start-gateway (list keys) (monitor-view)))
+    (let ui (vector keys (dead-letter-box) 0 -1))
     (let final (gateway (car started) (second started) (cons monitor ui) ()))
     (http::close gateway-port)
     (tui::close)
@@ -29,22 +32,22 @@
     (process::run (process::spawn (environment::lookup env 'done) () env '() box) 10)
     box)
 
-; The UI step: reads keys, sends new events to the dead-letter box, and
-; draws a frame if there is something new to show. It never asks to be
-; woken: the monitor's summaries come once a second. The UI state is a
-; vector: the keys mailbox, the dead-letter box, the newest event sent
-; there, and the summary's second and the newest event in the last frame.
+; The UI step: reads keys, sends new events to the dead-letter box, and tells
+; the monitor node the most hello workers when it changes. The UI state is a
+; vector: the keys mailbox, the dead-letter box, the newest event sent there,
+; and the most hello workers the node was told.
 (defun monitor (ui w st now)
     (let keyed (read-keys ui st))
     (let st2 (second keyed))
     (let ui2 (discard-events (car keyed) st2))
-    (let shown (vector-ref (st-metrics st2) 2))
-    (let newest (newest-event st2))
-    (if (and (= shown (vector-ref ui2 3)) (= newest (vector-ref ui2 4)))
-        (list ui2 st2 #false)
+    (list (tell-hello-max w ui2 st2) st2 #false))
+
+(defun tell-hello-max (w ui st)
+    (if (= (st-hello-max st) (vector-ref ui 3))
+        ui
         (do
-            (tui::render (monitor-view w st2 ui2 now))
-            (list (vector-set (vector-set ui2 3 shown) 4 newest) st2 #false))))
+            (mailbox::send (world-monitor-box w) (list 'set "hello-max" (st-hello-max st)))
+            (vector-set ui 3 (st-hello-max st)))))
 
 (defun newest-event (st)
     (if (nil? (st-events st)) 0 (car (car (st-events st)))))
@@ -73,122 +76,72 @@
         (#true (list ui st))))
 
 ; ---------------------------------------------------------------------------
-; Text pieces. A line is a Text of pieces; nested Text runs inline.
+; The view template: a header, a row per endpoint for the last second, and a
+; row per endpoint for everything since the start. The placeholders are
+; (Metric row field), (Series row field), (Status name), (Fact name) and
+; (Uptime); the node puts in the numbers every time it draws.
 
-(defun span (color text) `(Text (@ (color ,color)) ,text))
 (defun dim (text) `(Text (@ (dimColor #true)) ,text))
-(defun bold (text) `(Text (@ (bold #true)) ,text))
-(defun line (pieces) `(Text ,@pieces))
-
-; `label n`, n right-aligned in `width` columns, in `color` when n is not
-; 0, dimmed when it is.
-(defun count-span (label n width color)
-    (let text (string-append label " " (pad-left (value->string n) width)))
-    (if (= n 0) (dim text) (span color text)))
-
-; `s` right-aligned in `width` columns, so a number that grows does not move
-; what follows it.
-(defun pad-left (s width)
-    (string-append (repeat-string " " (- width (string-length s))) s))
-
-(defun num (n width) (pad-left (value->string n) width))
-
-; A percentile bin's label, green under 5 ms, yellow under 50 ms, red above.
-(defun bin-span (i)
-    (cond
-        ((< i 0) (dim "-"))
-        ((<= i 2) (span 'green (bin-label i)))
-        ((<= i 5) (span 'yellow (bin-label i)))
-        (#true (span 'red (bin-label i)))))
-
-(defun separated (pieces)
-    (cond
-        ((nil? pieces) ())
-        ((nil? (cdr pieces)) pieces)
-        (#true (cons (car pieces) (cons (dim " · ") (separated (cdr pieces)))))))
-
-; ---------------------------------------------------------------------------
-; The view: a header, a row per endpoint for the last second, and a row per
-; endpoint for everything since the start.
-
-(defun monitor-view (w st ui now)
-    `(Box (@ (flexDirection column))
-        ,(header-view st ui now)
-        ,(table-view w st)
-        ,(acc-view st)
-        ,(dim " q quit · + / - hello max")))
-
-(defun header-view (st ui now)
-    (let counts (m-status (st-metrics st)))
-    `(Box (@ (borderStyle round) (borderColor cyan) (flexDirection column) (paddingX 1))
-        ,(line
-            (separated
-                (list
-                    (title (string-append "gateway :" (value->string gateway-port)))
-                    (string-append "up " (clock-text now))
-                    (string-append "hello max " (num (st-hello-max st) 2)))))
-        ,(line
-            (separated
-                (list
-                    (bold (string-append "requests " (num (vector-ref counts 0) 7)))
-                    (count-span "2xx" (vector-ref counts 1) 7 'green)
-                    (count-span "4xx" (vector-ref counts 2) 5 'yellow)
-                    (count-span "503" (vector-ref counts 3) 5 'red)
-                    (count-span "504" (vector-ref counts 4) 5 'red)
-                    (count-span "5xx" (vector-ref counts 5) 5 'red)
-                    (count-span "gone" (vector-ref counts 6) 5 'yellow))))))
-
 (defun title (text) `(Text (@ (bold #true) (color cyan)) ,text))
 
-(defun clock-text (ms)
-    (let s (% (/ ms 1000) 60))
-    (string-append (value->string (/ ms 60000)) (if (< s 10) ":0" ":") (value->string s)))
+(defun monitor-view ()
+    `(Box (@ (flexDirection column))
+        ,(header-view)
+        ,(table-view)
+        ,(acc-view)
+        ,(dim " q quit · + / - hello max")))
 
-; ---------------------------------------------------------------------------
+(defun header-view ()
+    `(Box (@ (borderStyle round) (borderColor cyan) (flexDirection column) (paddingX 1))
+        (Text ,(title (string-append "gateway :" (value->string gateway-port)))
+            ,(dim " · ") "up " (Uptime) ,(dim " · ") "hello max " (Fact "hello-max"))
+        (Text (Text (@ (bold #true)) "requests " (Status "requests"))
+            ,(dim " · ") (Text (@ (color green)) "2xx " (Status "2xx"))
+            ,(dim " · ") (Text (@ (color yellow)) "4xx " (Status "4xx"))
+            ,(dim " · ") (Text (@ (color red)) "503 " (Status "503"))
+            ,(dim " · ") (Text (@ (color red)) "504 " (Status "504"))
+            ,(dim " · ") (Text (@ (color red)) "5xx " (Status "5xx"))
+            ,(dim " · ") (Text (@ (color yellow)) "gone " (Status "gone")))))
+
 ; Tables (SPEC-TUI section 16). The host lays them out: column widths,
-; alignment and truncation. The CPI gives each cell its content.
+; alignment and truncation.
 
 (const columns
-    '(("endpoint" 9) ("workers" 21) ("queue" 6 right) ("req/s" 6 right) ("wait p95" 9 right)
+    '(("endpoint" 9) ("workers" 16) ("queue" 6 right) ("req/s" 6 right) ("wait p95" 9 right)
         ("work p95" 9 right) ("ticks/s" 9 right) ("req/s, 20 s" 20) ("p95, 20 s" 20)))
 
 (defun endpoint-label (name)
-    (if (eq? name "total") (title name) (bold name)))
+    (if (eq? name "total") (title name) `(Text (@ (bold #true)) ,name)))
 
-(defun table-view (w st)
+(defun table-view ()
     `(Box (@ (paddingX 1))
         (Table (@ (columns ,columns))
-            ,@(map (lambda (name) (endpoint-row w st name)) endpoint-names))))
+            ,@(map endpoint-row endpoint-names))))
 
-(defun endpoint-row (w st name)
-    `(Row ,@(endpoint-cells st name (workers-cell st name) (endpoint-queue-now w name))))
+; An endpoint's row: its numbers are the last full second's, its sparklines
+; the last history-length seconds. The p95 series is a bin counted from 1,
+; so a second without requests is blank; a fixed top keeps heights
+; comparable from frame to frame.
+(defun endpoint-row (name)
+    `(Row ,(endpoint-label name) ,(workers-cell name) (Metric ,name queue) (Metric ,name requests)
+        (Metric ,name wait-p95) (Metric ,name work-p95) (Metric ,name ticks)
+        (Sparkline (@ (data (Series ,name requests)) (width ,history-length) (color cyan) (underline #true)))
+        (Sparkline (@ (data (Series ,name total-p95)) (width ,history-length) (color magenta) (underline #true) (max 11)))))
 
-(defun endpoint-queue-now (w name)
-    (if (eq? name "total")
-        (fold (lambda (n e) (+ n (endpoint-queue w e))) 0 endpoint-names)
-        (endpoint-queue w name)))
+; Workers: ● ready (green), ○ waiting (dim), ◌ parked by the pool or asleep
+; (blue), counted by the host from the environments each row's processes
+; run in. The CPI answers /system itself, and "other" has no processes.
+(defun workers-cell (name)
+    (cond
+        ((eq? name "system") (dim "the CPI"))
+        ((eq? name "other") "")
+        (#true
+            `((Text (@ (color green)) "● " (Metric ,name ready))
+                (Text (@ (dimColor #true)) "  ○ " (Metric ,name waiting))
+                (Text (@ (color blue)) "  ◌ " (Metric ,name parked))))))
 
-; An endpoint's row: its numbers are the last full second's.
-(defun endpoint-cells (st name workers queue)
-    (let ep (endpoint st name))
-    (let s (ep-last ep))
-    (let history (reverse (ep-history ep)))
-    (list
-        (endpoint-label name) workers queue (vector-ref s 0)
-        (bin-span (vector-ref s 2)) (bin-span (vector-ref s 4)) (vector-ref s 6)
-        (sparkline 'cyan (map (lambda (h) (vector-ref h 0)) history) #false)
-        ; Percentile bins, one higher so no data (-1) is blank; a fixed top
-        ; keeps heights comparable from frame to frame.
-        (sparkline 'magenta (map (lambda (h) (+ 1 (vector-ref h 5))) history) 11)))
-
-; Drawn by the host (SPEC-TUI section 3.2), underlined so an empty history
-; still shows as a line. `max` is #false to scale to the largest value.
-(defun sparkline (color values max)
-    `(Sparkline (@ (data ,values) (width ,history-length) (color ,color) (underline #true)
-        ,@(if max (list (list 'max max)) ()))))
-
-; Since the start: min, avg and max of each summary in columns of their own,
-; under a two-row header whose first row spans each triple.
+; Since the start: min, avg and max of each running summary in columns of
+; their own, under a two-row header whose first row spans each triple.
 (const acc-columns
     '(("" 11) ("" 8 right)
         ("" 5 right) ("" 7 right) ("" 6 right)
@@ -196,69 +149,18 @@
         ("" 5 right) ("" 7 right) ("" 6 right)
         ("" 5 right) ("" 7 right) ("" 6 right)))
 
-(defun acc-view (st)
+(defun acc-view ()
     `(Box (@ (paddingX 1) (marginTop 1))
         (Table (@ (header #false) (columns ,acc-columns))
             (Row (@ (dimColor #true)) "since start" "requests"
                 (Cell (@ (span 3) (align right)) "queue") (Cell (@ (span 3) (align right)) "req/s")
                 (Cell (@ (span 3) (align right)) "wait ms") (Cell (@ (span 3) (align right)) "work ms"))
             (Row (@ (dimColor #true)) "" "" "min" "avg" "max" "min" "avg" "max" "min" "avg" "max" "min" "avg" "max")
-            ,@(map (lambda (name) (acc-row st name)) endpoint-names))))
+            ,@(map acc-row endpoint-names))))
 
-(defun acc-row (st name)
-    (let ep (endpoint st name))
-    `(Row ,(endpoint-label name) ,(ep-total ep)
-        ,@(summary-cells (ep-queue-acc ep)) ,@(summary-cells (ep-rate-acc ep))
-        ,@(summary-cells (ep-wait-acc ep)) ,@(summary-cells (ep-work-acc ep))))
-
-; min, avg (to a tenth) and max of a running summary; dashes if empty.
-(defun summary-cells (a)
-    (if (= (vector-ref a 0) 0)
-        (list "-" "-" "-")
-        (list (vector-ref a 2) (tenths (/ (* 10 (vector-ref a 1)) (vector-ref a 0))) (vector-ref a 3))))
-
-; ---------------------------------------------------------------------------
-; Workers: ● ready (green), ○ waiting in recv (dim), ◌ parked (blue). The
-; hello pool shows one mark per worker and its maximum; the rest show counts.
-
-(defun ready-count (procs)
-    (fold (lambda (n p) (if (ready? p) (+ n 1) n)) 0 procs))
-
-(defun dots (ready idle parked)
-    (list (span 'green (repeat-string "●" ready)) (dim (repeat-string "○" idle)) (span 'blue (repeat-string "◌" parked))))
-
-(defun counts (ready idle parked)
-    (list
-        (span 'green (string-append "● " (value->string ready)))
-        (dim (string-append "  ○ " (value->string idle)))
-        (span 'blue (string-append "  ◌ " (value->string parked)))))
-
-(defun of-kind (procs kind)
-    (fold (lambda (acc p) (if (eq? (proc-kind p) kind) (append acc (list p)) acc)) () procs))
-
-(defun workers-cell (st name)
-    (cond
-        ((eq? name "hello")
-            (let hello (of-kind (st-procs st) 'hello))
-            (let ready (ready-count hello))
-            (append (dots ready (- (length hello) ready) (st-cold st))
-                (list (string-append " " (value->string (length hello)) "/" (value->string (st-hello-max st))))))
-        ((eq? name "counter")
-            (let procs (counter-procs (st-procs st)))
-            (let ready (ready-count procs))
-            (counts ready (- (length procs) ready) (length (st-asleep st))))
-        ((eq? name "slow") (kind-dots st 'slow))
-        ((eq? name "router") (kind-dots st 'router))
-        ((eq? name "system") (dim "the CPI"))
-        ((eq? name "total")
-            (let ready (ready-count (st-procs st)))
-            (counts ready (- (length (st-procs st)) ready) (+ (st-cold st) (length (st-asleep st)))))
-        (#true "")))
-
-(defun kind-dots (st kind)
-    (let procs (of-kind (st-procs st) kind))
-    (let ready (ready-count procs))
-    (dots ready (- (length procs) ready) 0))
-
-(defun repeat-string (s n)
-    (if (<= n 0) "" (string-append s (repeat-string s (- n 1)))))
+(defun acc-row (name)
+    `(Row ,(endpoint-label name) (Metric ,name total)
+        (Metric ,name queue-min) (Metric ,name queue-avg) (Metric ,name queue-max)
+        (Metric ,name rate-min) (Metric ,name rate-avg) (Metric ,name rate-max)
+        (Metric ,name wait-min) (Metric ,name wait-avg) (Metric ,name wait-max)
+        (Metric ,name work-min) (Metric ,name work-avg) (Metric ,name work-max)))

@@ -125,20 +125,22 @@ test('gateway monitor: draws each endpoint and the whole gateway, the last secon
     const result = await rt.boot(loadFiles([gateway, monitor]));
     assert.equal(result.ok, true, result.ok ? '' : print(result.e));
 
-    // A frame only when there is something new: one at the start, one for
-    // each of the monitor's summaries at seconds 1, 2 and 3, and one for each
-    // time the CPI was woken with events to log (the pool filled to its
-    // minimum, the + key, two workers added, two counters made, two parked).
-    assert.equal(tui.frames.length, 11);
+    // The monitor node draws, not the CPI: when it is installed, when the
+    // CPI tells it the most hello workers (4, then 5 from the + key), at its
+    // summaries for seconds 1, 2 and 3, and when the pool adds a worker (two
+    // under the burst). The workers parked and counters put to sleep at the
+    // quit are not drawn: the CPI stops before the plan runs again.
+    assert.equal(tui.frames.length, 7);
     const last = tui.frames[tui.frames.length - 1]!.split('\n').map((l) => l.trimEnd());
     const has = (text: string) => assert.ok(last.some((l) => l.includes(text)), `no line with ${JSON.stringify(text)} in\n${last.join('\n')}`);
-    has('gateway :8080 · up 0:03 · hello max  5');
-    has('requests       9 · 2xx       9 · 4xx     0 · 503     0 · 504     0 · 5xx     0 · gone     0');
-    // One mark per hello worker: one idle, two parked; counters as counts.
+    has('gateway :8080 · up 0:03 · hello max 5');
+    has('requests 9 · 2xx 9 · 4xx 0 · 503 0 · 504 0 · 5xx 0 · gone 0');
+    // Workers counted by the host from each row's environments: three hello
+    // workers waiting; the counters endpoint and two counters.
     // The host draws the sparklines: 1 of 6 requests fills 2 of 8 steps.
-    has(' hello     ○◌◌ 1/5                    0      1      <1ms      <1ms       307                   █▂                   ▁▁');
-    has(' counter   ● 0  ○ 0  ◌ 2              0      0         -         -         0                   █                    ▁');
-    has(' total     ● 0  ○ 4  ◌ 4              0      1      <1ms      <1ms       427                   █▁                   ▁▁');
+    has(' hello     ● 0  ○ 3  ◌ 0         0      1      <1ms      <1ms       307                   █▂                   ▁▁');
+    has(' counter   ● 0  ○ 3  ◌ 0         0      0         -         -         0                   █                    ▁');
+    has(' total     ● 0  ○ 8  ◌ 0         1      1      <1ms      <1ms       427                   █▁                   ▁▁');
     // Since the start: 7 hello requests over 3 seconds, 6 in the busiest.
     // The monitor samples queues after every round.
     has(' hello              7     0     0.1      2     0     2.3      6     0     0.0      0     0     0.0      0');
@@ -221,7 +223,7 @@ async function traceGateway(opts: { planReference: boolean; hibernateReference: 
         // An inbox node naming no mailbox: the plan without the monitor and
         // the hello pool, so hello requests wait until they time out.
         source = withoutDefuns(source, ['monitor-node', 'hello-pool']);
-        env = loadSource("(defun monitor-node (w envs) (list 'inbox)) (defun hello-pool (st) (list 'inbox))", 'test', env);
+        env = loadSource("(defun monitor-node (w envs view) (list 'inbox)) (defun hello-pool (st) (list 'inbox))", 'test', env);
     }
     env = loadSource(source, gateway, env);
     env = loadSource(readFileSync(plain, 'utf-8'), plain, env);

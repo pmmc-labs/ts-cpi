@@ -32,17 +32,17 @@ clock.
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ gateway :8080 · up 0:03 · hello max  5                                                                               │
-│ requests       9 · 2xx       9 · 4xx     0 · 503     0 · 504     0 · 5xx     0 · gone     0                          │
+│ gateway :8080 · up 0:03 · hello max 5                                                                                │
+│ requests 9 · 2xx 9 · 4xx 0 · 503 0 · 504 0 · 5xx 0 · gone 0                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
- endpoint  workers                queue  req/s  wait p95  work p95   ticks/s req/s, 20 s          p95, 20 s
- hello     ○◌◌ 1/5                    0      1      <1ms      <1ms       307                   █▂                   ▁▁
- counter   ● 0  ○ 0  ◌ 2              0      0         -         -         0                   █                    ▁
- slow      ○                          0      0         -         -         0
- router    ○                          0      0         -         -       120
- system    the CPI                    0      0         -         -         0
- other                                0      0         -         -         0
- total     ● 0  ○ 4  ◌ 4              0      1      <1ms      <1ms       427                   █▁                   ▁▁
+ endpoint  workers           queue  req/s  wait p95  work p95   ticks/s req/s, 20 s          p95, 20 s
+ hello     ● 0  ○ 3  ◌ 0         0      1      <1ms      <1ms       307                   █▂                   ▁▁
+ counter   ● 0  ○ 3  ◌ 0         0      0         -         -         0                   █                    ▁
+ slow      ● 0  ○ 1  ◌ 0         0      0         -         -         0
+ router    ● 0  ○ 1  ◌ 0         0      0         -         -       120
+ system    the CPI               1      0         -         -         0
+ other                           0      0         -         -         0
+ total     ● 0  ○ 8  ◌ 0         1      1      <1ms      <1ms       427                   █▁                   ▁▁
 
  since start requests                queue                req/s              wait ms              work ms
                         min     avg    max   min     avg    max   min     avg    max   min     avg    max
@@ -59,15 +59,19 @@ clock.
 while the CPI works.)
 
 - **Header.** How long the gateway has been up, the most hello workers, and status counts (2xx green, 4xx yellow, 5xx red, zero dimmed).
-- **The last second, one row per endpoint.** Workers (● ready, ○ waiting in `recv`, ◌ parked; the hello pool shows a mark per worker and its maximum, the rest show counts), the queue in its mailbox, requests, the 95th percentile of **wait** (arrival to delivery: time spent waiting for the CPI's loop) and of **work** (delivery to answer: the processes' time, queueing included), coloured green under 5 ms, yellow under 50 ms and red above, and the ticks its processes used. The sparklines are the last 20 seconds of requests and of 95th percentile total time, underlined so an empty stretch still shows. They and the stacked bar are chart components, and both tables are `Table`s (SPEC-TUI section 3.2): the CPI passes content and numbers, and the host aligns and draws them. `total` is the whole gateway.
+- **The last second, one row per endpoint.** Workers (● ready, ○ waiting, ◌ parked by the pool or asleep, counted by the host from the environments each row's processes run in), the queue in its mailbox, requests, the 95th percentile of **wait** (arrival to delivery: time spent waiting for the CPI's loop) and of **work** (delivery to answer: the processes' time, queueing included), and the ticks its processes used. The sparklines are the last 20 seconds of requests and of 95th percentile total time, underlined so an empty stretch still shows. They and the stacked bar are chart components, and both tables are `Table`s (SPEC-TUI section 3.2): the CPI passes content and numbers, and the host aligns and draws them. `total` is the whole gateway.
 - **Since the start.** Min, average and max of each endpoint's queue (sampled after every round), requests per second (every second), and wait and work (every request, in ms).
 - **Where the numbers come from.** The plan's monitor node counts them in the host (`DESIGN-PLAN.md`): request times from the served log (`http::subscribe-log`, sent to the node's address), ticks by the environment each process runs in, and queue lengths after every round. Percentiles come from fixed-bin histograms (`<1ms`, `<2ms`, `<5ms` ...). Each second the node sends the CPI a summary; `tests/programs/monitor-reference.slight` is an actor doing the same work, and says what each number means.
 - **Events are not shown.** The monitor sends each of the CPI's events to a mailbox whose only receiver has ended, so they collect in the host's dead-letter queue. `plain.slight` prints them.
 - **Keys.** `q` quits, `+` and `-` change the most hello workers.
 
-The monitor is one more step in the CPI's loop, and nothing else runs while
-it draws. It draws only when there is something new: the monitor node's
-summary for a new second, or an event. It has no frame rate.
+The CPI does not draw. `monitor.slight` builds the view once, as a template
+with placeholders where the numbers go (`(Metric "hello" requests)`,
+`(Series "hello" total-p95)`, `(Status "2xx")`, `(Fact "hello-max")`,
+`(Uptime)`), and gives it to the plan's monitor node, which fills it in and
+draws it in the host when there is something new: its summary for a new
+second, a fact the CPI tells it (the most hello workers), or a worker added,
+parked or woken. It has no frame rate.
 
 ## Scenarios
 

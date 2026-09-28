@@ -12,7 +12,7 @@ import {
     NIL, TRUE, FALSE, sym, int, str, cons, list, listToArray, newAddr, pid,
 } from './values.ts';
 import { makeError } from './errors.ts';
-import { Monitor, type MonitorConfig } from './monitor.ts';
+import { Monitor, TemplateError, type MonitorConfig, type ViewContext } from './monitor.ts';
 import { start, startExpr, step, resumeValue, resumeThrow } from './machine.ts';
 import {
     compose, conflicts, lookup, bindingHashOf, define, requiredNames, unfilledNames, missingNamespace,
@@ -210,6 +210,8 @@ type MonitorNode = {
     readonly config: MonitorConfig;
     readonly ticks: readonly (readonly [string, readonly Value[]])[];
     readonly queues: readonly (readonly [string, Addr])[];
+    // A view template the node fills in and draws (SPEC-TUI), or null.
+    readonly view: Value | null;
 };
 // A pool node: workers unparked from `template` with `env`, receiving on
 // the template's address, between `min` and `max` of them.
@@ -682,8 +684,13 @@ export class Runtime implements Handlers {
             if (parked.kind !== 'value') continue;
             this.hibernated.set(entry.addr.id, { data: parked.v, envV: node.envV, addr: entry.addr });
             events.push(list(pid(entry.pid), list(HIBERNATED, entry.addr)));
+            this.workersChanged();
         }
-        if (this.pools.size > 0) events.push(...this.tendPools(spare));
+        if (this.pools.size > 0) {
+            const tended = this.tendPools(spare);
+            if (tended.length > 0) this.workersChanged();
+            events.push(...tended);
+        }
         let ready = 0;
         for (const entry of this.live) if (entry.status === 'ready') ready += 1;
         return { events, ready };
@@ -709,6 +716,7 @@ export class Runtime implements Handlers {
             this.hibernated.delete(id);
             this.hibernatedMail.delete(id);
             events.push(list(unparked.v, list(RESUMED, h.addr)));
+            this.workersChanged();
         }
         return events;
     }
@@ -1067,6 +1075,7 @@ export class Runtime implements Handlers {
         const deadline = timeout === null ? null : this.now() + timeout;
         for (;;) {
             this.rollMonitors();
+            await this.drawMonitors();
             const r = round === null ? { events: [], ready: 0 } : this.runRound(round.n, round.idle, hibernate);
             this.sampleQueues();
             if (r.events.length > 0) return V(list(...r.events));
@@ -1230,6 +1239,7 @@ export class Runtime implements Handlers {
         let routes: string[] = [];
         let bins: number[] = [];
         let history = 20;
+        let view: Value | null = null;
         const ticks: [string, Value[]][] = [];
         const queues: [string, Addr][] = [];
         for (const section of sections) {
@@ -1245,6 +1255,9 @@ export class Runtime implements Handlers {
                 if (!rest.every((b) => b.t === 'int')) return 'bins are integers';
                 bins = rest.map((b) => Number((b as { v: bigint }).v));
                 if (bins.some((b, i) => i > 0 && b <= bins[i - 1]!)) return 'bins increase';
+            } else if (head.name === 'view') {
+                if (rest.length !== 1) return 'a view is (view template)';
+                view = rest[0]!;
             } else if (head.name === 'history') {
                 const n = rest[0];
                 if (rest.length !== 1 || n?.t !== 'int' || n.v < 1n) return 'history is a positive integer';
@@ -1268,7 +1281,18 @@ export class Runtime implements Handlers {
             }
         }
         if (rows === null) return 'a monitor node needs its rows';
-        return { self, to, config: { rows, routes: new Set(routes), bins, history }, ticks, queues };
+        if (bins.length === 0) return 'a monitor node needs its bins';
+        const config = { rows, routes: new Set(routes), bins, history };
+        if (view !== null) {
+            // The template must make a view whatever the numbers are.
+            try {
+                toElement(new Monitor(config).fill(view, { queue: () => 0, workers: () => [0, 0, 0], uptime: 0 }));
+            } catch (e) {
+                if (e instanceof TemplateError || e instanceof ViewError) return `the view: ${e.message}`;
+                throw e;
+            }
+        }
+        return { self, to, config, ticks, queues, view };
     }
 
     // Starts each new monitor node: a summary at once, and any messages that
@@ -1309,6 +1333,52 @@ export class Runtime implements Handlers {
             const summary = monitor.nextSecond(s);
             if (summary !== null) this.deliverNow(null, node.to, summary);
         }
+    }
+
+    // A worker was parked or unparked by a node: something new for the
+    // monitors to draw.
+    private workersChanged(): void {
+        for (const { monitor } of this.monitors.values()) monitor.dirty = true;
+    }
+
+    // Draws each monitor node with a view that has something new to show.
+    private async drawMonitors(): Promise<void> {
+        if (this.monitors.size === 0 || this.tui === null) return;
+        for (const { monitor, node } of this.monitors.values()) {
+            if (node.view === null || !monitor.dirty) continue;
+            monitor.dirty = false;
+            await this.tui.render(toElement(monitor.fill(node.view, this.viewContext(node))));
+        }
+    }
+
+    // A monitor's rows as the host sees them now: queue lengths, and the
+    // processes running in each row's environments, ready or waiting, and
+    // parked by the plan's pools and hibernate nodes.
+    private viewContext(node: MonitorNode): ViewContext {
+        const envsOf = (row: string): ReadonlySet<Value> =>
+            new Set(row === 'total' ? node.ticks.flatMap(([, envs]) => envs) : node.ticks.find(([r]) => r === row)?.[1] ?? []);
+        return {
+            uptime: this.now(),
+            queue: (row) => {
+                const size = (a: Addr) => this.mailboxes.get(a.id)!.queue.length;
+                if (row === 'total') return node.queues.reduce((n, [, a]) => n + size(a), 0);
+                const q = node.queues.find(([r]) => r === row);
+                return q === undefined ? 0 : size(q[1]);
+            },
+            workers: (row) => {
+                const envs = envsOf(row);
+                let ready = 0;
+                let waiting = 0;
+                for (const entry of this.live) {
+                    if (!envs.has(entry.envRef)) continue;
+                    if (entry.status === 'ready') ready += 1; else waiting += 1;
+                }
+                let parked = 0;
+                for (const pool of this.pools.values()) if (envs.has(pool.node.envV)) parked += pool.cold.length;
+                for (const h of this.hibernated.values()) if (envs.has(h.envV)) parked += 1;
+                return [ready, waiting, parked];
+            },
+        };
     }
 
     // One sample of each monitor's queues, after a round.

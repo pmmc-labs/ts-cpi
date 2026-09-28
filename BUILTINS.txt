@@ -331,7 +331,12 @@ faux actor: the host takes each message sent to self as it arrives
 (second s)), feeds it queue lengths each round, ticks by env ref and each
 new second itself, and sends to a summary each second:
 (metrics second status endpoints). What each number means is written as
-an actor in tests/programs/monitor-reference.slight.
+an actor in tests/programs/monitor-reference.slight. With a
+(view template) section it also draws: the template is a tui:: view with
+placeholders, (Metric row field), (Series row field), (Status name),
+(Fact name) and (Uptime), which it fills in and renders whenever there is
+something new (a summary, a fact sent as (set name value), a worker
+added, parked or woken).
 (pool name template env min max idle) keeps workers unparked from the
 parked data template, with env, on the template's address: at least min
 (filled when the node is installed), one more each round while that queue
