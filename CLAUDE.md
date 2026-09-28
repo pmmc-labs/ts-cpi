@@ -25,7 +25,7 @@ the language.
 - `npm test`: all tests (about 15 s; the runner's engine check is most of it).
 - `node bin/cpi.ts file.slight ...`: run a program.
 - `examples/runner/run.sh` (the Life runner, needs a terminal) and `examples/runner/run.sh check`.
-- `tools/`: `build_tutorial.py` (the tutorial's published page), `drive_runner.py` (measure the runner on a real pty). See `tools/README.md`.
+- `tools/`: `build_tutorial.py` (the tutorial's published page), `drive_runner.py` (measure the runner on a real pty), `load.ts`, `profile_gateway.sh` and `bench/` (performance; results in `PERFORMANCE.md`). See `tools/README.md`.
 
 ## Where things are decided
 

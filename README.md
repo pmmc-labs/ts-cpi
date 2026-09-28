@@ -47,6 +47,8 @@ A minimal program:
     (IO::print "hello" (* 6 7)))
 ```
 
+[`PERFORMANCE.md`](PERFORMANCE.md) has a first performance baseline: the interpreter, and where the gateway spends its time.
+
 [`TUTORIAL.md`](TUTORIAL.md) walks through the language, errors, processes and
 the builtins, using the programs in `examples/` and `tests/programs/`.
 `examples/actors/` builds a minimal actor system in the language (message

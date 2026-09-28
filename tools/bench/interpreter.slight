@@ -1,0 +1,64 @@
+; Interpreter micro-benchmarks. Each runs in a process, 100,000 ticks a turn,
+; and reports ticks, wall time and operations per second. native.js does the
+; same work in plain JavaScript, for scale.
+;
+;     node bin/cpi.ts tools/bench/interpreter.slight
+;     node tools/bench/native.js
+
+(defun bench-code ()
+    (role
+        (require actor::recv actor::send actor::self)
+
+        ; A counting loop: compare, subtract, tail call.
+        (defun count-down (n) (if (= n 0) #true (count-down (- n 1))))
+
+        ; Non-tail recursion: fib 22 is 28,657 calls.
+        (defun fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
+
+        ; Building and walking lists: map over 1,000 elements, 200 times.
+        (defun build (n acc) (if (= n 0) acc (build (- n 1) (cons n acc))))
+        (defun map1 (f xs) (if (nil? xs) () (cons (f (car xs)) (map1 f (cdr xs)))))
+        (defun lists (times xs)
+            (if (= times 0) #true (do (map1 (lambda (x) (+ x 1)) xs) (lists (- times 1) xs))))
+
+        ; Closures: make and call a closure 50,000 times.
+        (defun closures (n acc)
+            (if (= n 0) acc (closures (- n 1) ((lambda (x) (+ x n)) acc))))
+
+        ; Strings: append 20,000 short strings pairwise (a new string each time).
+        (defun strings (n s) (if (= n 0) (string-length s) (strings (- n 1) (string-append "ab" "cd"))))
+
+        ; Vectors: 20,000 vector-set on a 16-element vector (each copies it).
+        (defun vectors (n v) (if (= n 0) (vector-ref v 0) (vectors (- n 1) (vector-set v (% n 16) n))))
+
+        ; Messages: send to itself and receive, 20,000 times.
+        (defun ping (n) (if (= n 0) #true (do (actor::send (actor::self) n) (actor::recv) (ping (- n 1)))))))
+
+; Runs until the process exits: a process blocked in recv on a message it
+; sent itself is ready again once its batch ends, so each message costs a batch.
+(defun run-all (pid turns)
+    (let stop (process::run pid 100000))
+    (if (or (eq? (car stop) :exited) (eq? (car stop) :failed)) (list stop (+ turns 1)) (run-all pid (+ turns 1))))
+
+(defun bench (env label name args ops unit)
+    (let pid (process::spawn (environment::lookup env name) args env '(actor) #false))
+    (let t0 (host::now))
+    (let done (run-all pid 0))
+    (let ms (max2 1 (- (host::now) t0)))
+    (let ticks (process::ticks pid))
+    (IO::print label "|" ticks "ticks in" ms "ms |" (/ (* ticks 1000) ms) "ticks/s |" (/ (* ops 1000) ms) unit "/s |"
+        (/ ticks ops) "ticks per" unit))
+
+(defun max2 (a b) (if (> a b) a b))
+
+(defun main ()
+    (let env (environment::resolve (bench-code) '(actor)))
+    (bench env "loop       " 'count-down (list 2000000) 2000000 "iteration")
+    (bench env "fib 22     " 'fib (list 22) 28657 "call")
+    (bench env "map 1000x200" 'lists (list 200 (build 1000 ())) 200000 "element")
+    (bench env "closures   " 'closures (list 200000 0) 200000 "closure")
+    (bench env "strings    " 'strings (list 200000 "") 200000 "append")
+    (bench env "vectors    " 'vectors (list 200000 (make-vector 16 0)) 200000 "vector-set")
+    (bench env "messages   " 'ping (list 50000) 50000 "send+recv"))
+
+(defun build (n acc) (if (= n 0) acc (build (- n 1) (cons n acc))))
