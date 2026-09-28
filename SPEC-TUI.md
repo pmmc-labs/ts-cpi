@@ -4,6 +4,8 @@ Sep 26, 2026 · Accepted and implemented · Extends `../../design-xxx/SPEC-CPI.m
 
 Sep 28, 2026 · Charts (sections 3 and 15) accepted and implemented
 
+Sep 28, 2026 · Tables (sections 3 and 16) accepted and implemented
+
 This document specifies `tui::`, a privileged namespace through which the CPI
 presents what it is managing on a terminal and receives keyboard input. It
 also specifies the changes to time and to `host::wait` that interactive use
@@ -85,7 +87,11 @@ the namespace and grows by amending this section.
 | `StackedBarChart` | none | One bar divided into labelled segments. |
 | `LineGraph` | none | One or more series of numbers as lines, several rows high. |
 
-Chart components are drawn by the host from the numbers the view gives them (section 15). They may not be inside a `Text`.
+| `Table` | `Row` elements | Rows of cells laid out in columns (section 3.3.2). |
+| `Row` | cells | One row of a `Table`. Only inside a `Table`. |
+| `Cell` | what a `Text` may hold, or one chart | One cell with its own alignment or span. Only inside a `Row`. |
+
+Chart components are drawn by the host from the numbers the view gives them (section 15). They may not be inside a `Text`, and neither may a `Table`.
 
 ### 3.3 Props
 
@@ -166,13 +172,56 @@ For example, the gateway monitor's request-rate column and its loop split:
     (data (("run" ,run blue) ("other" ,other yellow) ("draw" ,draw magenta) ("wait" ,wait gray)))))
 ```
 
+### 3.3.2 Tables
+
+```lisp
+(Table (@ (columns (("endpoint" 10) ("queue" 7 right) ("req/s" 7 right) ("requests" auto right))))
+    (Row "hello" 0 12 (Text (@ (color green)) "<1ms"))
+    (Row "counter" 3 1 "-")
+    (Row (@ (bold #true)) "total" 3 13 "-"))
+```
+
+- **Columns** are data: the `columns` prop is a list of `(title width)` or `(title width align)`. `width` is a number of columns, or `auto` for the widest cell in the column, title included. `align` is `left` (the default), `right` or `center`.
+- **Rows** are children: each `Row` holds one cell per column, in order. A row with fewer cells leaves the rest empty; a row with more is a `type-error`.
+- **A cell** is anything a `Text` may hold (a string, a number, a `Text` element, or a list of those, spliced), or a chart component. A `Cell` element sets a cell's own alignment or makes it span columns: `(Cell (@ (span 3) (align right)) "queue")`.
+- **Text that does not fit** in its column is truncated with an ellipsis. A chart is given its column's width unless it sets its own.
+
+**`Table`**
+
+| Prop | Value | Meaning |
+| --- | --- | --- |
+| `columns` | a list of `(title width)` or `(title width align)` | Required. `width` is an integer or `auto`; `align` is `left`, `right` or `center`. |
+| `header` | a boolean | Draws the titles as the first row, dimmed. Default `#true`. |
+| `gap` | an integer | Spaces between columns. Default 1. |
+
+**`Row`**: the text styles of `Text` (`color`, `bold`, `dimColor`, ...), applied
+to every cell in the row that does not set its own.
+
+**`Cell`**: `span` (an integer, default 1), `align` (as for a column), and the
+text styles of `Text`.
+
+For example, the gateway's since-start table, with a group header over each
+min / avg / max triple:
+
+```lisp
+`(Table (@ (header #false)
+        (columns (("" 12) ("" 9 right) ("" 5 right) ("" 7 right) ("" 6 right) ...)))
+    (Row (@ (dimColor #true)) "since start" "requests"
+        (Cell (@ (span 3) (align center)) "queue") (Cell (@ (span 3) (align center)) "req/s") ...)
+    (Row (@ (dimColor #true)) "" "" "min" "avg" "max" "min" "avg" "max" ...)
+    ,@(map summary-row endpoint-names))
+```
+
 ### 3.4 Errors
 
 `tui::render` checks the whole view before anything is drawn. A malformed
 view throws `type-error` from the `tui::render` call, with the offending part
 of the view as the payload. The screen is unchanged. For a chart, a `data`
 list of the wrong shape, a non-number where a number belongs, an unknown
-color, or a missing `data` prop is such a malformed view.
+color, or a missing `data` prop is such a malformed view. So are a `Row`
+outside a `Table`, a `Cell` outside a `Row`, anything but `Row` elements in a
+`Table`, a row with more cells than columns (spans counted), a `span` below
+1, and a malformed `columns` list.
 
 ## 4. Builtins: `tui::`
 
@@ -312,6 +361,11 @@ deterministically.
 | D11 | Which charts. | `Sparkline`, `BarChart`, `StackedBarChart`, `LineGraph`. | Two first, the rest when a monitor needs them. |
 | D12 | Formatting values. | A `suffix` string. | No formatting, or a format string, which is a small language of its own. |
 | D13 | The chart library. | A host detail, as Ink is (section 1). | All four written in the host, with no new dependency. |
+| D14 | How table rows are given (Sep 28, 2026). | As `Row` children holding view content, so cells can be coloured pieces or charts. | As data, a `rows` prop of lists of atoms: simpler to check, but cells could hold only plain text. |
+| D15 | Column widths. | A fixed width, or `auto` for the widest cell. | Fixed widths only. |
+| D16 | Spanning cells. | `Cell` with `span`, for grouped headers. | No spans. |
+| D17 | Borders and rules in tables. | None for now. | `borderStyle` and rules between rows. |
+| D18 | Numbers in cells. | Shown as `IO::print` shows them; formatting stays with the CPI. | Per-column number formats. |
 | D8 | Unknown props. | `type-error` against the table in section 3.3: typos surface at once, and the prop list stays portable to a web renderer. | Pass everything through to the renderer (Ink silently ignores unknown props). |
 
 ## Appendix: implementation notes (not normative)
@@ -379,3 +433,44 @@ Building fell by 18%, and painting rose by about 1 ms for the extra
 components. The sparklines were about a fifth of the building: most of the
 rest is the monitor's tables (cells, padding, worker marks), still built in
 CPI code. A table component is the next candidate.
+
+## 16. Tables
+
+Accepted and implemented Sep 28, 2026 (decisions D14 to D18); specified in
+sections 3.2 to 3.4. This section records why and what they measured.
+
+### 16.1 Why
+
+Section 15.4 found that the sparklines were a fifth of the cost of building
+the gateway monitor's view; most of the rest is its two tables. Each cell is a
+`Box` with a width, padding and alignment, and every number is padded to a
+fixed width in CPI code so it stays in place as it changes. All of that is
+layout: work the host is better placed to do, and work that costs the CPI's
+loop interpreter time on every frame.
+
+A table component takes rows of cells and does the layout: column widths,
+alignment, truncation and spacing. The CPI still decides what each cell says
+and how it looks.
+
+### 16.2 Implementation notes (not normative)
+
+- `Table`, `Row` and `Cell` are converted in `src/tui/views.ts` and laid out in `src/tui/table.ts`. `auto` widths are measured with `string-width`, which Ink uses to measure text.
+- A row whose cells are all text or `Sparkline`s is padded and aligned in the host and drawn as a single `Text` line. A row holding a chart that Ink lays out with boxes (`BarChart`, `StackedBarChart`, `LineGraph`) gets a fixed-width `Box` per cell.
+- `ink-table` was considered. It takes data as JavaScript objects with a callback per cell, draws a bordered grid, and was last updated for Ink 3.
+
+### 16.3 What it measured
+
+The gateway monitor's two tables became `Table`s. Three runs each way, on a
+pseudo-terminal under 20 requests a second, per frame:
+
+| | Tables built in CPI code | `Table`, a `Box` per cell | `Table`, rows as lines |
+| --- | --- | --- | --- |
+| 4 fps: building / painting / total | 12.8 / 17.2 / 30.0 ms | 5.7 / 24.9 / 30.6 ms | 5.8 / 18.9 / 24.7 ms |
+| 30 fps: building / painting / total | 5.7 / 9.3 / 15.0 ms | 2.5 / 11.9 / 14.4 ms | 3.1 / 10.4 / 13.5 ms |
+
+The first version made the same boxes in TypeScript that the CPI had made in
+the language: building halved, but painting rose by as much, because the
+cost was Ink laying out about 150 boxes, not the interpreter building them.
+Drawing each row as one line of text removed most of those boxes. A frame is
+now 18% cheaper at 4 fps and 10% at 30 fps, and building it is half what it
+was. What remains is mostly Ink's own rendering of the frame.

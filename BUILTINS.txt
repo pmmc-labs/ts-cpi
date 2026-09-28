@@ -386,6 +386,11 @@ tui:: (privileged; SPEC-TUI.md)
         (Sparkline (@ (data (1 4 2 8)) (width 20) (max 8) (color cyan)))
         (BarChart (@ (data (("fast" 2) ("slow" 8 red))) (suffix " ms")))
     Chart data props take lists; see SPEC-TUI section 3.3.1.
+    Tables lay out rows of cells in columns, aligned by the host:
+        (Table (@ (columns (("name" 10) ("n" 6 right) ("note" auto))))
+            (Row "hello" 12 (Text (@ (color green)) "ok"))
+            (Row (Cell (@ (span 2) (align right)) "both") "x"))
+    A cell is anything a Text holds, or a chart. See SPEC-TUI 3.3.2.
 (tui::size)
     -> (columns rows).
 (tui::subscribe address)

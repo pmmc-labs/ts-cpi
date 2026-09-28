@@ -60,7 +60,7 @@ clock.
 while the CPI works.)
 
 - **Header.** Status counts (2xx green, 4xx yellow, 5xx red, zero dimmed), and the last second of the CPI's loop: how often it went round, and its time split into running processes (`run`), its own work (`other`: the served log, scaling, parking), drawing, and waiting in `host::wait`, in numbers and as a stacked bar. A frame's cost is split into building the view in CPI code and the host painting it.
-- **The last second, one row per endpoint.** Workers (● ready, ○ waiting in `recv`, ◌ parked; the hello pool shows a mark per worker and its maximum, the rest show counts), the queue in its mailbox, requests, the 95th percentile of **wait** (arrival to delivery: time spent waiting for the CPI's loop) and of **work** (delivery to answer: the processes' time, queueing included), coloured green under 5 ms, yellow under 50 ms and red above, and the ticks its processes used. The sparklines are the last 20 seconds of requests and of 95th percentile total time, underlined so an empty stretch still shows. They and the stacked bar are chart components (SPEC-TUI section 3.2): the CPI passes numbers and the host draws them. `total` is the whole gateway.
+- **The last second, one row per endpoint.** Workers (● ready, ○ waiting in `recv`, ◌ parked; the hello pool shows a mark per worker and its maximum, the rest show counts), the queue in its mailbox, requests, the 95th percentile of **wait** (arrival to delivery: time spent waiting for the CPI's loop) and of **work** (delivery to answer: the processes' time, queueing included), coloured green under 5 ms, yellow under 50 ms and red above, and the ticks its processes used. The sparklines are the last 20 seconds of requests and of 95th percentile total time, underlined so an empty stretch still shows. They and the stacked bar are chart components, and both tables are `Table`s (SPEC-TUI section 3.2): the CPI passes content and numbers, and the host aligns and draws them. `total` is the whole gateway.
 - **Since the start.** Min, average and max of each endpoint's queue (sampled every time round the loop), requests per second (every second), and wait and work (every request, in ms).
 - **Where the numbers come from.** Request times come from the host's served log (`http::subscribe-log`), and ticks from `process::ticks`. Percentiles come from fixed-bin histograms (`<1ms`, `<2ms`, `<5ms` ...), so they cost the CPI no sorting.
 - **Events are not shown.** The monitor sends each of the CPI's events to a mailbox whose only receiver has ended, so they collect in the host's dead-letter queue. `plain.slight` prints them.
@@ -122,6 +122,13 @@ section 15.4). Moving the sparklines from text built in CPI code to the
 `Sparkline` component cut building from 15.7 to 12.9 ms a frame at 4 fps,
 and from 6.6 to 5.4 ms at 30 fps; painting rose by about 1 ms for the extra
 components. The rest of the building is the tables.
+
+**Tables drawn by the host cut a frame by 10 to 18%** (SPEC-TUI section
+16.3). A `Table` whose rows are drawn as single lines halved building (12.8
+to 5.8 ms at 4 fps, 5.7 to 3.1 ms at 30 fps) and added only 1 to 2 ms of
+painting. A first version with a `Box` per cell halved building too, but
+painting rose by as much: the cost was Ink laying out boxes, not the
+interpreter building them.
 
 **The monitor costs 13 to 23 ms a frame,** 40 to 55% of it building the view
 in CPI code and the rest painting. That's about 9% of the loop at 4 fps and

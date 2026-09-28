@@ -184,57 +184,23 @@
     (string-append (value->string (/ ms 60000)) (if (< s 10) ":0" ":") (value->string s)))
 
 ; ---------------------------------------------------------------------------
-; Tables. A column is (title width) or (title width right); a right column
-; holds numbers and is right-aligned, header included. A cell is a string, a
-; Text element, or a list of pieces.
+; Tables (SPEC-TUI section 16). The host lays them out: column widths,
+; alignment and truncation. The CPI gives each cell its content.
 
 (const columns
-    '(("endpoint" 10) ("workers" 22) ("queue" 7 right) ("req/s" 7 right) ("wait p95" 10 right)
-        ("work p95" 10 right) ("ticks/s" 11 right) ("req/s, 20 s" 22) ("p95, 20 s" 21)))
-
-; Each summary is min, avg and max in fixed widths (see summary-text), so
-; its three numbers stay in columns as they grow. Its header has two rows:
-; the quantity, then min, avg and max over their numbers.
-(const acc-columns
-    '(("since start" 12) ("requests" 10 right) ("queue" 20 right) ("req/s" 20 right)
-        ("wait ms" 20 right) ("work ms" 20 right)))
-
-(defun right? (column)
-    (and (not (nil? (cdr (cdr column)))) (eq? (third column) 'right)))
-
-(defun align (column)
-    (if (right? column) 'flex-end 'flex-start))
-
-(defun header-cell (column)
-    `(Box (@ (width ,(second column)) (flexShrink 0) (paddingRight 1) (justifyContent ,(align column)))
-        (Text (@ (dimColor #true)) ,(car column))))
-
-(defun row-of (cols cells)
-    `(Box (@ (flexDirection row)) ,@(cell-views cols cells)))
-
-(defun cell-views (cols cells)
-    (if (nil? cols)
-        ()
-        (cons (cell-view (car cols) (car cells)) (cell-views (cdr cols) (cdr cells)))))
-
-; A chart goes straight into the cell's box; it cannot be inside a Text.
-(defun cell-view (column content)
-    `(Box (@ (width ,(second column)) (flexShrink 0) (paddingRight 1) (justifyContent ,(align column)))
-        ,(if (chart? content) content `(Text (@ (wrap truncate-end)) ,content))))
-
-(defun chart? (content)
-    (and (pair? content) (eq? (car content) 'Sparkline)))
+    '(("endpoint" 9) ("workers" 21) ("queue" 6 right) ("req/s" 6 right) ("wait p95" 9 right)
+        ("work p95" 9 right) ("ticks/s" 9 right) ("req/s, 20 s" 20) ("p95, 20 s" 20)))
 
 (defun endpoint-label (name)
     (if (eq? name "total") (title name) (bold name)))
 
 (defun table-view (w st)
-    `(Box (@ (flexDirection column) (paddingX 1))
-        (Box (@ (flexDirection row)) ,@(map header-cell columns))
-        ,@(map (lambda (name) (endpoint-row w st name)) endpoint-names)))
+    `(Box (@ (paddingX 1))
+        (Table (@ (columns ,columns))
+            ,@(map (lambda (name) (endpoint-row w st name)) endpoint-names))))
 
 (defun endpoint-row (w st name)
-    (row-of columns (endpoint-cells st name (workers-cell st name) (endpoint-queue-now w name))))
+    `(Row ,@(endpoint-cells st name (workers-cell st name) (endpoint-queue-now w name))))
 
 (defun endpoint-queue-now (w name)
     (if (eq? name "total")
@@ -247,8 +213,8 @@
     (let s (ep-last ep))
     (let history (reverse (ep-history ep)))
     (list
-        (endpoint-label name) workers (value->string queue) (value->string (vector-ref s 0))
-        (bin-span (vector-ref s 2)) (bin-span (vector-ref s 4)) (value->string (vector-ref s 6))
+        (endpoint-label name) workers queue (vector-ref s 0)
+        (bin-span (vector-ref s 2)) (bin-span (vector-ref s 4)) (vector-ref s 6)
         (sparkline 'cyan (map (lambda (h) (vector-ref h 0)) history) #false)
         ; Percentile bins, one higher so no data (-1) is blank; a fixed top
         ; keeps heights comparable from frame to frame.
@@ -260,38 +226,35 @@
     `(Sparkline (@ (data ,values) (width ,history-length) (color ,color) (underline #true)
         ,@(if max (list (list 'max max)) ()))))
 
+; Since the start: min, avg and max of each summary in columns of their own,
+; under a two-row header whose first row spans each triple.
+(const acc-columns
+    '(("" 11) ("" 8 right)
+        ("" 5 right) ("" 7 right) ("" 6 right)
+        ("" 5 right) ("" 7 right) ("" 6 right)
+        ("" 5 right) ("" 7 right) ("" 6 right)
+        ("" 5 right) ("" 7 right) ("" 6 right)))
+
 (defun acc-view (st)
-    `(Box (@ (flexDirection column) (paddingX 1) (marginTop 1))
-        (Box (@ (flexDirection row)) ,@(map header-cell acc-columns))
-        (Box (@ (flexDirection row)) ,@(map header-cell (summary-columns acc-columns)))
-        ,@(map (lambda (name) (acc-row st name)) endpoint-names)))
-
-; The second header row: blank over the first two columns, and min, avg
-; and max over each summary.
-(defun summary-columns (cols)
-    (cons (list "" (second (car cols)))
-        (cons (list "" (second (second cols)))
-            (map (lambda (c) (list (summary-header) (second c) 'right)) (cdr (cdr cols))))))
-
-(defun summary-header ()
-    (string-append (pad-left "min" 5) (pad-left "avg" 7) (pad-left "max" 6)))
+    `(Box (@ (paddingX 1) (marginTop 1))
+        (Table (@ (header #false) (columns ,acc-columns))
+            (Row (@ (dimColor #true)) "since start" "requests"
+                (Cell (@ (span 3) (align right)) "queue") (Cell (@ (span 3) (align right)) "req/s")
+                (Cell (@ (span 3) (align right)) "wait ms") (Cell (@ (span 3) (align right)) "work ms"))
+            (Row (@ (dimColor #true)) "" "" "min" "avg" "max" "min" "avg" "max" "min" "avg" "max" "min" "avg" "max")
+            ,@(map (lambda (name) (acc-row st name)) endpoint-names))))
 
 (defun acc-row (st name)
     (let ep (endpoint st name))
-    (row-of acc-columns
-        (list
-            (endpoint-label name) (value->string (ep-total ep))
-            (summary-text (ep-queue-acc ep)) (summary-text (ep-rate-acc ep))
-            (summary-text (ep-wait-acc ep)) (summary-text (ep-work-acc ep)))))
+    `(Row ,(endpoint-label name) ,(ep-total ep)
+        ,@(summary-cells (ep-queue-acc ep)) ,@(summary-cells (ep-rate-acc ep))
+        ,@(summary-cells (ep-wait-acc ep)) ,@(summary-cells (ep-work-acc ep))))
 
-; min, avg (to a tenth) and max of a running summary, in 5, 7 and 6 columns.
-(defun summary-text (a)
+; min, avg (to a tenth) and max of a running summary; dashes if empty.
+(defun summary-cells (a)
     (if (= (vector-ref a 0) 0)
-        (string-append (pad-left "-" 5) (pad-left "-" 7) (pad-left "-" 6))
-        (string-append
-            (num (vector-ref a 2) 5)
-            (pad-left (tenths (/ (* 10 (vector-ref a 1)) (vector-ref a 0))) 7)
-            (num (vector-ref a 3) 6))))
+        (list "-" "-" "-")
+        (list (vector-ref a 2) (tenths (/ (* 10 (vector-ref a 1)) (vector-ref a 0))) (vector-ref a 3))))
 
 ; ---------------------------------------------------------------------------
 ; Workers: ● ready (green), ○ waiting in recv (dim), ◌ parked (blue). The

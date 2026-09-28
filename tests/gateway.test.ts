@@ -128,12 +128,12 @@ test('gateway monitor: draws each endpoint and the whole gateway, the last secon
     has('requests       9 · 2xx       9 · 4xx     0 · 503     0 · 504     0 · 5xx     0 · gone     0');
     // One mark per hello worker: one idle, two parked; counters as counts.
     // The host draws the sparklines: 1 of 6 requests fills 2 of 8 steps.
-    has(' hello     ○◌◌ 1/5                    0      1      <1ms      <1ms        307                   █▂                    ▁▁');
-    has(' counter   ● 0  ○ 0  ◌ 2              0      0         -         -          0                   █                     ▁');
-    has(' total     ● 0  ○ 4  ◌ 4              0      1      <1ms      <1ms        427                   █▁                    ▁▁');
+    has(' hello     ○◌◌ 1/5                    0      1      <1ms      <1ms       307                   █▂                   ▁▁');
+    has(' counter   ● 0  ○ 0  ◌ 2              0      0         -         -         0                   █                    ▁');
+    has(' total     ● 0  ○ 4  ◌ 4              0      1      <1ms      <1ms       427                   █▁                   ▁▁');
     // Since the start: 7 hello requests over 3 seconds, 6 in the busiest.
-    has(' hello               7      0    0.1     2      0    2.3     6      0    0.0     0      0    0.0     0');
-    has(' total               9      0    0.6     6      0    3.0     8      0    0.0     0      0    0.0     0');
+    has(' hello              7     0     0.1      2     0     2.3      6     0     0.0      0     0     0.0      0');
+    has(' total              9     0     0.6      6     0     3.0      8     0     0.0      0     0     0.0      0');
     assert.ok(!last.some((l) => l.includes('asleep')), 'events are not shown');
 
     // Events go to the dead-letter queue, the key's among them, and only

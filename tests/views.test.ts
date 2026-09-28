@@ -128,3 +128,76 @@ test('chart errors name the offending part', () => {
     fails('(Text (Sparkline (@ (data (1)))))', /Sparkline cannot be inside a Text/);
     fails('(Sparkline (@ (data (1))) (Text "x"))', /Sparkline takes no children/);
 });
+
+// ---------------------------------------------------------------------------
+// Tables (SPEC-TUI section 16)
+// ---------------------------------------------------------------------------
+
+const showLines = (source: string, columns = 40): string[] => show(source, columns).split('\n').map((l) => l.trimEnd());
+
+test('Table: fixed and auto widths, right alignment, truncation, a dimmed header', () => {
+    assert.deepEqual(showLines(`
+        (Table (@ (columns (("name" 6) ("n" 4 right) ("note" auto))))
+            (Row "ab" 1 "x")
+            (Row "abcdefgh" 123 "longer"))`), [
+        'name      n note',
+        'ab        1 x',
+        'abcde…  123 longer',
+    ]);
+});
+
+test('Table: a Cell spans columns and sets its own alignment; no header', () => {
+    assert.deepEqual(showLines(`
+        (Table (@ (header #false) (columns (("a" 3) ("b" 3) ("c" 3))))
+            (Row (Cell (@ (span 2) (align right)) "xy") "z")
+            (Row "1" "2" "3"))`), [
+        '     xy z',
+        '1   2   3',
+    ]);
+});
+
+test('Table: a chart in a cell gets the column width; Text elements and lists of pieces are cells', () => {
+    assert.deepEqual(showLines(`
+        (Table (@ (columns (("s" 4) ("t" 5 right) ("u" 6))))
+            (Row (Sparkline (@ (data (1 2)))) (Text (@ (color green)) "ok") ("a" (Text "b") 3)))`), [
+        's        t u',
+        '  ▄█    ok ab3',
+    ]);
+});
+
+test('Table: rows may be spliced in as a list; a short row leaves the rest empty', () => {
+    assert.deepEqual(showLines(`
+        (Table (@ (header #false) (gap 2) (columns (("a" 2) ("b" 2))))
+            ((Row "1" "2") (Row "3"))
+            ()
+            (Row "5" "6"))`), [
+        '1   2',
+        '3',
+        '5   6',
+    ]);
+});
+
+test('Table: a row holding a box-drawn chart is laid out with boxes, beside rows drawn as lines', () => {
+    const lines = showLines(`
+        (Table (@ (header #false) (columns (("a" 3) ("b" 20))))
+            (Row "x" (BarChart (@ (data (("k" 4))) (width 12))))
+            (Row "y" "text"))`);
+    assert.equal(lines.length, 2, lines.join('\n'));
+    assert.ok(lines[0]!.startsWith('x   k') && lines[0]!.endsWith('4'), lines[0]);
+    assert.equal(lines[1], 'y   text');
+});
+
+test('table errors name the offending part', () => {
+    const fails = (source: string, message: RegExp) =>
+        assert.throws(() => toElement(view(source)), (e: unknown) => e instanceof ViewError && message.test(e.message));
+    fails('(Box (Row "x"))', /Row must be inside a Table/);
+    fails('(Row "x")', /Row must be inside a Table/);
+    fails('(Box (Cell "x"))', /Cell must be inside a Row/);
+    fails('(Table (Row "x"))', /Table requires columns/);
+    fails('(Table (@ (columns (("a" 3)))) (Text "x"))', /a Table holds only Row elements: \(Text "x"\)/);
+    fails('(Table (@ (columns (("a" 3)))) (Row "x" "y"))', /the row has more cells than the table has columns/);
+    fails('(Table (@ (columns (("a" 3) ("b" 3)))) (Row "x" (Cell (@ (span 2)) "y")))', /the row has more cells than the table has columns/);
+    fails('(Table (@ (columns (("a" wide)))))', /Table columns must be \(title width\) or \(title width align\)/);
+    fails('(Table (@ (columns (("a" 3 middle)))))', /Table columns must be/);
+    fails('(Table (@ (columns (("a" 3)))) (Row (Cell (@ (span 0)) "x")))', /Cell span must be at least 1/);
+});

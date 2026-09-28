@@ -11,6 +11,7 @@ import type { Value } from '../types.ts';
 import { listToArray } from '../values.ts';
 import { print } from '../printer.ts';
 import { BarChartView, LineGraphView, Sparkline, StackedBarChartView, type Row } from './charts.ts';
+import { renderTable, type Align, type Column, type TableCell } from './table.ts';
 
 const BOX_PROPS = [
     'flexDirection', 'flexGrow', 'flexShrink', 'flexBasis', 'flexWrap', 'alignItems', 'alignSelf',
@@ -25,7 +26,7 @@ const TEXT_PROPS = ['color', 'backgroundColor', 'bold', 'italic', 'underline', '
 // atom, passed to the renderer unchanged.
 type Kind =
     | 'number' | 'int' | 'bool' | 'string' | 'color'
-    | 'numbers' | 'rows' | 'series' | 'colors' | 'strings'
+    | 'numbers' | 'rows' | 'series' | 'colors' | 'strings' | 'columns'
     | readonly string[];
 
 type Component = {
@@ -64,7 +65,19 @@ const COMPONENTS: ReadonlyMap<string, Component> = new Map<string, Component>([
         data: 'series', colors: 'colors', width: 'int', height: 'int', min: 'number', max: 'number',
         showYAxis: 'bool', xLabels: 'strings', caption: 'string',
     })],
+    // Tables (section 16): converted by convertTable, not by React directly.
+    ['Table', {
+        type: Box, props: new Set(['columns', 'header', 'gap', 'key']), children: true,
+        kinds: new Map<string, Kind>([['columns', 'columns'], ['header', 'bool'], ['gap', 'int']]), required: ['columns'],
+    }],
+    ['Row', { type: Box, props: new Set([...TEXT_PROPS, 'key']), children: true }],
+    ['Cell', {
+        type: Box, props: new Set([...TEXT_PROPS, 'span', 'align', 'key']), children: true,
+        kinds: new Map<string, Kind>([['span', 'int'], ['align', ['left', 'right', 'center']]]),
+    }],
 ]);
+
+const CHARTS = new Set(['Sparkline', 'BarChart', 'StackedBarChart', 'LineGraph']);
 
 // Ink's color names, as chalk knows them; anything else must be a hex code.
 const COLOR_NAMES = new Set([
@@ -103,7 +116,10 @@ function convert(v: Value, inText: boolean): Node {
     const component = COMPONENTS.get(tag);
     if (component === undefined) throw new ViewError(`unknown component ${tag}`, v);
     if (tag === 'Newline' && !inText) throw new ViewError('Newline must be inside a Text', v);
+    if (tag === 'Row') throw new ViewError('Row must be inside a Table', v);
+    if (tag === 'Cell') throw new ViewError('Cell must be inside a Row', v);
     if (component.kinds !== undefined && inText) throw new ViewError(`${tag} cannot be inside a Text`, v);
+    if (tag === 'Table') return convertTable(items, component, v);
 
     let rest = items.slice(1);
     let props: Record<string, unknown> = {};
@@ -172,6 +188,16 @@ function chartValue(kind: Kind, v: Value, what: string): unknown {
         case 'colors': return list().map(color);
         case 'strings': return list().map((x) => (x.t === 'str' ? x.v : fail('strings', x)));
         case 'series': return list().map((s) => (listToArray(s) ?? fail('lists of numbers', s)).map(number));
+        case 'columns': return list().map((c): Column => {
+            const col = listToArray(c);
+            const shape = '(title width) or (title width align)';
+            if (col === null || col.length < 2 || col.length > 3 || col[0]!.t !== 'str') return fail(shape, c);
+            const w = col[1]!;
+            const width = w.t === 'int' && w.v >= 0n ? Number(w.v) : w.t === 'sym' && w.name === 'auto' ? 'auto' : fail(shape, c);
+            const a = col[2];
+            const align = a === undefined ? 'left' : a.t === 'sym' && ['left', 'right', 'center'].includes(a.name) ? a.name as Align : fail(shape, c);
+            return { title: col[0]!.v, width, align };
+        });
         case 'rows': return list().map((r): Row => {
             const row = listToArray(r);
             if (row === null || row.length < 2 || row.length > 3 || row[0]!.t !== 'str') {
@@ -192,4 +218,103 @@ function propValue(v: Value): unknown {
         case 'bool': return v.v;
         default: throw new ViewError('a prop value must be a string, symbol, number or boolean', v);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tables (section 16)
+
+function tableProps(items: Value[], tag: string, component: Component): { props: Record<string, unknown>; rest: Value[] } {
+    const first = items[1];
+    if (first !== undefined && first.t === 'pair' && first.car.t === 'sym' && first.car.name === '@') {
+        return { props: convertProps(first, tag, component), rest: items.slice(2) };
+    }
+    for (const name of component.required ?? []) throw new ViewError(`${tag} requires ${name}`, listFrom(items));
+    return { props: {}, rest: items.slice(1) };
+}
+
+function listFrom(items: Value[]): Value {
+    return items.reduceRight<Value>((tail, head) => ({ t: 'pair', car: head, cdr: tail, pos: null }) as Value, { t: 'nil' } as Value);
+}
+
+// Text styles given as props, without `key`.
+function styleOf(props: Record<string, unknown>): Record<string, unknown> {
+    const style: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(props)) if (TEXT_PROPS.includes(k)) style[k] = v;
+    return style;
+}
+
+function convertTable(items: Value[], component: Component, v: Value): React.ReactElement {
+    const { props, rest } = tableProps(items, 'Table', component);
+    const columns = props['columns'] as Column[];
+    const rows: TableCell[][] = [];
+    const add = (child: Value): void => {
+        if (child.t === 'nil' || (child.t === 'bool' && !child.v)) return;
+        if (child.t === 'pair' && child.car.t !== 'sym') {
+            for (const c of listToArray(child) ?? [child]) add(c);
+            return;
+        }
+        const parts = listToArray(child);
+        if (parts === null || parts[0]?.t !== 'sym' || parts[0].name !== 'Row') {
+            throw new ViewError('a Table holds only Row elements', child);
+        }
+        rows.push(convertRow(parts, child, columns.length));
+    };
+    for (const child of rest) add(child);
+    return renderTable({
+        columns,
+        header: (props['header'] as boolean | undefined) ?? true,
+        gap: (props['gap'] as number | undefined) ?? 1,
+        rows,
+    });
+}
+
+function convertRow(items: Value[], v: Value, columns: number): TableCell[] {
+    const { props, rest } = tableProps(items, 'Row', COMPONENTS.get('Row')!);
+    const rowStyle = styleOf(props);
+    const cells = rest.map((child) => convertCell(child, rowStyle));
+    if (cells.reduce((n, c) => n + c.span, 0) > columns) {
+        throw new ViewError('the row has more cells than the table has columns', v);
+    }
+    return cells;
+}
+
+function convertCell(child: Value, rowStyle: Record<string, unknown>): TableCell {
+    const parts = listToArray(child);
+    let span = 1;
+    let align: Align | undefined;
+    let style = rowStyle;
+    let content: Value[] = [child];
+    if (parts !== null && parts[0]?.t === 'sym' && parts[0].name === 'Cell') {
+        const { props, rest } = tableProps(parts, 'Cell', COMPONENTS.get('Cell')!);
+        span = (props['span'] as number | undefined) ?? 1;
+        if (span < 1) throw new ViewError('Cell span must be at least 1', child);
+        align = props['align'] as Align | undefined;
+        style = { ...rowStyle, ...styleOf(props) };
+        content = rest;
+    }
+    const only = content.length === 1 ? listToArray(content[0]!) : null;
+    if (only !== null && only[0]?.t === 'sym' && CHARTS.has(only[0].name)) {
+        const chart = convert(content[0]!, false) as React.ReactElement;
+        return { span, align, style, chart, nodes: [], text: '' };
+    }
+    const nodes: Node[] = [];
+    for (const c of content) splice(c, true, nodes);
+    return {
+        span, align, style, chart: null,
+        nodes: nodes.filter((n): n is React.ReactElement | string => n !== null),
+        text: content.map(plainText).join(''),
+    };
+}
+
+// The text a cell shows, for measuring `auto` columns.
+function plainText(v: Value): string {
+    if (v.t === 'str') return v.v;
+    if (v.t === 'int' || v.t === 'float') return String(v.v);
+    const items = listToArray(v);
+    if (items === null) return '';
+    const body = items[0]?.t === 'sym' ? items.slice(1) : items;
+    return body
+        .filter((x) => !(x.t === 'pair' && x.car.t === 'sym' && x.car.name === '@'))
+        .map(plainText)
+        .join('');
 }
