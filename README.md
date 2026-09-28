@@ -60,10 +60,14 @@ node bin/cpi.ts examples/actors/actors.slight examples/actors/ping-pong.slight
 `examples/gateway/` is a web gateway on `http::` (`SPEC-HTTP.md`): a router
 actor, a pool of pre-warmed workers on one shared queue that grows under load
 and parks when idle, and counters created on first use that sleep and wake
-(tutorial section 10):
+(tutorial section 10). It runs plain or under a live terminal monitor, and
+`examples/gateway/scenarios/` plays curl load against it. See
+[`examples/gateway/README.md`](examples/gateway/README.md), which also records
+what the first measurements showed.
 
 ```sh
-node bin/cpi.ts examples/gateway/gateway.slight   # then: curl localhost:8080/hello/ada
+node bin/cpi.ts examples/gateway/gateway.slight examples/gateway/plain.slight     # then: curl localhost:8080/hello/ada
+node bin/cpi.ts examples/gateway/gateway.slight examples/gateway/monitor.slight   # the same, with the monitor
 ```
 
 `examples/life/` holds the Game of Life written 22 different ways, as a tour of

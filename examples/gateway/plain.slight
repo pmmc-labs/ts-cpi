@@ -1,0 +1,9 @@
+; Runs the gateway (gateway.slight) printing each thing it does:
+;
+;     node bin/cpi.ts examples/gateway/gateway.slight examples/gateway/plain.slight
+
+(defun main ()
+    (let started (start-gateway))
+    (let final (gateway (car started) (second started) (cons print-events 0)))
+    (http::close gateway-port)
+    (IO::print "[gateway] stopped:" (stats final)))

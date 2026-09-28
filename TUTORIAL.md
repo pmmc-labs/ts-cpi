@@ -622,8 +622,9 @@ be passed along with the request. It takes one response. A later one, like a
 reply after the timeout (when the host has already answered `504`), is a dead
 letter. A request to a full mailbox is answered `503` at once.
 
-`examples/gateway/gateway.slight` puts this together with parking and
-several receivers on one mailbox:
+`examples/gateway/` puts this together with parking and several receivers on
+one mailbox. `gateway.slight` is a library, run by `plain.slight` or by
+`monitor.slight`:
 
 - A **router** process receives every request and forwards it to the endpoint its first path segment names, with that segment removed.
 - **`/hello/<name>`** is served by a pool of identical workers that all receive on one durable mailbox. A mailbox with several receivers is a work queue: each message wakes only the receiver that has waited longest. The first hello worker runs its warm-up, waits for its first request, and is parked as a **template**. Every hello worker is unparked from it, already warm, because parked data can be unparked any number of times.
@@ -631,7 +632,7 @@ several receivers on one mailbox:
 - The **CPI** is the supervisor. It gives each ready process a turn, answers `/system/stats` and `/system/quit` itself, adds a hello worker while requests wait in the queue, and parks any worker that has been idle for two seconds: spare hello workers into cold storage, and counters into sleep. A counter's mailbox is durable, so a request to a sleeping counter waits for it, and the CPI unparks the counter when one does. Its count survives, because it is in the parked continuation.
 
 ```
-$ node bin/cpi.ts examples/gateway/gateway.slight
+$ node bin/cpi.ts examples/gateway/gateway.slight examples/gateway/plain.slight
 $ curl localhost:8080/hello/ada
 hello, ada
 $ curl localhost:8080/counter/ada
@@ -670,6 +671,19 @@ Two things about the supervisor loop matter for any server:
 hello requests, counters, five quiet seconds, and a second visit. It runs on
 the virtual clock with a headless HTTP backend, so every line of the log and
 every response is exact.
+
+**Measuring it.** Two builtins let the CPI see what its processes cost:
+
+- `(process::ticks pid)` is the number of ticks a process has used over all its runs. The ticks one turn used are the difference around `process::run`.
+- `(http::subscribe-log address)` makes the host report each finished request as `(served port method path status arrived delivered answered)`. `delivered - arrived` is the time the request waited for the CPI's loop, and `answered - delivered` the time the processes took.
+
+`monitor.slight` shows these live, per endpoint, with sparklines of the last
+20 seconds and the share of the loop spent running processes, on the CPI's
+own work, drawing and waiting. `/system/metrics` returns the same numbers as
+text, and the curl scripts in `examples/gateway/scenarios/` play bursts,
+ramps and overloads against a running gateway. The gateway's `README.md` has
+what they showed: the processes are cheap, and the pressure comes from the
+CPI's own supervisor loop.
 
 ## 11. Common mistakes
 

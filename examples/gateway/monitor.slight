@@ -1,0 +1,210 @@
+; Runs the gateway (gateway.slight) under a live monitor on the terminal:
+;
+;     node bin/cpi.ts examples/gateway/gateway.slight examples/gateway/monitor.slight
+;
+; Keys: q quits, + and - change the most hello workers, f changes the frame
+; rate. The monitor is one more step in the CPI's loop: while it draws,
+; nothing else runs, so it draws on a timer, and its header shows what the
+; drawing costs.
+
+(const fps-default 4)
+(const fps-choices '(1 2 4 10 30))
+(const events-shown 8)
+
+(defun main ()
+    (tui::open 'fullscreen)
+    (let keys (mailbox::create #true 64))
+    (tui::subscribe keys)
+    (let started (start-gateway))
+    (let final (gateway (car started) (second started) (cons monitor (vector keys fps-default 0))))
+    (http::close gateway-port)
+    (tui::close)
+    (print-events 0 (car started) final 0)
+    (IO::print "[gateway] stopped:" (stats final)))
+
+; The UI step: reads keys, and draws a frame when one is due. The UI state
+; is a vector: the keys mailbox, frames per second, and when the next frame
+; is due.
+(defun monitor (ui w st now)
+    (let keyed (read-keys ui st))
+    (let ui2 (car keyed))
+    (let st2 (second keyed))
+    (let frame-ms (/ 1000 (vector-ref ui2 1)))
+    (if (>= now (vector-ref ui2 2))
+        (do
+            (let view (monitor-view w st2 ui2 now))
+            (let built (host::now))
+            (tui::render view)
+            (list (vector-set ui2 2 (+ now frame-ms)) (add-frame st2 (- built now)) (min2 check-ms frame-ms)))
+        (list ui2 st2 (min2 check-ms (- (vector-ref ui2 2) now)))))
+
+(defun read-keys (ui st)
+    (let event (mailbox::take (vector-ref ui 0)))
+    (cond
+        ((not event) (list ui st))
+        ((eq? (car event) :key)
+            (let handled (on-key (second event) (third event) ui st))
+            (read-keys (car handled) (second handled)))
+        (#true (read-keys ui st))))
+
+(defun on-key (name mods ui st)
+    (cond
+        ((or (eq? name "q") (and (eq? name "c") (member? 'ctrl mods)))
+            (list ui (stop (log-event st "quit from the keyboard"))))
+        ((or (eq? name "+") (eq? name "="))
+            (list ui (set-hello-max st (+ (st-hello-max st) 1))))
+        ((eq? name "-")
+            (list ui (set-hello-max st (- (st-hello-max st) 1))))
+        ((eq? name "f")
+            (list (vector-set ui 1 (next-fps (vector-ref ui 1) fps-choices)) st))
+        (#true (list ui st))))
+
+(defun next-fps (fps choices)
+    (cond
+        ((nil? choices) (car fps-choices))
+        ((and (= (car choices) fps) (not (nil? (cdr choices)))) (car (cdr choices)))
+        ((= (car choices) fps) (car fps-choices))
+        (#true (next-fps fps (cdr choices)))))
+
+; ---------------------------------------------------------------------------
+; The view: a header, one row per endpoint, and the latest events.
+
+(defun monitor-view (w st ui now)
+    `(Box (@ (flexDirection column))
+        ,(header-view st ui now)
+        ,(table-view w st)
+        ,(events-view st)
+        (Text (@ (dimColor #true)) " q quit · + / - hello max · f frame rate")))
+
+(defun header-view (st ui now)
+    (let counts (m-status (st-metrics st)))
+    `(Box (@ (borderStyle round) (flexDirection column) (paddingX 1))
+        (Text (@ (bold #true))
+            ,(string-join " · "
+                (list
+                    (string-append "gateway :" (value->string gateway-port))
+                    (string-append "up " (clock-text now))
+                    (string-append "hello max " (value->string (st-hello-max st)))
+                    (string-append (value->string (vector-ref ui 1)) " fps"))))
+        (Text
+            ,(string-join " · "
+                (list
+                    (labelled "requests" (vector-ref counts 0)) (labelled "2xx" (vector-ref counts 1))
+                    (labelled "4xx" (vector-ref counts 2)) (labelled "503" (vector-ref counts 3))
+                    (labelled "504" (vector-ref counts 4)) (labelled "5xx" (vector-ref counts 5))
+                    (labelled "gone" (vector-ref counts 6)))))
+        (Text ,(loop-text (m-phases (st-metrics st))))))
+
+(defun labelled (label n) (string-append label " " (value->string n)))
+
+; The last second of the loop: how often it went round, the share of its
+; time spent running processes, on its own work, drawing and waiting, and
+; what a frame cost.
+(defun loop-text (p)
+    (let total (max2 1 (+ (vector-ref p 1) (+ (vector-ref p 2) (+ (vector-ref p 3) (vector-ref p 4))))))
+    (string-join " · "
+        (list
+            (string-append "loop " (value->string (vector-ref p 0)) "/s")
+            (percent "run" (vector-ref p 1) total)
+            (percent "other" (vector-ref p 2) total)
+            (percent "draw" (vector-ref p 3) total)
+            (percent "wait" (vector-ref p 4) total)
+            (if (= (vector-ref p 5) 0)
+                "no frames"
+                (string-append "frame " (value->string (/ (vector-ref p 3) (vector-ref p 5))) " ms, "
+                    (value->string (/ (vector-ref p 6) (vector-ref p 5))) " building")))))
+
+(defun percent (label n total)
+    (string-append label " " (value->string (/ (* n 100) total)) "%"))
+
+(defun clock-text (ms)
+    (let s (% (/ ms 1000) 60))
+    (string-append (value->string (/ ms 60000)) (if (< s 10) ":0" ":") (value->string s)))
+
+(const columns
+    '(("endpoint" 10) ("workers" 22) ("queue" 7) ("req/s" 7) ("wait p95" 10) ("work p95" 10)
+        ("ticks/s" 9) ("req/s, 20 s" 21) ("p95, 20 s" 21)))
+
+(defun table-view (w st)
+    `(Box (@ (flexDirection column) (paddingX 1))
+        (Box (@ (flexDirection row)) ,@(map header-cell columns))
+        ,(row (endpoint-cells st "hello" (hello-workers st) (mailbox::size (world-queue w))))
+        ,(row (endpoint-cells st "counter" (counter-workers st) (mailbox::size (world-counters-box w))))
+        ,(row (endpoint-cells st "slow" (kind-workers st 'slow) (mailbox::size (world-slow-box w))))
+        ,(row (endpoint-cells st "router" (kind-workers st 'router) (mailbox::size (world-router-box w))))
+        ,(row (endpoint-cells st "system" "the CPI" (mailbox::size (world-inbox w))))
+        ,(row (endpoint-cells st "other" "" 0))))
+
+(defun header-cell (column)
+    `(Box (@ (width ,(second column)) (flexShrink 0) (paddingRight 1)) (Text (@ (dimColor #true)) ,(car column))))
+
+(defun row (cells)
+    `(Box (@ (flexDirection row)) ,@(cell-views columns cells)))
+
+(defun cell-views (columns cells)
+    (if (nil? columns)
+        ()
+        (cons (cell-view (car columns) (car cells)) (cell-views (cdr columns) (cdr cells)))))
+
+(defun cell-view (column text)
+    `(Box (@ (width ,(second column)) (flexShrink 0) (paddingRight 1)) (Text (@ (wrap truncate-end)) ,text)))
+
+; An endpoint's row: its numbers are the last full second's.
+(defun endpoint-cells (st name workers queue)
+    (let ep (endpoint st name))
+    (let s (ep-last ep))
+    (let history (reverse (ep-history ep)))
+    (list name workers (value->string queue) (value->string (vector-ref s 0))
+        (bin-label (vector-ref s 2)) (bin-label (vector-ref s 4)) (value->string (vector-ref s 6))
+        (spark (map (lambda (h) (vector-ref h 0)) history) 0)
+        (spark (map (lambda (h) (+ 1 (vector-ref h 5))) history) 11)))
+
+; ● ready, ○ waiting in recv, ◌ parked.
+(defun proc-dot (p) (if (ready? p) "●" "○"))
+
+(defun of-kind (procs kind)
+    (fold (lambda (acc p) (if (eq? (proc-kind p) kind) (append acc (list p)) acc)) () procs))
+
+(defun hello-workers (st)
+    (let hello (of-kind (st-procs st) 'hello))
+    (string-append
+        (string-join "" (map proc-dot hello))
+        " " (value->string (length hello)) "/" (value->string (st-hello-max st))
+        (if (nil? (st-cold st)) "" (string-append "  ◌ " (value->string (length (st-cold st)))))))
+
+(defun counter-workers (st)
+    (string-join " "
+        (append
+            (map (lambda (p) (string-append (proc-dot p) (second (proc-kind p)))) (counter-procs (st-procs st)))
+            (map (lambda (a) (string-append "◌" (car a))) (st-asleep st)))))
+
+(defun kind-workers (st kind)
+    (string-join "" (map proc-dot (of-kind (st-procs st) kind))))
+
+; A sparkline of `values`, oldest first, right-aligned in history-length
+; columns. Zero is blank. `top` is the value drawn full height, or 0 for the
+; largest value shown.
+(const spark-chars '(" " "▁" "▂" "▃" "▄" "▅" "▆" "▇" "█"))
+
+(defun spark (values top)
+    (let scale (if (= top 0) (fold max2 1 values) top))
+    (string-append
+        (repeat-string " " (- history-length (length values)))
+        (string-join "" (map (lambda (v) (nth spark-chars (spark-level v scale))) values))))
+
+(defun spark-level (v top)
+    (if (<= v 0) 0 (min2 8 (+ 1 (/ (* (- v 1) 7) (max2 1 (- top 1)))))))
+
+(defun repeat-string (s n)
+    (if (<= n 0) "" (string-append s (repeat-string s (- n 1)))))
+
+(defun events-view (st)
+    `(Box (@ (flexDirection column) (paddingX 1) (marginTop 1))
+        (Text (@ (dimColor #true)) "events")
+        ,@(map event-line (take (st-events st) events-shown))))
+
+(defun event-line (e)
+    `(Text (@ (wrap truncate-end)) ,(string-append (seconds-text (second e)) "  " (third e))))
+
+(defun seconds-text (ms)
+    (string-append (value->string (/ ms 1000)) "." (value->string (/ (% ms 1000) 100)) "s"))
