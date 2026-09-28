@@ -288,9 +288,13 @@
 ;   hello-max  the most hello workers there may be
 ;   events     what the CPI has done, newest first, each (seq time text)
 ;   metrics    see Metrics below
+;   plan       what the host runs (DESIGN-PLAN.md): the round, and the
+;              mailboxes whose mail wakes the CPI, which are its own, the
+;              UI's, and those of the counters asleep
+;   inboxes    the CPI's and the UI's mailboxes
 
-(defun state (procs)
-    (vector procs () () #true hello-max-default () (new-metrics)))
+(defun state (procs inboxes)
+    (with-asleep (vector procs () () #true hello-max-default () (new-metrics) () inboxes) ()))
 (defun st-procs (st) (vector-ref st 0))
 (defun st-cold (st) (vector-ref st 1))
 (defun st-asleep (st) (vector-ref st 2))
@@ -298,9 +302,14 @@
 (defun st-hello-max (st) (vector-ref st 4))
 (defun st-events (st) (vector-ref st 5))
 (defun st-metrics (st) (vector-ref st 6))
+(defun st-plan (st) (vector-ref st 7))
 (defun with-procs (st procs) (vector-set st 0 procs))
 (defun with-cold (st cold) (vector-set st 1 cold))
-(defun with-asleep (st asleep) (vector-set st 2 asleep))
+; The plan changes only when a counter falls asleep or wakes, so the host
+; reads it again only then.
+(defun with-asleep (st asleep)
+    (vector-set (vector-set st 2 asleep) 7
+        (list (list 'round quota idle-ms) (cons 'inbox (append (vector-ref st 8) (map second asleep))))))
 (defun stop (st) (vector-set st 3 #false))
 (defun with-metrics (st m) (vector-set st 6 m))
 
@@ -446,13 +455,14 @@
 
 ; All metrics, a vector: status counts (requests, 2xx and 3xx, 4xx, 503, 504,
 ; other 5xx, clients gone); each endpoint as (name metrics); this second's
-; loop phases and the last second's, each a vector (loops run other draw
-; wait frames build) of counts and milliseconds, where build is the part of
-; draw spent making the view in CPI code and the rest is the host painting
-; it; the current second; and the loop phases since the start.
+; loop phases and the last second's, each a vector (loops plan other draw
+; frames build) of counts and milliseconds, where plan is the time in
+; plan::run (running processes and waiting), build is the part of draw spent
+; making the view in CPI code, and the rest of draw is the host painting it;
+; the current second; and the loop phases since the start.
 (defun new-metrics ()
     (vector (make-vector 7 0) (map (lambda (name) (list name (new-endpoint))) endpoint-names)
-        (make-vector 7 0) (make-vector 7 0) 0 (make-vector 7 0)))
+        (make-vector 6 0) (make-vector 6 0) 0 (make-vector 6 0)))
 (defun m-status (m) (vector-ref m 0))
 (defun m-endpoints (m) (vector-ref m 1))
 (defun m-phases (m) (vector-ref m 3))
@@ -554,18 +564,18 @@
         (with-metrics st
             (vector (m-status m)
                 (map (lambda (e) (list (car e) (close-seconds (second e) gap))) (m-endpoints m))
-                (make-vector 7 0) (vector-ref m 2) s (vector-ref m 5)))
+                (make-vector 6 0) (vector-ref m 2) s (vector-ref m 5)))
         st))
 
-(defun add-phases (st run other draw wait)
+(defun add-phases (st plan other draw)
     (let m (st-metrics st))
     (with-metrics st
-        (vector-set (vector-set m 2 (phases-plus (vector-ref m 2) run other draw wait))
-            5 (phases-plus (vector-ref m 5) run other draw wait))))
+        (vector-set (vector-set m 2 (phases-plus (vector-ref m 2) plan other draw))
+            5 (phases-plus (vector-ref m 5) plan other draw))))
 
-(defun phases-plus (p run other draw wait)
-    (vector (+ 1 (vector-ref p 0)) (+ run (vector-ref p 1)) (+ other (vector-ref p 2))
-        (+ draw (vector-ref p 3)) (+ wait (vector-ref p 4)) (vector-ref p 5) (vector-ref p 6)))
+(defun phases-plus (p plan other draw)
+    (vector (+ 1 (vector-ref p 0)) (+ plan (vector-ref p 1)) (+ other (vector-ref p 2))
+        (+ draw (vector-ref p 3)) (vector-ref p 4) (vector-ref p 5)))
 
 ; A frame was drawn, and making its view took `build` ms.
 (defun add-frame (st build)
@@ -574,7 +584,7 @@
         (vector-set (vector-set m 2 (frame-plus (vector-ref m 2) build)) 5 (frame-plus (vector-ref m 5) build))))
 
 (defun frame-plus (p build)
-    (vector-set (bump p 5) 6 (+ build (vector-ref p 6))))
+    (vector-set (bump p 4) 5 (+ build (vector-ref p 5))))
 
 ; The metrics as text, for /system/metrics.
 (defun metrics-text (st)
@@ -593,10 +603,9 @@
 
 (defun phases-text (label p)
     (string-join " "
-        (list label "loops" (value->string (vector-ref p 0)) "run" (value->string (vector-ref p 1))
+        (list label "loops" (value->string (vector-ref p 0)) "plan" (value->string (vector-ref p 1))
             "other" (value->string (vector-ref p 2)) "draw" (value->string (vector-ref p 3))
-            "wait" (value->string (vector-ref p 4)) "frames" (value->string (vector-ref p 5))
-            "build" (value->string (vector-ref p 6)))))
+            "frames" (value->string (vector-ref p 4)) "build" (value->string (vector-ref p 5)))))
 
 (defun endpoint-text (name ep)
     (let s (ep-last ep))
@@ -606,22 +615,24 @@
             "total-p95" (bin-label (vector-ref s 5)) "ticks" (value->string (vector-ref s 6)))))
 
 ; ---------------------------------------------------------------------------
-; Scheduling: the host runs one turn for each ready process
-; (process::run-ready) and reports what the CPI must act on: a process that
-; ended, or one idle in recv for idle-ms, which it may put to sleep.
+; Scheduling: the host runs the plan (plan::run), round after round, and
+; returns what the CPI must act on: a process that ended, one idle in recv
+; for idle-ms, which it may put to sleep, or mail in one of its mailboxes.
 
 (defun ready? (p)
     (eq? (car (process::state (proc-pid p))) :ready))
 
-; Returns (st ready), where ready is how many processes are still ready.
-(defun run-round (st)
-    (let r (process::run-ready quota idle-ms))
-    (list (fold handle-event st (car r)) (second r)))
+(defun handle-events (w st events)
+    (fold (lambda (acc event) (handle-event w acc event)) st events))
 
-(defun handle-event (st event)
-    (let p (find-proc (st-procs st) (car event)))
+(defun handle-event (w st event)
     (let what (second event))
+    (let p (find-proc (st-procs st) (car event)))
     (cond
+        ; The CPI reads its own mailboxes every time it is woken; mail for a
+        ; counter asleep wakes it.
+        ((eq? (car what) :mail)
+            (if (member? (car event) (vector-ref st 8)) st (wake-counter w st (car event))))
         ((not p) st)
         ((eq? (car what) :idle) (sleep-idle st p))
         ((or (eq? (car what) :exited) (eq? (car what) :failed))
@@ -692,20 +703,22 @@
     (log-event added
         (string-join " " (list "hello +1 from" (if (nil? cold) "the template:" "cold storage:") (stats added)))))
 
-; A counter asleep wakes when a request waits in its mailbox.
-(defun wake-counters (w st)
-    (wake-each w (st-asleep st) (with-asleep st ())))
-
-(defun wake-each (w asleep st)
-    (cond
-        ((nil? asleep) st)
-        ((> (mailbox::size (second (car asleep))) 0)
-            (let a (car asleep))
+; A counter asleep wakes when the plan reports mail in its mailbox, which is
+; in the plan's inbox while it sleeps.
+(defun wake-counter (w st to)
+    (let a (find-asleep (st-asleep st) to))
+    (if a
+        (do
             (let pid (process::unpark (third a) (world-counter-env w)))
-            (wake-each w (cdr asleep)
-                (add-proc (log-event st (string-append "counter " (car a) " awake")) pid (list 'counter (car a) (second a)))))
-        (#true
-            (wake-each w (cdr asleep) (with-asleep st (append (st-asleep st) (list (car asleep))))))))
+            (let awake (with-asleep st (fold (lambda (acc b) (if (eq? b a) acc (cons b acc))) () (reverse (st-asleep st)))))
+            (add-proc (log-event awake (string-append "counter " (car a) " awake")) pid (list 'counter (car a) (second a))))
+        st))
+
+(defun find-asleep (asleep to)
+    (cond
+        ((nil? asleep) #false)
+        ((eq? (second (car asleep)) to) (car asleep))
+        (#true (find-asleep (cdr asleep) to))))
 
 ; ---------------------------------------------------------------------------
 ; Sleeping: a hello worker beyond the minimum, or any counter, reported idle
@@ -740,8 +753,10 @@
         turns))
 
 ; Makes the mailboxes, warms the template, starts the router, the counters
-; endpoint and one hello worker, and starts listening. Returns (world state).
-(defun start-gateway ()
+; endpoint and one hello worker, and starts listening. `ui-inboxes` are the
+; UI's mailboxes (its keys), whose mail wakes the CPI as its own does.
+; Returns (world state).
+(defun start-gateway (ui-inboxes)
     (let inbox (mailbox::create #true 100))
     (let queue (mailbox::create #true 100))
     (let router-box (mailbox::create #true 100))
@@ -755,7 +770,7 @@
     (let router (spawn-on (process-env (router-code)) 'router (list routes) router-box))
     (let counters (spawn-on (process-env (counters-code)) 'counters (list inbox ()) counters-box))
     (let slow (spawn-on (process-env (slow-code)) 'slow-worker () slow-box))
-    (let st (log-event (state (list (list router 'router 0) (list counters 'counters 0) (list slow 'slow 0)))
+    (let st (log-event (state (list (list router 'router 0) (list counters 'counters 0) (list slow 'slow 0)) (cons inbox (cons log-box ui-inboxes)))
         (string-append "hello template warmed up in " (value->string (second warm)) " turns")))
     (http::listen gateway-port router-box request-timeout)
     (http::subscribe-log log-box)
@@ -763,32 +778,26 @@
 
 ; The supervisor loop. `ui` is (step . ui-state): once each time round, the
 ; loop calls (step ui-state w st now), which returns (ui-state st wait), where
-; `wait` is the longest the loop may wait before calling it again.
+; `wait` is the longest the loop may go before calling it again. `events` are
+; what the last plan::run returned.
 ;
-; Requests enter mailboxes only inside host::wait, so the loop waits every
-; time round: for 0 ms while processes are ready, else for up to `wait`. The
-; CPI's own work comes before the round, so a process it wakes or adds runs
-; in the same loop, and the round's count of ready processes is still right
-; when the loop waits. The round cannot count the CPI's own inbox, which its
-; processes may send to while it runs, so the loop checks that itself. Queues
-; are sampled after the round, as the backlog the round left. It times each
-; part with host::now: its own work, running processes, the UI, and waiting.
-(defun gateway (w st ui)
+; The host runs the plan until the CPI is needed: a process ended or went
+; idle, mail reached the CPI's inbox, its served log, the UI or a counter
+; asleep, or `wait` passed. The CPI then does its own work, lets the UI step, and hands the
+; plan back. It times each part with host::now: its own work, the UI, and
+; the plan, which is running processes and waiting together.
+(defun gateway (w st ui events)
     (if (st-running? st)
         (do
             (let t0 (host::now))
-            (let st1 (wake-counters w (scale-hello w (read-served-log w (handle-inbox w (roll-second st t0))))))
+            (let st1 (sample-queues w (scale-hello w (read-served-log w (handle-inbox w (handle-events w (roll-second st t0) events))))))
             (let t1 (host::now))
-            (let round (run-round st1))
+            (let stepped ((car ui) (cdr ui) w st1 t1))
+            (let st2 (second stepped))
             (let t2 (host::now))
-            (let st2 (sample-queues w (car round)))
+            (let next (plan::run (st-plan st2) (third stepped)))
             (let t3 (host::now))
-            (let stepped ((car ui) (cdr ui) w st2 t3))
-            (let st4 (second stepped))
-            (let t4 (host::now))
-            (host::wait (if (or (> (second round) 0) (> (mailbox::size (world-inbox w)) 0)) 0 (third stepped)))
-            (let t5 (host::now))
-            (gateway w (add-phases st4 (- t2 t1) (+ (- t1 t0) (- t3 t2)) (- t4 t3) (- t5 t4)) (cons (car ui) (car stepped))))
+            (gateway w (add-phases st2 (- t3 t2) (- t1 t0) (- t2 t1)) (cons (car ui) (car stepped)) next))
         st))
 
 ; A UI step that prints each event once: `seen` is the newest one printed.

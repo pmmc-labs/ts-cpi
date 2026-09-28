@@ -116,6 +116,9 @@ export interface Handlers {
     httpClose(portV: Value): Answer;
     httpSubscribeLog(addrV: Value): ActionResult;
     httpUnsubscribeLog(): ActionResult;
+
+    // plan:: (DESIGN-PLAN.md; privileged, the CPI only)
+    planRun(planV: Value, timeoutV: Value): Answer;
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +157,9 @@ export const NAMESPACES: ReadonlyMap<string, ReadonlyMap<string, ActionSpec>> = 
         'wait':       { arity: 1, run: (h, _c, a) => h.hostWait(a[0]!) },
         'set-traps':  { arity: 1, run: (h, _c, a) => h.hostSetTraps(a[0]!) },
         'now':        { arity: 0, run: (h) => h.hostNow() },
+    })],
+    ['plan', ns({
+        'run':        { arity: 2, run: (h, _c, a) => h.planRun(a[0]!, a[1]!) },
     })],
     ['environment', ns({
         'self':          { arity: 0, run: (h) => h.envSelf() },

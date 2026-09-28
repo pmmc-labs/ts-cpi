@@ -108,3 +108,26 @@ at every evaluation (a probe caching the array on the pair), made
 `listToArray`'s share of the profile. With the CPI out of the per-turn path,
 process batches are a quarter of the CPU, so the interpreter's speed now
 sets throughput directly.
+
+## After `plan::run` (Sep 28, 2026)
+
+The host runs rounds and waits until the CPI is needed; the gateway's CPI
+runs once per batch of events, and a sleeping counter's mailbox is in the
+plan's inbox, so nothing is polled (`DECISIONS.md`, Spec changes).
+
+| hello, 8 clients | After `run-ready` | After `plan::run` |
+| --- | --- | --- |
+| The gateway | 2,606/s, p50 3.0 ms | 3,075/s, p50 2.4 ms |
+| Metrics stubbed (the served log still wakes the CPI) | 13,602/s | 13,651/s |
+| No served log: the CPI wakes only on events | | 17,416/s, p50 0.4 ms |
+| CPU with no served log: the CPI / process batches / outside the CPI | | 0.1% / 42% / 29% |
+
+| Scenario | After `run-ready` | After `plan::run` |
+| --- | --- | --- |
+| New counters, 8 clients | 32/s, p50 130 ms | 100/s, p50 72 ms |
+| hello after the counters | 854/s with 219 (202 asleep) | 2,520/s with 609 (477 asleep) |
+| `/slow` beside hello | hello 2,501/s; every slow request 504 | hello 3,050/s; every slow request 504 |
+
+- **With nothing to meter, the CPI is idle.** Without the served log it used 18 ms of CPU in a 25-second run, and the gateway did 17,416 requests a second: processes (42%) and HTTP and Node outside the CPI (29%) are the limit now.
+- **The served log is what still wakes the CPI.** It is delivered in every wait, so the CPI wakes about as often as before, and metrics are still most of its work: the monitor faux actor (`DESIGN-PLAN.md`, step 3) is the next large gain.
+- **Many processes no longer cost.** hello with 477 counters asleep runs at the speed it has with none, now that no sleeping counter is polled. A first version walked the whole list of sleeping counters for each mail event, including mail in the CPI's own inbox, which cost 36% of the CPI's ticks (a CPI tick profile found it).

@@ -355,6 +355,107 @@ test('process::run-ready: a process waiting in recv for idle ms is reported once
     assert.equal(print(v), '((() 0) (() 0) (((#<pid 1> (idle))) 0) (() 0) (() 0) (() 0) (((#<pid 1> (idle))) 0))');
 });
 
+// ---------------------------------------------------------------------------
+// plan::run (DECISIONS.md, Spec changes, 2026-09-28; DESIGN-PLAN.md)
+// ---------------------------------------------------------------------------
+
+test('plan::run: runs rounds until one reports an event, across quotas', async () => {
+    const v = await ok(`
+        (defun count (n) (if (= n 0) :done (count (- n 1))))
+        (defun main ()
+            (let p (process::spawn count (list 20) (environment::self) '() #false))
+            (let r (plan::run (list (list 'round 100 #false)) #false))
+            (list r (> (process::ticks p) 100)))
+    `);
+    assert.equal(print(v), '(((#<pid 1> (exited done))) #true)');
+});
+
+test('plan::run: mail in an inbox wakes the CPI, after the round\'s own events', async () => {
+    const v = await ok(`
+        (defun sender (to) (actor::send to :hi) :sent)
+        (defun main ()
+            (let box (mailbox::create #true 10))
+            (let p (process::spawn sender (list box) (environment::self) '(actor) #false))
+            (let plan (list (list 'round 100 #false) (list 'inbox box)))
+            (let r1 (plan::run plan #false))
+            (let r2 (plan::run plan #false))
+            (list r1 (eq? (car (car r2)) box) (car (cdr (car r2))) (cdr r2) (mailbox::take box)))
+    `);
+    assert.equal(print(v), '(((#<pid 1> (exited sent))) #true (mail) () hi)');
+});
+
+test('plan::run: returns () when the timeout passes with nothing to report', async () => {
+    const v = await ok(`
+        (defun waiter () (actor::recv))
+        (defun main ()
+            (let w (process::spawn waiter () (environment::self) '(actor) #false))
+            (let t0 (host::now))
+            (let r (plan::run (list (list 'round 100 #false)) 1000))
+            (list r (- (host::now) t0) (process::state w)))
+    `);
+    assert.equal(print(v), '(() 1000 (blocked recv))');
+});
+
+test('plan::run: a sleeping process wakes inside the request, which returns when it exits', async () => {
+    const v = await ok(`
+        (defun sleeper () (timer::sleep 500) :woke)
+        (defun main ()
+            (let p (process::spawn sleeper () (environment::self) '(timer) #false))
+            (let t0 (host::now))
+            (let r (plan::run (list (list 'round 100 #false)) #false))
+            (list r (- (host::now) t0)))
+    `);
+    assert.equal(print(v), '(((#<pid 1> (exited woke))) 500)');
+});
+
+test('plan::run: reports idle processes, as the round does', async () => {
+    const v = await ok(`
+        (defun waiter () (actor::recv) (waiter))
+        (defun main ()
+            (let w (process::spawn waiter () (environment::self) '(actor) #false))
+            (let t0 (host::now))
+            (let r (plan::run (list (list 'round 100 2000)) 5000))
+            (list r (- (host::now) t0)))
+    `);
+    assert.equal(print(v), '(((#<pid 1> (idle))) 2000)');
+});
+
+test('plan::run: without a round node, no process is run', async () => {
+    const v = await ok(`
+        (defun one () 1)
+        (defun main ()
+            (let box (mailbox::create #true 10))
+            (let p (process::spawn one () (environment::self) '() #false))
+            (let r (plan::run (list (list 'inbox box)) 100))
+            (list r (process::state p)))
+    `);
+    assert.equal(print(v), '(() (ready))');
+});
+
+test('plan::run: returns () when nothing can happen, even with no timeout', async () => {
+    const v = await ok(`
+        (defun main ()
+            (plan::run (list (list 'round 100 #false)) #false))
+    `);
+    assert.equal(print(v), '()');
+});
+
+test('plan::run: a plan is a list of known nodes, at most one round, and the timeout an integer >= 0 or #false', async () => {
+    const v = await ok(`
+        (defun main ()
+            (let box (mailbox::create #true 10))
+            (list
+                (catch (plan::run 5 #false) e (error-tag e))
+                (catch (plan::run (list (list 'mixer 1)) #false) e (error-tag e))
+                (catch (plan::run (list (list 'round 100 #false) (list 'round 10 #false)) #false) e (error-tag e))
+                (catch (plan::run (list (list 'round 0 #false)) #false) e (error-tag e))
+                (catch (plan::run (list (list 'inbox 3)) #false) e (error-tag e))
+                (catch (plan::run (list (list 'inbox box)) -1) e (error-tag e))
+                (plan::run () 0)))
+    `);
+    assert.equal(print(v), '(type-error type-error type-error type-error type-error type-error ())');
+});
+
 test('process::run-ready: n must be a positive integer, and idle a non-negative integer or #false', async () => {
     const v = await ok(`
         (defun main ()

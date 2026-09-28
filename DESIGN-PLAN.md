@@ -168,6 +168,14 @@ plan, and hierarchical quotas (DESIGN-001 section 12) as each part's budget.
 5. **Metrics and display are one faux actor.** A host node with an address: anything can send it events, it aggregates in the host (the served log, ticks, queue lengths), and it redraws the view when there is something new, with no frame rate of its own. It looks like an actor to the rest of the system, but no interpreted code runs per request.
 6. **sys/ actors have full CPI privileges.** A sys/ actor is a real process, running code in the language, granted the privileged namespaces. This is a spec change: SPEC-CPI section 10 says an ordinary process is never granted them. The faux actor in 5 is a host node, not a sys/ actor.
 
+## Findings from step 1 (`plan::run`, Sep 28, 2026)
+
+- **Built and measured.** With no served log to read, the gateway's CPI used 0.1% of the CPU and hello reached 17,416 requests a second (`PERFORMANCE.md`). The CPI now wakes once per batch of events.
+- **The inbox node already watches.** Putting a sleeping counter's mailbox in the plan's inbox makes its first request wake the CPI, which unparks that counter. That is the watcher's escalating half, with no new node.
+- **But whole plans cost the size of the plan on every edit,** and the CPI builds the plan in interpreted code. With 500 counters asleep, each one falling asleep rebuilds a 600-address list. Sleeping counters are voices, not the desk's setup: the watcher (step 2) should hold parked receivers in its own state, and could unpark them itself.
+- **A wait inside a plan is capped at the round's idle threshold,** so idle processes are reported at most that late; without the cap a long timeout would hide them.
+- **The pool now scales once per wake, not once per round.** In the gateway test's burst it added two workers where the round-by-round loop added three. The pool node (step 4) brings scaling back to every round, in the host.
+
 ## Open questions
 
 1. **The plan's shape.** Which fields each node kind has, and how the host diffs two plans: by node name, with a changed node's state carried over where its kind allows.

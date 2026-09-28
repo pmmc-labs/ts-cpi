@@ -38,6 +38,9 @@ export interface HttpBackend {
     // once `now` has reached it (null before then).
     nextDue?(): number | null;
     nextScripted?(now: number): { port: number; req: HttpRequest; exchange: HttpExchange } | null;
+    // Test backends only: host::now, so a recorded response can say when it
+    // was written.
+    setClock?(now: () => number): void;
 }
 
 // Splits a request target (`/users/42?x=1`) into decoded path segments and

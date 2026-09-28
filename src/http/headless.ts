@@ -25,10 +25,11 @@ export type ScriptedRequest = {
 };
 
 // What happened to scripted request number `request` (0-based): the response
-// written, or `aborted` for a client that disconnected first.
+// written, or `aborted` for a client that disconnected first, and when, on
+// host::now.
 export type Recorded =
-    | { readonly request: number; readonly status: number; readonly headers: readonly (readonly [string, string])[]; readonly body: string }
-    | { readonly request: number; readonly aborted: true };
+    | { readonly request: number; readonly at: number; readonly status: number; readonly headers: readonly (readonly [string, string])[]; readonly body: string }
+    | { readonly request: number; readonly at: number; readonly aborted: true };
 
 export class HeadlessHttp implements HttpBackend {
     readonly responses: Recorded[] = [];
@@ -38,6 +39,7 @@ export class HeadlessHttp implements HttpBackend {
     private sent = 0;
     // When the previous request arrived, on the virtual clock.
     private last = 0;
+    private clock: () => number = () => 0;
 
     constructor(script: readonly ScriptedRequest[] = []) {
         this.script = [...script];
@@ -51,6 +53,10 @@ export class HeadlessHttp implements HttpBackend {
 
     async close(port: number): Promise<void> {
         this.listening.delete(port);
+    }
+
+    setClock(now: () => number): void {
+        this.clock = now;
     }
 
     nextDue(): number | null {
@@ -79,12 +85,12 @@ export class HeadlessHttp implements HttpBackend {
             respond: (res: HttpResponse) => {
                 if (done) return;
                 done = true;
-                this.responses.push({ request: index, status: res.status, headers: res.headers, body: res.body });
+                this.responses.push({ request: index, at: this.clock(), status: res.status, headers: res.headers, body: res.body });
             },
             onAbort: (cb) => {
                 if (next.disconnects !== true || done) return;
                 done = true;
-                this.responses.push({ request: index, aborted: true });
+                this.responses.push({ request: index, at: this.clock(), aborted: true });
                 cb();
             },
         };

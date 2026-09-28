@@ -30,6 +30,7 @@ import { NAMESPACES } from './builtins.ts';
 // ---------------------------------------------------------------------------
 
 const IDLE = list(sym('idle'));
+const MAIL = list(sym('mail'));
 const V = (v: Value): ActionResult => ({ kind: 'value', v });
 const T = (tag: string, message: string, payload: Value = NIL): ActionResult =>
     ({ kind: 'throw', e: makeError(tag, message, payload) });
@@ -37,7 +38,7 @@ const BLOCK = (reason: 'recv' | 'join' | 'host'): ActionResult => ({ kind: 'bloc
 const TRAP = (effect: string, args: Value): ActionResult => ({ kind: 'trap', effect, args });
 
 const ORDINARY_NAMESPACES = new Set(['actor', 'IO', 'timer']);
-const ALL_NAMESPACES = new Set(['process', 'mailbox', 'host', 'environment', 'actor', 'IO', 'timer', 'tui', 'http']);
+const ALL_NAMESPACES = new Set(['process', 'mailbox', 'host', 'environment', 'actor', 'IO', 'timer', 'tui', 'http', 'plan']);
 const TRAPPABLE_EFFECTS = new Set(['recv', 'send', 'self', 'join']);
 
 // ---------------------------------------------------------------------------
@@ -187,6 +188,10 @@ type DeadLetter = { readonly from: Addr | null; readonly to: Addr; readonly msg:
 // Runtime
 // ---------------------------------------------------------------------------
 
+// A plan (DESIGN-PLAN.md) as the host keeps it: the round's quota and idle
+// threshold, if it has a round, and the CPI's mailboxes whose mail wakes it.
+type Plan = { readonly round: { readonly n: number; readonly idle: number | null } | null; readonly inboxes: readonly Addr[] };
+
 export type RuntimeOptions = {
     // Where `IO::print` lines go while no TUI is open.
     readonly out: (line: string) => void;
@@ -243,6 +248,10 @@ export class Runtime implements Handlers {
     private readonly parkTable = new Map<number, ParkedRecord>();
     private readonly deadLettersList: DeadLetter[] = [];
     private traps = new Set<string>();
+    // The last plan plan::run was given, and what it says: a plan is only
+    // read again when the CPI passes a different value.
+    private planValue: Value | null = null;
+    private plan: Plan = { round: null, inboxes: [] };
 
     constructor(opts: RuntimeOptions) {
         this.out = opts.out;
@@ -555,7 +564,11 @@ export class Runtime implements Handlers {
         if (idleV.t === 'bool' && idleV.v === false) idle = null;
         else if (idleV.t === 'int' && idleV.v >= 0n) idle = Number(idleV.v);
         else return T('type-error', 'process::run-ready requires a non-negative integer idle or #false', idleV);
-        const n = Number(nV.v);
+        const round = this.runRound(Number(nV.v), idle);
+        return V(list(list(...round.events), int(round.ready)));
+    }
+
+    private runRound(n: number, idle: number | null): { events: Value[]; ready: number } {
         const now = this.now();
         const events: Value[] = [];
         for (const entry of this.live) {
@@ -572,7 +585,7 @@ export class Runtime implements Handlers {
         }
         let ready = 0;
         for (const entry of this.live) if (entry.status === 'ready') ready += 1;
-        return V(list(list(...events), int(ready)));
+        return { events, ready };
     }
 
     processResume(pidV: Value, v: Value): ActionResult {
@@ -897,6 +910,88 @@ export class Runtime implements Handlers {
         return V(TRUE);
     }
 
+    // ===========================================================================
+    // plan:: (DESIGN-PLAN.md)
+    // ===========================================================================
+
+    // (plan::run plan timeout): runs the plan until the CPI is needed. It is
+    // the same as the reference program in DECISIONS.md, step for step:
+    // round; its events, else mail in an inbox, else the deadline; else wait,
+    // for 0 ms while processes are ready, otherwise up to the round's idle
+    // threshold or the deadline; and go round again unless the wait ended
+    // early having woken nobody.
+    async planRun(planV: Value, timeoutV: Value): Promise<ActionResult> {
+        if (planV !== this.planValue) {
+            const parsed = this.readPlan(planV);
+            if ('e' in parsed) return parsed.e;
+            this.plan = parsed;
+            this.planValue = planV;
+        }
+        let timeout: number | null;
+        if (timeoutV.t === 'bool' && timeoutV.v === false) timeout = null;
+        else if (timeoutV.t === 'int' && timeoutV.v >= 0n) timeout = Number(timeoutV.v);
+        else return T('type-error', 'plan::run requires a non-negative integer timeout or #false', timeoutV);
+        const { round, inboxes } = this.plan;
+        const deadline = timeout === null ? null : this.now() + timeout;
+        for (;;) {
+            const r = round === null ? { events: [], ready: 0 } : this.runRound(round.n, round.idle);
+            if (r.events.length > 0) return V(list(...r.events));
+            const mail = this.mailEvents(inboxes);
+            if (mail.length > 0) return V(list(...mail));
+            if (deadline !== null && this.now() >= deadline) return V(NIL);
+            if (r.ready > 0) {
+                await this.hostWait(int(0));
+                continue;
+            }
+            const idle = round?.idle ?? null;
+            const limits = [idle, deadline === null ? null : deadline - this.now()].filter((t): t is number => t !== null);
+            const limit = limits.length === 0 ? null : Math.min(...limits);
+            const before = this.now();
+            const answer = await this.hostWait(limit === null ? FALSE : int(limit));
+            const woken = answer.kind === 'value' ? answer.v : NIL;
+            if (woken !== NIL || this.mailEvents(inboxes).length > 0) continue;
+            if (limit !== null && this.now() - before >= limit) continue;
+            return V(NIL);
+        }
+    }
+
+    private readPlan(planV: Value): Plan | { e: ActionResult } {
+        const bad = (message: string, v: Value) => ({ e: T('type-error', message, v) });
+        const nodes = listToArray(planV);
+        if (nodes === null) return bad('a plan is a list of nodes', planV);
+        let round: Plan['round'] = null;
+        const inboxes: Addr[] = [];
+        for (const node of nodes) {
+            const parts = listToArray(node);
+            const kind = parts?.[0];
+            if (parts === null || kind === undefined || kind.t !== 'sym') return bad('a plan node is a list starting with its kind', node);
+            if (kind.name === 'round') {
+                if (round !== null) return bad('a plan has at most one round', node);
+                const [, nV, idleV] = parts;
+                if (parts.length !== 3 || nV!.t !== 'int' || nV!.v < 1n) return bad('a round is (round n idle), with n >= 1', node);
+                let idle: number | null;
+                if (idleV!.t === 'bool' && idleV!.v === false) idle = null;
+                else if (idleV!.t === 'int' && idleV!.v >= 0n) idle = Number(idleV!.v);
+                else return bad('a round\'s idle is a non-negative integer or #false', node);
+                round = { n: Number(nV!.v), idle };
+            } else if (kind.name === 'inbox') {
+                for (const a of parts.slice(1)) {
+                    if (a.t !== 'addr' || !this.mailboxes.has(a.id)) return bad('an inbox is (inbox address ...)', node);
+                    inboxes.push(a);
+                }
+            } else {
+                return bad(`unknown plan node: ${kind.name}`, node);
+            }
+        }
+        return { round, inboxes };
+    }
+
+    private mailEvents(inboxes: readonly Addr[]): Value[] {
+        const events: Value[] = [];
+        for (const a of inboxes) if (this.mailboxes.get(a.id)!.queue.length > 0) events.push(list(a, MAIL));
+        return events;
+    }
+
     hostNow(): ActionResult {
         return V(int(this.now()));
     }
@@ -1175,7 +1270,10 @@ export class Runtime implements Handlers {
         if (timeoutV.t !== 'int' || timeoutV.v < 0n) return T('type-error', 'http::listen requires a non-negative timeout in milliseconds', timeoutV);
         const port = Number(portV.v);
         if (this.listeners.has(port)) return T('bad-state', `already listening on port ${port}`, portV);
-        this.http ??= await this.makeHttp();
+        if (this.http === null) {
+            this.http = await this.makeHttp();
+            this.http.setClock?.(() => this.now());
+        }
         try {
             await this.http.listen(port, (req, exchange) => {
                 this.heldRequests.push({ port, req, exchange, arrived: this.now() });

@@ -17,9 +17,9 @@
     (tui::open 'fullscreen)
     (let keys (mailbox::create #true 64))
     (tui::subscribe keys)
-    (let started (start-gateway))
+    (let started (start-gateway (list keys)))
     (let ui (vector keys fps-default 0 (dead-letter-box) 0))
-    (let final (gateway (car started) (second started) (cons monitor ui)))
+    (let final (gateway (car started) (second started) (cons monitor ui) ()))
     (http::close gateway-port)
     (tui::close)
     (IO::print "[gateway] stopped:" (stats final)))
@@ -153,28 +153,27 @@
 ; The same split as a bar, drawn by the host.
 (defun loop-bar (p)
     (let parts
-        (list (list "run" (vector-ref p 1) 'blue) (list "other" (vector-ref p 2) 'yellow)
-            (list "draw" (vector-ref p 3) 'magenta) (list "wait" (vector-ref p 4) 'gray)))
+        (list (list "plan" (vector-ref p 1) 'blue) (list "other" (vector-ref p 2) 'yellow)
+            (list "draw" (vector-ref p 3) 'magenta)))
     `(StackedBarChart (@ (width 60) (showLabels #false) (showValues #false)
-        (data ,(if (= 0 (fold (lambda (n x) (+ n (second x))) 0 parts)) (list (list "wait" 1 'gray)) parts)))))
+        (data ,(if (= 0 (fold (lambda (n x) (+ n (second x))) 0 parts)) (list (list "plan" 1 'blue)) parts)))))
 
 (defun title (text) `(Text (@ (bold #true) (color cyan)) ,text))
 
 ; The last second of the loop: how often it went round, the share of its
-; time spent running processes, on its own work, drawing and waiting, and
-; what a frame cost.
+; time spent in the plan (running processes and waiting), on its own work
+; and drawing, and what a frame cost.
 (defun loop-pieces (p)
-    (let total (max2 1 (+ (vector-ref p 1) (+ (vector-ref p 2) (+ (vector-ref p 3) (vector-ref p 4))))))
+    (let total (max2 1 (+ (vector-ref p 1) (+ (vector-ref p 2) (vector-ref p 3)))))
     (list
         (string-append "loop " (num (vector-ref p 0) 5) "/s")
-        (span 'blue (percent "run" (vector-ref p 1) total))
+        (span 'blue (percent "plan" (vector-ref p 1) total))
         (span 'yellow (percent "other" (vector-ref p 2) total))
         (span 'magenta (percent "draw" (vector-ref p 3) total))
-        (dim (percent "wait" (vector-ref p 4) total))
-        (if (= (vector-ref p 5) 0)
+        (if (= (vector-ref p 4) 0)
             (dim "no frames")
-            (string-append "frame " (num (/ (vector-ref p 3) (vector-ref p 5)) 3) " ms, "
-                (num (/ (vector-ref p 6) (vector-ref p 5)) 3) " building"))))
+            (string-append "frame " (num (/ (vector-ref p 3) (vector-ref p 4)) 3) " ms, "
+                (num (/ (vector-ref p 5) (vector-ref p 4)) 3) " building"))))
 
 (defun percent (label n total)
     (string-append label " " (num (/ (* n 100) total) 3) "%"))

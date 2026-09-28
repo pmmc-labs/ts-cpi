@@ -1,0 +1,64 @@
+; The reference program for plan::run (DECISIONS.md, Spec changes): the
+; host's (plan::run plan timeout) must be indistinguishable from
+; (plan-run-reference plan timeout). tests/gateway.test.ts runs the gateway
+; with this in place of the builtin and compares the two exactly.
+;
+; Checking the plan's shape is left out: the builtin throws type-error for a
+; malformed plan, and this program assumes a well-formed one.
+
+(defun plan-run-reference (plan timeout)
+    (pr-loop (pr-round plan) (pr-inboxes plan) (if timeout (+ (host::now) timeout) #false)))
+
+; One round; then the round's events, or mail for the CPI, or the deadline;
+; otherwise wait and go round again. While processes are ready the wait is
+; 0 ms, only to take in what has arrived. Otherwise it is at most the
+; round's idle threshold, so an idle process is reported at most that late,
+; and at most the time to the deadline. A wait that ends early having woken
+; no process means something arrived that the CPI may need to look at (mail
+; for a parked receiver), or that nothing can happen: either way, return.
+(defun pr-loop (round inboxes deadline)
+    (let r (if round (process::run-ready (car round) (car (cdr round))) (list () 0)))
+    (cond
+        ((not (nil? (car r))) (car r))
+        ((pr-any-mail? inboxes) (pr-mail inboxes))
+        ((and deadline (>= (host::now) deadline)) ())
+        ((> (car (cdr r)) 0)
+            (host::wait 0)
+            (pr-loop round inboxes deadline))
+        (#true
+            (let limit (pr-limit (if round (car (cdr round)) #false) deadline))
+            (let before (host::now))
+            (let woken (host::wait limit))
+            (if (or (not (nil? woken)) (pr-any-mail? inboxes) (and limit (>= (- (host::now) before) limit)))
+                (pr-loop round inboxes deadline)
+                ()))))
+
+(defun pr-limit (idle deadline)
+    (cond
+        ((and idle deadline) (pr-min idle (- deadline (host::now))))
+        (idle idle)
+        (deadline (- deadline (host::now)))
+        (#true #false)))
+
+(defun pr-min (a b) (if (< a b) a b))
+
+; (round n idle) as (n idle), or #false if the plan has no round.
+(defun pr-round (plan)
+    (cond
+        ((nil? plan) #false)
+        ((eq? (car (car plan)) 'round) (cdr (car plan)))
+        (#true (pr-round (cdr plan)))))
+
+(defun pr-inboxes (plan)
+    (cond
+        ((nil? plan) ())
+        ((eq? (car (car plan)) 'inbox) (append (cdr (car plan)) (pr-inboxes (cdr plan))))
+        (#true (pr-inboxes (cdr plan)))))
+
+(defun pr-mail (inboxes)
+    (cond
+        ((nil? inboxes) ())
+        ((> (mailbox::size (car inboxes)) 0) (cons (list (car inboxes) '(mail)) (pr-mail (cdr inboxes))))
+        (#true (pr-mail (cdr inboxes)))))
+
+(defun pr-any-mail? (inboxes) (not (nil? (pr-mail inboxes))))

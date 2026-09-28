@@ -315,6 +315,22 @@ host:: (privileged)
 (host::now)
     -> milliseconds since the image started.
 
+plan:: (privileged; DESIGN-PLAN.md)
+-----------------------------------
+
+A plan is a list of nodes: (round n idle), rounds of process::run-ready,
+at most one; and (inbox address ...), mailboxes whose mail wakes the CPI.
+
+(plan::run plan timeout)
+    -> the events the CPI must act on, after running the plan until there
+    are some: the round's (pid (exited value)), (pid (failed error)),
+    (pid (trap effect args)) and (pid (idle)), or (address (mail)) for each
+    inbox with mail. () after timeout milliseconds (#false for no limit),
+    when something arrives that wakes no process, or when nothing can
+    happen. Suspends the image, like host::wait. Pass the same plan value
+    while nothing changes: the host reads a plan again only when it differs.
+    ! type-error for a malformed plan or timeout
+
 environment:: (privileged)
 --------------------------
 

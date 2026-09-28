@@ -64,7 +64,7 @@ test('http: a request arrives as a message in host::wait, and a response to its 
             (list before (car req) (fields req)))
     `, [{ method: 'GET', target: '/users/42?x=1&y=two', headers: [['Accept', 'text/plain']] }]);
     assert.equal(value(b), '(0 request (get ("users" "42") (("x" "1") ("y" "two")) (("accept" "text/plain")) ""))');
-    assert.deepEqual(b.http.responses, [{ request: 0, status: 200, headers: [['content-type', 'text/plain']], body: 'hi' }]);
+    assert.deepEqual(b.http.responses, [{ request: 0, at: 0, status: 200, headers: [['content-type', 'text/plain']], body: 'hi' }]);
 });
 
 test('http: the root path is the empty list, and the body is a string', async () => {
@@ -93,7 +93,7 @@ test('http: a worker answers through the reply address with actor::send alone', 
             (process::run w 200))
     `, [{ target: '/ada' }]);
     assert.equal(value(b), '(exited #true)');
-    assert.deepEqual(b.http.responses, [{ request: 0, status: 200, headers: [], body: 'hello ada' }]);
+    assert.deepEqual(b.http.responses, [{ request: 0, at: 0, status: 200, headers: [], body: 'hello ada' }]);
 });
 
 test('http: a reply address takes one message; the next is a dead letter', async () => {
@@ -189,7 +189,7 @@ test('http: a reply to a client that disconnected is a dead letter', async () =>
             (mailbox::send (car (cdr (mailbox::take inbox))) (list 'response 200 () "gone")))
     `, [{ target: '/', disconnects: true }]);
     assert.equal(value(b), '#true');
-    assert.deepEqual(b.http.responses, [{ request: 0, aborted: true }]);
+    assert.deepEqual(b.http.responses, [{ request: 0, at: 0, aborted: true }]);
     assert.equal(b.rt.deadLetters.length, 1);
 });
 

@@ -491,6 +491,89 @@ Open questions:
 2. **The CPI's own mailboxes** are not processes, so the round cannot report mail for them. A CPI that handles requests itself checks its inbox after the round.
 3. **Groups and quotas per group**, for `parallel::`.
 
+### `plan::run` (2026-09-28)
+
+*Status.* Agreed and implemented 2026-09-28: whole plans passed on every call (option A), node shapes `(round n idle)` and `(inbox addr …)`, the event `(addr (mail))`, host nodes only, and equivalence checked by an exact trace. Design: `DESIGN-PLAN.md`. Tests in `tests/runtime.test.ts` ("plan::run") and `tests/gateway.test.ts` (the gateway under the reference program). Measurements in `PERFORMANCE.md`.
+
+*Motivation.* The first step of `DESIGN-PLAN.md`: the host runs the plan, and the CPI reacts. After `process::run-ready` the CPI still went round its loop once per round, to call `host::wait` and read its mailboxes. One blocking request that runs rounds and waits until the CPI is needed makes the CPI's loop event-driven.
+
+*Options for passing the plan.* **A. The whole plan on every call** (chosen): each call carries the current desk, an edit takes effect at the next call, and a recording shows the plan at every step. The host reads the plan again only when it is a different value from the last call's. **B. `plan::set`, then `plan::run`**: edits as separate events, but the plan in force is hidden state.
+
+**Section 10, Builtins.** Add a namespace:
+
+> ### 10.6 Plans: `plan::`
+>
+> A **plan** is a list of nodes, each a list starting with its kind. The host runs it (`DESIGN-PLAN.md`); the CPI builds it, and handles the events it returns.
+>
+> | Node | Meaning |
+> | --- | --- |
+> | `(round n idle)` | Rounds of `process::run-ready` with quota `n` and idle threshold `idle` (milliseconds, or `#false`). At most one. Without it, the plan runs no process. |
+> | `(inbox addr …)` | Mailboxes whose mail wakes the CPI: its own, and any it watches. |
+>
+> | Signature | Result | Errors |
+> | --- | --- | --- |
+> | `(plan::run plan timeout)` | Runs `plan` until the CPI is needed, and returns the events: the round's `(pid what)` events, or `(addr (mail))` for each inbox with mail, or `()` when `timeout` milliseconds pass (`#false` for no timeout), when something arrives that wakes no process, or when nothing can happen. | `type-error` for a malformed plan or timeout. |
+>
+> `(plan::run plan timeout)` is the same as the following program, and an implementation must be indistinguishable from it: the same processes run in the same order, the same messages are delivered at the same times, and it returns the same events at the same times.
+
+The reference program is `tests/programs/plan-run-reference.slight`: `(plan-run-reference plan timeout)`. Its loop, for the spec text:
+
+```lisp
+(defun pr-loop (round inboxes deadline)
+    (let r (if round (process::run-ready (car round) (car (cdr round))) (list () 0)))
+    (cond
+        ((not (nil? (car r))) (car r))
+        ((pr-any-mail? inboxes) (pr-mail inboxes))
+        ((and deadline (>= (host::now) deadline)) ())
+        ((> (car (cdr r)) 0)
+            (host::wait 0)
+            (pr-loop round inboxes deadline))
+        (#true
+            (let limit (pr-limit (if round (car (cdr round)) #false) deadline))
+            (let before (host::now))
+            (let woken (host::wait limit))
+            (if (or (not (nil? woken)) (pr-any-mail? inboxes) (and limit (>= (- (host::now) before) limit)))
+                (pr-loop round inboxes deadline)
+                ()))))
+```
+
+`pr-limit` is the smaller of the round's idle threshold and the time to the deadline, or `#false` if there is neither: a wait is capped at the idle threshold so an idle process is reported at most that late.
+
+**Section 10.3, System.** Replace "`host::wait` is the one host request that suspends the image. The CPI calls it when no process is `ready`." with "`host::wait` and `plan::run` are the host requests that suspend the image. A CPI without a plan calls `host::wait` when no process is `ready`."
+
+**Example.** The gateway's supervisor loop (`examples/gateway/gateway.slight`):
+
+```lisp
+(defun gateway (w st ui events)
+    (if (st-running? st)
+        (do
+            (let st1 (scale-hello w (read-served-log w (handle-inbox w (handle-events w st events)))))
+            (let stepped ((car ui) (cdr ui) w st1 (host::now)))
+            (let next (plan::run (st-plan (second stepped)) (third stepped)))
+            (gateway w (second stepped) (cons (car ui) (car stepped)) next))
+        st))
+```
+
+Its plan is `((round 200 2000) (inbox <inbox> <served log> <keys> <counter asleep> …))`. A counter's mailbox is in the inbox while the counter sleeps, so the first request for it wakes the CPI, which unparks that counter: no sleeping counter is polled.
+
+Rationale:
+
+- **Defined by a program the CPI could run.** As for `process::run-ready`: the policy stays in the language, and a recording of the program is a recording of the request.
+- **Mail as the CPI's wake-up.** The CPI's own mailboxes are not processes, so no round can report them. An inbox node names them, and any other mailbox the CPI wants to know about.
+- **Returning `()` when something arrives that wakes nobody.** The CPI may need to look, and a CPI that asked to wait forever when nothing can happen gets control back instead of hanging.
+
+Implementation (ts-cpi):
+
+- `Runtime.planRun` is the reference loop in TypeScript, built on the same `runRound` as `process::run-ready` and on `hostWait`, so the served log, reply expiry and input are handled exactly as in `host::wait`. The last plan value and what was read from it are kept; a call with the same value skips reading it.
+- The headless HTTP backend records when each response was written (`at`, on `host::now`), so an exact trace includes timing. The runtime hands it the clock (`HttpBackend.setClock`, test backends only).
+- The gateway keeps its plan in its state and builds it again only when a counter falls asleep or wakes. Its CPI work comes before `plan::run`, so everything it starts runs in the next call. Scaling the hello pool now happens once per wake, not once per round: in the test's burst, two workers where there were three.
+- Tests: the round's events, across quotas; mail after the round's own events; the timeout; a sleeper woken inside the request; idle; no round; nothing can happen; malformed plans and timeouts. `tests/gateway.test.ts` runs a scenario under the builtin and under the reference program and requires identical output, responses with their times, and dead letters. Of four mutations of the reference program, two changed the gateway's trace and were caught (a 1 ms wait while processes are ready; half the quota); the other two (mail before the round's events; never returning early) do not change what this gateway does, and the unit tests cover them.
+
+Found while building:
+
+1. **The early return does not cover mail for a parked receiver.** A request for a sleeping counter reaches its mailbox from the counters process inside a round, not as an external event, so no wait ends early for it. Before counters' mailboxes were put in the inbox, such a request waited for the next timeout: 400 ms in the test scenario.
+2. **Whole plans cost the size of the plan on every edit, in interpreted code.** With 500 counters asleep, each counter falling asleep rebuilds a 600-address inbox list in the CPI, and the host reads it again. Sleeping counters are voices, not the desk's setup: they belong in a watcher node's own state (`DESIGN-PLAN.md`, step 2), not in the plan.
+
 ## Spec issues
 
 - A library that the CPI and its processes both use cannot be a role, because the CPI's environment comes from its files and a role's procedures resolve their globals through the environment of whoever runs them. Processes that need such a library get a role composed onto `environment::self`: they can see every CPI definition, and the host actions the library uses are neither declared nor checked by `environment::resolve`. Two ways to close it, both spec changes: read each loaded file as a role (open question 5 above), so the CPI's environment is a composition of library roles it can also give to processes; or add a projection, `(environment::select e names)`, so a process takes exactly the names its role requires. Found by migrating the examples (the CPI-Roles field notes). A plain projection was tried on Sep 27, 2026 and reverted (commit `d9d1cbf` and its revert): because library procedures call each other by name, every role had to list what its library calls reach in turn (18 names for version 08's universe), and a forgotten one surfaced only at run time, once as a supervisor restarting a failing worker forever.

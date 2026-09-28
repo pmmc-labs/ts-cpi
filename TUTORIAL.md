@@ -417,6 +417,19 @@ wait:
 With the same two players, this prints their messages and then
 `event (#<pid 2> (exited done))` and `event (#<pid 1> (exited done))`.
 
+`(plan::run plan timeout)` goes one step further: the host runs rounds and
+waits for input itself, and returns only when the CPI is needed. A plan is
+plain data, here one round and the CPI's own mailbox, whose mail also wakes
+it:
+
+```lisp
+(let plan (list (list 'round 20 #false) (list 'inbox my-inbox)))
+(plan::run plan 500)   ; events, or () after 500 ms with nothing to report
+```
+
+`DESIGN-PLAN.md` explains the idea: the host runs the plan, and the CPI
+reacts.
+
 ## 7. Traps, parking and timers
 
 These three are short; each has a test program you can run.
@@ -660,7 +673,7 @@ one mailbox. `gateway.slight` is a library, run by `plain.slight` or by
 - A **router** process receives every request and forwards it to the endpoint its first path segment names, with that segment removed.
 - **`/hello/<name>`** is served by a pool of identical workers that all receive on one durable mailbox. A mailbox with several receivers is a work queue: each message wakes only the receiver that has waited longest. The first hello worker runs its warm-up, waits for its first request, and is parked as a **template**. Every hello worker is unparked from it, already warm, because parked data can be unparked any number of times.
 - **`/counter/<name>`** makes one counter process per name, the first time the name is used. Only the CPI can create mailboxes and processes, so the counters endpoint sends the CPI a message asking for one, and holds that name's requests until the CPI replies with the new address.
-- The **CPI** is the supervisor. It has the host give each ready process a turn (`process::run-ready`), answers `/system/stats` and `/system/quit` itself, adds a hello worker while requests wait in the queue, and parks any worker the round reports idle for two seconds: spare hello workers into cold storage, and counters into sleep. A counter's mailbox is durable, so a request to a sleeping counter waits for it, and the CPI unparks the counter when one does. Its count survives, because it is in the parked continuation.
+- The **CPI** is the supervisor. It hands the host a plan, which runs every process until the CPI is needed (`plan::run`). It answers `/system/stats` and `/system/quit` itself, adds a hello worker while requests wait in the queue, and parks any worker the host reports idle for two seconds: spare hello workers into cold storage, and counters into sleep. A counter's mailbox is durable, so a request to a sleeping counter waits for it; the mailbox is in the plan's inbox while the counter sleeps, so that request wakes the CPI, which unparks the counter. Its count survives, because it is in the parked continuation.
 
 ```
 $ node bin/cpi.ts examples/gateway/gateway.slight examples/gateway/plain.slight
@@ -695,7 +708,7 @@ counter was asleep. The gateway logged:
 
 Two things about the supervisor loop matter for any server:
 
-- **It waits every time round.** Requests enter mailboxes only inside `host::wait`, so a CPI that never waits accepts nothing. The gateway calls `(host::wait 0)` while processes are ready, which takes in what has arrived and returns at once, and waits up to half a second when none are, so it notices idle workers.
+- **It waits every time round.** Requests enter mailboxes only while the image waits, inside `host::wait` or `plan::run`, so a CPI that never waits accepts nothing. The gateway's `plan::run` runs processes and takes in requests until something needs the CPI: a process ended or went idle, or mail reached the CPI's inbox, its served log, the monitor's keys or a sleeping counter.
 - **Handling order is not arrival order.** Two requests taken by two workers finish in whichever order the workers are run.
 
 `tests/gateway.test.ts` drives the gateway with a script: a burst of six
