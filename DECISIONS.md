@@ -316,6 +316,86 @@ Open questions:
 4. `eq?` on env refs compares wrappers (field notes). With content-addressed roles, it could compare composition hashes.
 5. Whether top-level files should follow the same declaration rule when section 9 reads them as roles. That would make every CPI program declare its host actions, which today are checked only by grants at run time.
 
+### Several receivers on one mailbox (2026-09-28)
+
+*Status.* Agreed and implemented 2026-09-28 with the recommended options (wake rule B, parked receivers B). Tests in `tests/runtime.test.ts` ("several receivers"); `BUILTINS.txt` and tutorial sections 5 and 7 updated.
+
+*Motivation.* The web-worker gateway example: a router forwards requests to endpoint workers, the CPI scales each endpoint by adding workers, puts idle ones to sleep with `process::park`, and keeps pre-warmed workers in cold storage as parked state. Every worker of one endpoint receives on the endpoint's one mailbox, which then works as a queue: backlog is `mailbox::size`, and adding a worker is adding a receiver. The prototype already allows this (`process::spawn` onto a live process's address, or unparking one parked value twice), but SPEC-CPI says nothing about it (see Spec issues), and the prototype's behavior has two faults: every waiting receiver wakes for each message, and a non-durable mailbox dead-letters once its newest receiver ends, even if others still wait on it.
+
+*What is already settled.* A process receives only on the mailbox it was given by `process::spawn` or `process::unpark`, and `actor::recv` takes no address, so holding an address never lets a process receive on it. Only the CPI attaches receivers. `actor::recv` takes the oldest message, so each message already reaches exactly one receiver. What is open is which waiting receiver wakes, when a non-durable mailbox is closed, and whether parked state may be used more than once.
+
+*The wake rule.* The options:
+
+- **A. Wake every waiting receiver** (the prototype today). Simple, but each message costs the CPI one wasted turn for every receiver that loses the race and blocks again.
+- **B. Wake the receiver that has waited longest** (recommended). One wake per message, fair between workers, and deterministic, so scheduling stays replayable without logging who was woken.
+- **C. Hand the message to one receiver when it is sent.** The woken receiver is sure to get it, but a receiver the CPI does not run for a while holds the message, parking it has to give the message back, and `mailbox::size` no longer counts the backlog.
+
+*Parked receivers and durability.* The options:
+
+- **A. A parked receiver counts as a receiver** (the prototype today). Messages to a parked actor are kept even on a non-durable mailbox, so within one image durability changes nothing.
+- **B. A parked receiver does not count** (recommended). This is what the spec already implies: a parked PID is ended (section 10.1), and a non-durable mailbox whose process has ended dead-letters (section 10.2). A durable mailbox is then what lets an actor sleep, as DESIGN-001 section 6 says: "With a durable mailbox, messages can be sent to an actor whether or not it is running." Every example that sends to a parked actor already uses a durable mailbox.
+
+**Section 10.1, Processes.** In `process::spawn`, replace "`mailbox` is an address to receive on, or `#false` for a new non-durable mailbox" with "`mailbox` is an address to receive on, which the new process shares with any other process receiving on it (section 10.2), or `#false` for a new non-durable mailbox". In `process::unpark`, add: "`data` is not used up: each call makes a new process continuing from the same point, receiving on the same address." Add after the table:
+
+> The processes that receive on a mailbox are its **receivers**: those spawned or unparked onto its address that are neither `parked` nor `ended`.
+
+**Section 10.2, Mailboxes.** Add after the table:
+
+> A mailbox may have any number of receivers. Each message is taken by exactly one of them, oldest message first, and the CPI's `mailbox::take` takes from the same queue. When a message arrives, the receiver that has waited longest in `(recv)` becomes `ready`. If a receiver woken this way ends before it takes a message, the next longest waiting is woken in its place, so a message never waits while a receiver is blocked in `(recv)` on its mailbox.
+>
+> A non-durable mailbox is **closed** once it has had a receiver and has none left: sends to it go to the dead-letter queue, and messages already in it stay there. A parked receiver does not count, so an actor that will be parked and sent messages needs a durable mailbox. A durable mailbox is never closed. A new receiver (by `process::spawn` or `process::unpark`) reopens a closed non-durable mailbox.
+>
+> Messages from one sender are taken in the order they were sent. With several receivers, they may be *handled* in any order: two messages taken by two receivers finish in whatever order the scheduler runs them.
+
+Replace the send row's "If `addr` is a non-durable mailbox whose process has ended" with "If `addr` is a closed mailbox".
+
+**Example.** A pool of pre-warmed workers for one endpoint. The worker's warm-up state lives in its continuation, not in loop arguments, which is why it is parked and not checkpointed:
+
+```lisp
+(defun endpoint-code ()
+    (role
+        (require actor::recv actor::send load-routes handle request-reply-to)
+        (defun worker ()
+            (let routes (load-routes))              ; the expensive warm-up
+            (serve routes))
+        (defun serve (routes)
+            (let req (actor::recv))
+            (actor::send (request-reply-to req) (handle routes req))
+            (serve routes))))
+
+; Warm one worker on the endpoint's durable queue and park it: the template.
+(defun warm-template (env queue)
+    (let pid (process::spawn (environment::lookup env 'worker) () env '(actor) queue))
+    (process::run pid warm-quota)                   ; stops at (blocked recv)
+    (process::park pid))
+
+; Scaling up is one more receiver on the same queue, already warm.
+(defun scale-up (template env)
+    (process::unpark template env))
+```
+
+Scaling down parks an idle worker, which is `(blocked recv)` by definition. Scaling to zero parks them all: the durable queue keeps the requests, and the CPI unparks the template again when `mailbox::size` is non-zero.
+
+Rationale:
+
+- **The mailbox is the dispatcher.** In Erlang every process has its own mailbox, so a worker pool (poolboy, for example) is a library with a dispatching process and an extra hop per request. Here the shared mailbox does the dispatching, and the CPI's scaling policy reads the backlog directly.
+- **Multi-shot unpark makes templates.** Parked state is a value, and values are not used up. Warming a worker once and unparking it many times is the pre-warmed pool; `examples/life/17-amb.slight` already uses the same property for a different purpose.
+- **Durability means something.** Under option B a durable mailbox is exactly what lets an actor be offline, which is its purpose in DESIGN-001 section 6, and the spec's existing reading of a parked PID as ended stays true.
+- **Deterministic wake-ups.** DESIGN-001 section 12 makes the scheduler a deterministic state machine. "Longest waiting" keeps it one, where "unspecified" would make the choice of receiver a new source of nondeterminism that a recording would have to log.
+
+Implementation (ts-cpi):
+
+- A mailbox keeps its `receivers` (a set kept by `setStatus`: added by spawn and unpark, removed on park and end) and `hadReceiver`, in place of `ownerPid`. `isClosed` replaces the three owner-ended checks in `src/runtime.ts`.
+- `wakeRecv` wakes the first process in `recvWaiters` (a `Set`, so iteration order is wait order), once per message delivered, and only while the mailbox holds a message. The woken process is marked `wokenForMessage`; the mark clears when its next batch starts, because that batch's first step retries the `recv`. If it ends while still marked, `endProcess` wakes the next waiter.
+- A woken receiver can still lose its message to another receiver that is already running; it retries `recv` and blocks again, costing a turn but no ticks. The spec's guarantee is only that a message never waits while a receiver sleeps.
+- Tests: the longest waiter wakes, not the first spawned; a killed woken receiver passes its wake-up on; one parked value unparked three times gives three receivers; a non-durable mailbox stays open while any receiver lives; all-parked closes it, unpark reopens it; a process's send to a closed mailbox is a dead letter; a durable mailbox keeps a message for a parked receiver; a mailbox with no receiver yet keeps its messages. No existing test or example changed: every one that sends to a parked actor already used a durable mailbox, and none relied on every waiter waking.
+
+Open questions:
+
+1. Should the CPI be able to count a mailbox's receivers, or its waiting receivers (`mailbox::receivers`)? A scaling policy can track its own pool with `process::state`, so this is left out until an example needs it.
+2. Receivers in other images. Once workers move to other images, a mailbox shared across images is a distributed queue, with different ordering and failure guarantees. For now, every receiver of a mailbox is in the mailbox's image.
+3. Waking a parked receiver when its mailbox gets a message (DESIGN-001 section 6's "mailbox watcher") is not part of this. The CPI polls `mailbox::size` for now.
+
 ## Spec issues
 
 - A library that the CPI and its processes both use cannot be a role, because the CPI's environment comes from its files and a role's procedures resolve their globals through the environment of whoever runs them. Processes that need such a library get a role composed onto `environment::self`: they can see every CPI definition, and the host actions the library uses are neither declared nor checked by `environment::resolve`. Two ways to close it, both spec changes: read each loaded file as a role (open question 5 above), so the CPI's environment is a composition of library roles it can also give to processes; or add a projection, `(environment::select e names)`, so a process takes exactly the names its role requires. Found by migrating the examples (the CPI-Roles field notes). A plain projection was tried on Sep 27, 2026 and reverted (commit `d9d1cbf` and its revert): because library procedures call each other by name, every role had to list what its library calls reach in turn (18 names for version 08's universe), and a forgotten one surfaced only at run time, once as a supervisor restarting a failing worker forever.
@@ -333,7 +413,7 @@ Open questions:
 - DESIGN-001 section 3 says what a `BEGIN` phaser adds "is a patch, composed onto the environment with the module rule: a conflict is an error", and that "a hot reload is simply a patch going through its phases". Section 8 says a hot reload's `Conflicted` slots "record what was replaced". Read together, replacing a name in a hot reload is an error. A reading that fits both: the module rule applies within a load, and a finished patch is composed onto a running environment with whatever strategy the control plane chooses.
 - DESIGN-001's primitive table lists "Compose slots; resolve; swap" for environments, but SPEC-CPI section 10.4 has no resolve, so `Conflicted` history can only grow.
 - DESIGN-001's appendix "Reference implementations" cites more-roles for the slot algebra but not the prototypes that build environments from it. Proposed row: | Environment construction | p5-MXCL, Term-Roles, p5-slight | `__older_prototypes__/MXCLs/p5-MXCL` (`lib/MXCL/Allocator/Roles.pm`, `Term/Role*.pm`, `Context.pm` base-scope layers, `Machine.pm` Define and Capture, `Runtime/Primitives.pm` `Role::*`, `Debugger/Scope.pm`); `__older_prototypes__/misc-experiments/Term-Roles`, commit `be6c0ba` (`src/Term.ts`); `__older_prototypes__/p5-slight` (`lib/Slight/Term.pm` `Partial`, `Compiler.pm`) | Environments as first-class, content-addressed slot maps; a base environment built in composed layers; `require` as `Required` slots; difference as the diff between environments; lambdas without an environment as the unit of content hashing | Global environments only; patches from definitions, not captured as a difference (MXCL's `make-role` carries the replaced binding inside a `Conflicted` slot); value identity by core hash; late binding instead of capturing the environment; a resolve step |
-- SPEC-CPI does not say what happens when several live processes receive on one address (spawning onto a live process's mailbox, or unparking one parked value twice). The prototype lets the newest process own it, and a non-durable mailbox dead-letters sends once that owner ends, even if others still wait on it.
+- SPEC-CPI does not say what happens when several live processes receive on one address (spawning onto a live process's mailbox, or unparking one parked value twice). The prototype let the newest process own it, and a non-durable mailbox dead-lettered sends once that owner ended, even if others still waited on it. *Resolved Sep 28, 2026:* several receivers on one mailbox (see Spec changes).
 - The CPI has no way to wait for a particular process: `actor::join` and `actor::recv` are not available to it (SPEC-CPI section 1), and `host::wait` reports which PIDs woke but not why.
 - Nothing in SPEC-CPI reclaims ended processes or parked state: the process table and the park table only grow.
 - Views can show only strings and numbers. *Resolved Sep 26, 2026:* the `value->string` core operation (see Spec changes) turns any value into the text `IO::print` shows.

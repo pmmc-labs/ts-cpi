@@ -352,8 +352,9 @@ the checkpoint slot, so after the failure `process::checkpoint` returns `(2)`,
 the last good count. The CPI spawns a new run with those arguments **on the
 same mailbox**, so the actor keeps its address and continues from 3.
 
-The mailbox is created **durable** (`#true`). A non-durable mailbox whose
-process has ended sends new messages to the dead-letter queue.
+The mailbox is created **durable** (`#true`). A non-durable mailbox with no
+process left receiving on it sends new messages to the dead-letter queue, and
+a parked process does not count as receiving.
 
 ## 6. A scheduler in the language
 
@@ -411,7 +412,11 @@ actor's `send`. `process::resume-throw` answers with an error instead.
 
 The unparked process continues inside the same `recv` it was waiting in, and
 `unpark` chooses which environment it resumes with: here `env`, the one it ran
-in before.
+in before. Messages sent while a process is parked are kept only if its
+mailbox is durable. Parked data is not used up: unparking it again makes
+another process on the same address, and a mailbox with several receivers is
+a work queue, where each message goes to the receiver that has waited
+longest.
 
 **Timers** (`tests/programs/timers.slight`) use the real clock.
 `(timer::sleep ms)` blocks a process with `(blocked host)`. `host::wait` waits

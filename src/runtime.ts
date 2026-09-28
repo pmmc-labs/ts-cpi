@@ -95,10 +95,30 @@ type ProcEntry = {
     sleepDeadline?: number | undefined;
     // The PID a process blocked in join waits for (indexed by setStatus).
     joinTarget?: number | undefined;
+    // Woken from recv by a message it has not yet had a turn to take. If it
+    // ends first, the wake-up passes to the next waiter (see `endProcess`).
+    wokenForMessage?: boolean;
     watchers: Array<{ t: 'pid'; pid: number } | { t: 'addr'; addr: Addr }>;
 };
 
-type MailboxEntry = { durable: boolean; capacity: number; queue: Value[]; ownerPid: number | null };
+// `receivers` are the processes spawned or unparked onto the mailbox that are
+// neither parked nor ended (kept by setStatus). A non-durable mailbox that has
+// had a receiver and has none left is closed: sends to it are dead letters.
+type MailboxEntry = {
+    durable: boolean;
+    capacity: number;
+    queue: Value[];
+    receivers: Set<ProcEntry>;
+    hadReceiver: boolean;
+};
+
+function newMailbox(durable: boolean, capacity: number): MailboxEntry {
+    return { durable, capacity, queue: [], receivers: new Set(), hadReceiver: false };
+}
+
+function isClosed(mbox: MailboxEntry): boolean {
+    return !mbox.durable && mbox.hadReceiver && mbox.receivers.size === 0;
+}
 
 // DECISION: a mailbox's `grants` are not part of the parked *value* (SPEC-CPI
 // 10.1 lists only continuation, checkpoint, binding hash and address as the
@@ -243,6 +263,8 @@ export class Runtime implements Handlers {
     private runBatch(entry: ProcEntry, n: number): Value {
         const outbox: { addr: Addr; msg: Value }[] = [];
         let used = 0;
+        // Its first step retries the recv it was woken for, so the wake-up is used.
+        entry.wokenForMessage = false;
         for (;;) {
             const mode = entry.state.mode;
             if (mode.m === 'host') {
@@ -298,8 +320,12 @@ export class Runtime implements Handlers {
         if (before === 'blocked-join' && entry.joinTarget !== undefined) this.joinWaiters.get(entry.joinTarget)?.delete(entry);
         if (before === 'blocked-host') this.sleepers.delete(entry);
         entry.status = status;
-        if (status === 'ended' || status === 'parked') this.live.delete(entry);
-        else this.live.add(entry);
+        if (status === 'ended' || status === 'parked') {
+            this.live.delete(entry);
+            this.mailboxes.get(entry.addr.id)?.receivers.delete(entry);
+        } else {
+            this.live.add(entry);
+        }
         if (status === 'blocked-recv') indexed(this.recvWaiters, entry.addr.id).add(entry);
         if (status === 'blocked-join') {
             const mode = entry.state.mode;
@@ -317,6 +343,10 @@ export class Runtime implements Handlers {
     private endProcess(entry: ProcEntry, detail: EndedDetail): void {
         this.setStatus(entry, 'ended');
         entry.endedDetail = detail;
+        if (entry.wokenForMessage === true) {
+            entry.wokenForMessage = false;
+            this.wakeRecv(entry.addr);
+        }
         const sig = list(sym('signal'), sym('terminated'), pid(entry.pid), list(sym(detail.kind), detail.v));
         for (const w of entry.watchers) {
             const addr = w.t === 'addr' ? w.addr : this.procs.get(w.pid)?.addr;
@@ -329,16 +359,32 @@ export class Runtime implements Handlers {
         for (const e of [...(this.joinWaiters.get(targetPidNum) ?? [])]) this.setStatus(e, 'ready');
     }
 
+    // One message wakes one receiver: the one that has waited longest in
+    // recv. `recvWaiters` is a Set, so its iteration order is wait order.
     private wakeRecv(addr: Addr): void {
-        for (const e of [...(this.recvWaiters.get(addr.id) ?? [])]) this.setStatus(e, 'ready');
+        const mbox = this.mailboxes.get(addr.id);
+        if (mbox === undefined || mbox.queue.length === 0) return;
+        const waiters = this.recvWaiters.get(addr.id);
+        if (waiters === undefined) return;
+        for (const e of waiters) {
+            this.setStatus(e, 'ready');
+            e.wokenForMessage = true;
+            return;
+        }
+    }
+
+    private addReceiver(entry: ProcEntry): void {
+        const mbox = this.mailboxes.get(entry.addr.id);
+        if (mbox === undefined) return;
+        mbox.receivers.add(entry);
+        mbox.hadReceiver = true;
     }
 
     // Immediate delivery (mailbox::send, and watcher signals): SPEC-CPI 10.2.
     private deliverNow(fromAddr: Addr | null, addr: Addr, msg: Value): ActionResult {
         const mbox = this.mailboxes.get(addr.id);
         if (mbox === undefined) return T('type-error', 'unknown mailbox address', addr);
-        const ownerEnded = mbox.ownerPid !== null && this.procs.get(mbox.ownerPid)?.status === 'ended';
-        if (!mbox.durable && ownerEnded) {
+        if (isClosed(mbox)) {
             this.deadLettersList.push({ from: fromAddr, to: addr, msg });
             return V(TRUE);
         }
@@ -355,8 +401,7 @@ export class Runtime implements Handlers {
         for (const { addr, msg } of outbox) {
             const mbox = this.mailboxes.get(addr.id);
             if (mbox === undefined) continue;
-            const ownerEnded = mbox.ownerPid !== null && this.procs.get(mbox.ownerPid)?.status === 'ended';
-            if (!mbox.durable && ownerEnded) {
+            if (isClosed(mbox)) {
                 this.deadLettersList.push({ from: null, to: addr, msg });
                 continue;
             }
@@ -387,7 +432,7 @@ export class Runtime implements Handlers {
         let addr: Addr;
         if (mailboxV.t === 'bool' && mailboxV.v === false) {
             addr = newAddr();
-            this.mailboxes.set(addr.id, { durable: false, capacity: 1000, queue: [], ownerPid: null });
+            this.mailboxes.set(addr.id, newMailbox(false, 1000));
         } else if (mailboxV.t === 'addr') {
             if (!this.mailboxes.has(mailboxV.id)) return T('type-error', 'unknown mailbox address', mailboxV);
             addr = mailboxV;
@@ -399,7 +444,7 @@ export class Runtime implements Handlers {
         const entry: ProcEntry = { pid: pidNum, addr, envRef: envV, grants, state, status: 'ready', watchers: [] };
         this.procs.set(pidNum, entry);
         this.live.add(entry);
-        this.mailboxes.get(addr.id)!.ownerPid = pidNum;
+        this.addReceiver(entry);
         return V(pid(pidNum));
     }
 
@@ -537,8 +582,7 @@ export class Runtime implements Handlers {
         };
         this.procs.set(pidNum, entry);
         this.live.add(entry);
-        const mbox = this.mailboxes.get(rec.addr.id);
-        if (mbox !== undefined) mbox.ownerPid = pidNum;
+        this.addReceiver(entry);
         return V(pid(pidNum));
     }
 
@@ -570,7 +614,7 @@ export class Runtime implements Handlers {
             return T('type-error', 'mailbox::create requires a positive integer capacity', capacityV);
         }
         const addr = newAddr();
-        this.mailboxes.set(addr.id, { durable: durableV.v, capacity: Number(capacityV.v), queue: [], ownerPid: null });
+        this.mailboxes.set(addr.id, newMailbox(durableV.v, Number(capacityV.v)));
         return V(addr);
     }
 
@@ -825,8 +869,7 @@ export class Runtime implements Handlers {
         const mbox = this.mailboxes.get(addrV.id);
         if (mbox === undefined) return T('type-error', 'unknown mailbox address', addrV);
         const pending = ctx.outbox === null ? 0 : ctx.outbox.filter((o) => o.addr.id === addrV.id).length;
-        const ownerEnded = mbox.ownerPid !== null && this.procs.get(mbox.ownerPid)?.status === 'ended';
-        if (!(!mbox.durable && ownerEnded) && mbox.queue.length + pending >= mbox.capacity) {
+        if (!isClosed(mbox) && mbox.queue.length + pending >= mbox.capacity) {
             return T('full', 'mailbox is at capacity', addrV);
         }
         ctx.outbox?.push({ addr: addrV, msg: msgV });

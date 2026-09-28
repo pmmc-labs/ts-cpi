@@ -248,6 +248,148 @@ test('park then unpark: the unparked process re-attempts recv and continues', as
 });
 
 // ---------------------------------------------------------------------------
+// Several receivers on one mailbox (DECISIONS.md, Spec changes, 2026-09-28)
+// ---------------------------------------------------------------------------
+
+test('several receivers: a message wakes only the receiver that has waited longest', async () => {
+    // b blocks first, so b has waited longest even though a was spawned first.
+    const v = await ok(`
+        (defun taker () (actor::recv))
+        (defun main ()
+            (let mb (mailbox::create #false 10))
+            (let a (process::spawn taker () (environment::self) '(actor) mb))
+            (let b (process::spawn taker () (environment::self) '(actor) mb))
+            (process::run b 5)
+            (process::run a 5)
+            (mailbox::send mb 1)
+            (let s1 (list (process::state a) (process::state b)))
+            (let rb (process::run b 5))
+            (mailbox::send mb 2)
+            (list s1 rb (process::state a) (process::run a 5)))
+    `);
+    assert.equal(print(v), '(((blocked recv) (ready)) (exited 1) (ready) (exited 2))');
+});
+
+test('several receivers: a woken receiver that is killed passes its wake-up on', async () => {
+    const v = await ok(`
+        (defun taker () (actor::recv))
+        (defun main ()
+            (let mb (mailbox::create #false 10))
+            (let a (process::spawn taker () (environment::self) '(actor) mb))
+            (let b (process::spawn taker () (environment::self) '(actor) mb))
+            (process::run a 5)
+            (process::run b 5)
+            (mailbox::send mb 1)
+            (let s1 (process::state b))
+            (process::kill a :gone)
+            (list s1 (process::state b) (process::run b 5)))
+    `);
+    assert.equal(print(v), '((blocked recv) (ready) (exited 1))');
+});
+
+test('several receivers: unparking one value three times gives three receivers on one queue', async () => {
+    const v = await ok(`
+        (defun taker () (actor::recv))
+        (defun main ()
+            (let mb (mailbox::create #true 10))
+            (let p (process::spawn taker () (environment::self) '(actor) mb))
+            (process::run p 5)
+            (let template (process::park p))
+            (let w1 (process::unpark template (environment::self)))
+            (let w2 (process::unpark template (environment::self)))
+            (let w3 (process::unpark template (environment::self)))
+            (process::run w1 5)
+            (process::run w2 5)
+            (process::run w3 5)
+            (mailbox::send mb 1)
+            (let s1 (list (process::state w1) (process::state w2) (process::state w3)))
+            (mailbox::send mb 2)
+            (mailbox::send mb 3)
+            (list s1 (process::run w1 5) (process::run w2 5) (process::run w3 5)))
+    `);
+    assert.equal(print(v), '(((ready) (blocked recv) (blocked recv)) (exited 1) (exited 2) (exited 3))');
+});
+
+test('several receivers: a non-durable mailbox stays open while any receiver lives', async () => {
+    const { rt, result } = await boot(`
+        (defun taker () (actor::recv))
+        (defun main ()
+            (let a (process::spawn taker () (environment::self) '(actor) #false))
+            (let addr (process::address a))
+            (let b (process::spawn taker () (environment::self) '(actor) addr))
+            (process::run a 5)
+            (process::kill b :gone)
+            (mailbox::send addr 3)
+            (process::run a 5))
+    `);
+    assert.equal(result.ok, true, result.ok ? '' : print(result.e));
+    assert.equal(print((result as { ok: true; v: Value }).v), '(exited 3)');
+    assert.equal(rt.deadLetters.length, 0);
+});
+
+test('several receivers: a non-durable mailbox whose receivers are all parked is closed, and unpark reopens it', async () => {
+    const { rt, result } = await boot(`
+        (defun taker () (actor::recv))
+        (defun main ()
+            (let p (process::spawn taker () (environment::self) '(actor) #false))
+            (let addr (process::address p))
+            (process::run p 5)
+            (let parked (process::park p))
+            (mailbox::send addr :lost)
+            (let q (process::unpark parked (environment::self)))
+            (mailbox::send addr 7)
+            (process::run q 5))
+    `);
+    assert.equal(result.ok, true, result.ok ? '' : print(result.e));
+    assert.equal(print((result as { ok: true; v: Value }).v), '(exited 7)');
+    assert.equal(rt.deadLetters.length, 1);
+    assert.equal(print(rt.deadLetters[0]!.msg), 'lost');
+});
+
+test('several receivers: a process\'s send to a closed mailbox is a dead letter', async () => {
+    const { rt, result } = await boot(`
+        (defun taker () (actor::recv))
+        (defun sender (addr) (actor::send addr :lost))
+        (defun main ()
+            (let p (process::spawn taker () (environment::self) '(actor) #false))
+            (let addr (process::address p))
+            (process::run p 5)
+            (process::park p)
+            (process::run (process::spawn sender (list addr) (environment::self) '(actor) #false) 10))
+    `);
+    assert.equal(result.ok, true, result.ok ? '' : print(result.e));
+    assert.equal(rt.deadLetters.length, 1);
+    assert.equal(print(rt.deadLetters[0]!.msg), 'lost');
+});
+
+test('several receivers: a durable mailbox keeps messages for a parked receiver', async () => {
+    const { rt, result } = await boot(`
+        (defun taker () (actor::recv))
+        (defun main ()
+            (let mb (mailbox::create #true 10))
+            (let p (process::spawn taker () (environment::self) '(actor) mb))
+            (process::run p 5)
+            (let parked (process::park p))
+            (mailbox::send mb 7)
+            (process::run (process::unpark parked (environment::self)) 5))
+    `);
+    assert.equal(result.ok, true, result.ok ? '' : print(result.e));
+    assert.equal(print((result as { ok: true; v: Value }).v), '(exited 7)');
+    assert.equal(rt.deadLetters.length, 0);
+});
+
+test('several receivers: a mailbox that has never had a receiver keeps its messages', async () => {
+    const v = await ok(`
+        (defun taker () (actor::recv))
+        (defun main ()
+            (let mb (mailbox::create #false 10))
+            (mailbox::send mb 9)
+            (process::run (process::spawn taker () (environment::self) '(actor) mb) 5))
+    `);
+    assert.equal(print(v), '(exited 9)');
+});
+
+// ---------------------------------------------------------------------------
 // set-env: a pending call reaches the new code
 // ---------------------------------------------------------------------------
 

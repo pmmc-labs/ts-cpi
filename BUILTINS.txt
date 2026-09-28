@@ -232,8 +232,8 @@ process:: (privileged)
 (process::spawn f args env grants mailbox)
     -> a PID for a new ready process that will apply the procedure f to the
     list args, resolving global names through env, allowed the namespaces
-    in the list grants, and receiving on mailbox (an address, or #false for
-    a new one).
+    in the list grants, and receiving on mailbox (an address, shared with
+    any other process receiving on it, or #false for a new non-durable one).
     ! not-granted if grants names a privileged namespace, or env requires a
     host request whose namespace grants lacks
 (process::run pid n)
@@ -263,7 +263,8 @@ process:: (privileged)
     ! bad-state unless blocked in recv or join
 (process::unpark parked env)
     -> a new PID continuing from parked data, with env ref env. The same
-    parked data can be unparked any number of times.
+    parked data can be unparked any number of times; every copy receives
+    on the same address.
     ! not-granted as for spawn
 (process::watch pid watcher)
     -> #true. When the process ends, watcher (a PID or an address) receives
@@ -276,8 +277,11 @@ mailbox:: (privileged)
 ----------------------
 
 (mailbox::create durable capacity)
-    -> a new address. A durable mailbox keeps receiving after its process
-    ends; otherwise later messages go to the dead-letter queue.
+    -> a new address. Any number of processes may receive on it: each
+    message is taken by one of them, and it wakes only the one that has
+    waited longest in recv. A non-durable mailbox that has had receivers
+    and has none left (parked ones do not count) sends later messages to
+    the dead-letter queue; a durable one keeps them.
 (mailbox::send address message)
     -> #true. Delivered at once.            ! full
 (mailbox::size address)
