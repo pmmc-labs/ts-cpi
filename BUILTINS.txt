@@ -272,6 +272,10 @@ process:: (privileged)
 (process::checkpoint pid)
     -> the arguments of the most recent call to the procedure the process
     was spawned with. Readable after the process ends.
+(process::ticks pid)
+    -> the ticks the process has used over all its runs; 0 for a new or
+    unparked process. Readable after it ends or is parked. The ticks one
+    run used are the difference before and after it.
 
 mailbox:: (privileged)
 ----------------------

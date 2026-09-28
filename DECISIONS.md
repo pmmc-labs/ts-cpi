@@ -400,6 +400,30 @@ Open questions:
 2. Receivers in other images. Once workers move to other images, a mailbox shared across images is a distributed queue, with different ordering and failure guarantees. For now, every receiver of a mailbox is in the mailbox's image.
 3. Waking a parked receiver when its mailbox gets a message (DESIGN-001 section 6's "mailbox watcher") is not part of this. The CPI polls `mailbox::size` for now.
 
+### `process::ticks` (2026-09-28)
+
+*Status.* Agreed and implemented 2026-09-28. Tests in `tests/runtime.test.ts` ("process::ticks").
+
+*Motivation.* `process::run` reports why a batch stopped but not how many ticks it used, so a scheduler can meter only in whole quotas: the runner's calibration takes hundreds of one-tick runs (`examples/runner/README.md`), and the Life notes list "metering is invisible" (`examples/life/README.md`). The gateway's monitor needs each endpoint's share of the work.
+
+*Options.* A builtin that reads a running total (recommended, and chosen), or the batch's ticks added to every stop reason: `(quota 200)`, `(blocked recv 37)`, `(exited v 12)`. The second saves a call per turn, but changes the shape of every stop reason, which examples, reference outputs and the tutorial print whole.
+
+**Section 10.1, Processes.** Add a row:
+
+| Signature | Result | Errors |
+| --- | --- | --- |
+| `(process::ticks pid)` | The number of ticks the process has used, over every batch it has run. `0` for a new process, including one made by `process::unpark`. It remains readable after the process ends or is parked. | `type-error`. |
+
+The ticks one batch used are the difference around it:
+
+```lisp
+(let before (process::ticks pid))
+(let stop (process::run pid 200))
+(let used (- (process::ticks pid) before))
+```
+
+Rationale: a total, not a per-batch figure, so reading it never loses anything: a CPI that skips a reading still gets the right sum later, and a process that has ended still reports what it cost.
+
 ## Spec issues
 
 - A library that the CPI and its processes both use cannot be a role, because the CPI's environment comes from its files and a role's procedures resolve their globals through the environment of whoever runs them. Processes that need such a library get a role composed onto `environment::self`: they can see every CPI definition, and the host actions the library uses are neither declared nor checked by `environment::resolve`. Two ways to close it, both spec changes: read each loaded file as a role (open question 5 above), so the CPI's environment is a composition of library roles it can also give to processes; or add a projection, `(environment::select e names)`, so a process takes exactly the names its role requires. Found by migrating the examples (the CPI-Roles field notes). A plain projection was tried on Sep 27, 2026 and reverted (commit `d9d1cbf` and its revert): because library procedures call each other by name, every role had to list what its library calls reach in turn (18 names for version 08's universe), and a forgotten one surfaced only at run time, once as a supervisor restarting a failing worker forever.

@@ -63,6 +63,7 @@ export interface Handlers {
     processUnpark(dataV: Value, envV: Value): ActionResult;
     processWatch(pidV: Value, watcherV: Value): ActionResult;
     processCheckpoint(pidV: Value): ActionResult;
+    processTicks(pidV: Value): ActionResult;
 
     // 10.2 mailbox::
     mailboxCreate(durableV: Value, capacityV: Value): ActionResult;
@@ -137,6 +138,7 @@ export const NAMESPACES: ReadonlyMap<string, ReadonlyMap<string, ActionSpec>> = 
         'unpark':        { arity: 2, run: (h, _c, a) => h.processUnpark(a[0]!, a[1]!) },
         'watch':         { arity: 2, run: (h, _c, a) => h.processWatch(a[0]!, a[1]!) },
         'checkpoint':    { arity: 1, run: (h, _c, a) => h.processCheckpoint(a[0]!) },
+        'ticks':         { arity: 1, run: (h, _c, a) => h.processTicks(a[0]!) },
     })],
     ['mailbox', ns({
         'create': { arity: 2, run: (h, _c, a) => h.mailboxCreate(a[0]!, a[1]!) },

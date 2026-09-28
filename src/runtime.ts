@@ -91,6 +91,8 @@ type ProcEntry = {
     state: State;
     status: ProcStatus;
     endedDetail?: EndedDetail;
+    // Ticks used by every batch this PID has run (process::ticks).
+    ticks: number;
     // Set the first time a sleep blocks; cleared once it resolves (see
     // `timerSleep`). Not recomputed on retry, so the deadline never moves.
     sleepDeadline?: number | undefined;
@@ -365,6 +367,7 @@ export class Runtime implements Handlers {
             }
             entry.state = step(entry.state);
             used += 1;
+            entry.ticks += 1;
         }
     }
 
@@ -506,7 +509,7 @@ export class Runtime implements Handlers {
         }
         const pidNum = this.nextPid++;
         const state = start(fV, argsArr, envV.env);
-        const entry: ProcEntry = { pid: pidNum, addr, envRef: envV, grants, state, status: 'ready', watchers: [] };
+        const entry: ProcEntry = { pid: pidNum, addr, envRef: envV, grants, state, status: 'ready', watchers: [], ticks: 0 };
         this.procs.set(pidNum, entry);
         this.live.add(entry);
         this.addReceiver(entry);
@@ -643,7 +646,7 @@ export class Runtime implements Handlers {
         const state: State = { ...rec.state, R: envV.env };
         const entry: ProcEntry = {
             pid: pidNum, addr: rec.addr, envRef: envV, grants: new Set(rec.grants),
-            state, status: 'ready', watchers: [],
+            state, status: 'ready', watchers: [], ticks: 0,
         };
         this.procs.set(pidNum, entry);
         this.live.add(entry);
@@ -667,6 +670,13 @@ export class Runtime implements Handlers {
         if (entry === undefined) return T('type-error', 'unknown pid', pidV);
         if (entry.status === 'parked') return T('bad-state', 'process was parked', pidV);
         return V(list(...entry.state.A.args));
+    }
+
+    processTicks(pidV: Value): ActionResult {
+        if (pidV.t !== 'pid') return T('type-error', 'process::ticks requires a pid', pidV);
+        const entry = this.procs.get(pidV.id);
+        if (entry === undefined) return T('type-error', 'unknown pid', pidV);
+        return V(int(entry.ticks));
     }
 
     // ===========================================================================

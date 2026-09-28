@@ -219,6 +219,52 @@ test('process::checkpoint reads the most recent call after a failure', async () 
 });
 
 // ---------------------------------------------------------------------------
+// process::ticks (DECISIONS.md, Spec changes, 2026-09-28)
+// ---------------------------------------------------------------------------
+
+test('process::ticks: a new process has used none, and each run adds the ticks it used', async () => {
+    const v = await ok(`
+        (defun spin (n) (spin (+ n 1)))
+        (defun waiter () (actor::recv))
+        (defun main ()
+            (let p (process::spawn spin (list 0) (environment::self) '() #false))
+            (let t0 (process::ticks p))
+            (process::run p 50)
+            (let t1 (process::ticks p))
+            (process::run p 30)
+            (let w (process::spawn waiter () (environment::self) '(actor) #false))
+            (let stop (process::run w 1000))
+            (let tw (process::ticks w))
+            (list t0 t1 (process::ticks p) stop (and (> tw 0) (< tw 1000))))
+    `);
+    assert.equal(print(v), '(0 50 80 (blocked recv) #true)');
+});
+
+test('process::ticks: readable after the process ends or is parked; an unparked process starts from 0', async () => {
+    const v = await ok(`
+        (defun one () 1)
+        (defun waiter () (actor::recv))
+        (defun main ()
+            (let p (process::spawn one () (environment::self) '() #false))
+            (process::run p 100)
+            (let w (process::spawn waiter () (environment::self) '(actor) #false))
+            (process::run w 100)
+            (let before (process::ticks w))
+            (let q (process::unpark (process::park w) (environment::self)))
+            (list (> (process::ticks p) 0) (= (process::ticks w) before) (process::ticks q)))
+    `);
+    assert.equal(print(v), '(#true #true 0)');
+});
+
+test('process::ticks: a non-PID is a type-error', async () => {
+    const v = await ok(`
+        (defun main ()
+            (catch (process::ticks 3) e (error-tag e)))
+    `);
+    assert.equal(print(v), 'type-error');
+});
+
+// ---------------------------------------------------------------------------
 // Park, then unpark and continue
 // ---------------------------------------------------------------------------
 
