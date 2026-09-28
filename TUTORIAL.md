@@ -476,6 +476,7 @@ final count 3
 ```
 
 - **Components** are `Box` (flexbox layout), `Text`, `Newline` (inside `Text` only) and `Spacer`. Props follow CSS flexbox (`flexDirection`, `gap`, `padding`, `width`, `borderStyle`, ...) and text styles (`color`, `bold`, `dimColor`, ...). An unknown component or prop is a `type-error` naming it.
+- **Charts** are components too: `Sparkline`, `BarChart`, `StackedBarChart` and `LineGraph`. The CPI gives them numbers and the host draws them, so drawing costs no interpreter time: `(Sparkline (@ (data ,rates) (width 20) (max 8) (color cyan)))`, or `(BarChart (@ (data (("fast" 2) ("slow" 8 red))) (suffix " ms")))`. Their data props take lists (SPEC-TUI section 3.3.1).
 - **`tui::render` draws before it returns.** Whatever you rendered is on screen, even if the CPI then gets busy. Render when something worth showing has changed.
 - **Keys are messages.** `(tui::subscribe inbox)` sends `(key name modifiers)` and `(resize columns rows)` to a mailbox. They are delivered only inside `host::wait`, so a loop draws, waits, then reads its mailbox. A key name is a string for a printable key and a symbol like `up` or `return` otherwise.
 - **`inline` or `fullscreen`.** Inline mode draws below your output, and `IO::print` lines appear above the view. Fullscreen mode takes the whole terminal and holds `IO::print` lines until `tui::close`.

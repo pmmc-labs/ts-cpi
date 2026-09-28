@@ -127,7 +127,8 @@ test('gateway monitor: draws each endpoint and the whole gateway, the last secon
     has('gateway :8080 · up 0:03 · hello max  5 ·  4 fps');
     has('requests       9 · 2xx       9 · 4xx     0 · 503     0 · 504     0 · 5xx     0 · gone     0');
     // One mark per hello worker: one idle, two parked; counters as counts.
-    has(' hello     ○◌◌ 1/5                    0      1      <1ms      <1ms        307                   █▁                    ▁▁');
+    // The host draws the sparklines: 1 of 6 requests fills 2 of 8 steps.
+    has(' hello     ○◌◌ 1/5                    0      1      <1ms      <1ms        307                   █▂                    ▁▁');
     has(' counter   ● 0  ○ 0  ◌ 2              0      0         -         -          0                   █                     ▁');
     has(' total     ● 0  ○ 4  ◌ 4              0      1      <1ms      <1ms        427                   █▁                    ▁▁');
     // Since the start: 7 hello requests over 3 seconds, 6 in the busiest.

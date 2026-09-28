@@ -2,6 +2,8 @@
 
 Sep 26, 2026 · Accepted and implemented · Extends `../../design-xxx/SPEC-CPI.md`
 
+Sep 28, 2026 · Charts (sections 3 and 15) accepted and implemented
+
 This document specifies `tui::`, a privileged namespace through which the CPI
 presents what it is managing on a terminal and receives keyboard input. It
 also specifies the changes to time and to `host::wait` that interactive use
@@ -49,7 +51,7 @@ A view is an **element**:
 ```
 
 - `Tag` is a symbol naming a component (section 3.2).
-- The props list `(@ ...)` is optional. Each prop is a two-element list of a symbol and a value. A value is a string, a symbol (which stands for the string of its name), an integer, a float or a boolean.
+- The props list `(@ ...)` is optional. Each prop is a two-element list of a symbol and a value. A value is a string, a symbol (which stands for the string of its name), an integer, a float or a boolean. The data props of chart components (section 3.3) take lists, in the shapes their rows describe. A list in any other prop is a `type-error`.
 - Each child is one of:
   - an element;
   - a string or number, which is text, and allowed only inside `Text`;
@@ -78,6 +80,12 @@ the namespace and grows by amending this section.
 | `Text` | text and `Text` elements | Styled text. Nested `Text` runs inline. |
 | `Newline` | none | A line break inside `Text`. |
 | `Spacer` | none | Fills the free space along its parent `Box`'s main axis. |
+| `Sparkline` | none | A one-row trend of a list of numbers. |
+| `BarChart` | none | Horizontal bars, one row per labelled value. |
+| `StackedBarChart` | none | One bar divided into labelled segments. |
+| `LineGraph` | none | One or more series of numbers as lines, several rows high. |
+
+Chart components are drawn by the host from the numbers the view gives them (section 15). They may not be inside a `Text`.
 
 ### 3.3 Props
 
@@ -95,11 +103,76 @@ Flexbox defaults apply, including the surprising one: items shrink to fit, so
 a fixed-width panel beside a long line is narrowed unless it has
 `(flexShrink 0)`.
 
+### 3.3.1 Chart props
+
+Chart components take only the props below. A color is a string or symbol
+naming one of Ink's colors (`red`, `cyan`, `gray`, `blueBright`, ...) or a hex
+code (`"#1baf7a"`). A label is a string. A number is an integer or a float.
+
+**`Sparkline`**
+
+| Prop | Value | Meaning |
+| --- | --- | --- |
+| `data` | a list of numbers | Required. Oldest first. |
+| `width` | an integer | Columns. Default: one per value. With fewer values than columns, the values are right-aligned, so the newest is always at the right edge. With more, the oldest are dropped. |
+| `min`, `max` | numbers | The values drawn empty and full height. Default: 0 and the largest value. A fixed `max` keeps heights comparable from frame to frame. |
+| `color` | a color | |
+| `underline` | a boolean | Underlines the whole width, so empty positions still show as a line. |
+| `mode` | `block` or `braille` | Block characters, one value per column, or braille, two values per column. Default `block`. |
+
+**`BarChart`**
+
+| Prop | Value | Meaning |
+| --- | --- | --- |
+| `data` | a list of `(label value)` or `(label value color)` | Required. One row each, in order. |
+| `width` | an integer | Columns for the whole chart, labels and values included. |
+| `max` | a number | The value drawn full width. Default: the largest value. |
+| `showValue` | `right`, `inside` or `none` | Where each value is written. Default `right`. |
+| `suffix` | a string | Written after each value shown, e.g. `" ms"` or `"%"`. |
+| `sort` | `none`, `asc` or `desc` | Default `none`. |
+| `color` | a color | For rows that give none. |
+| `barChar` | one of `"█"`, `"▆"`, `"▓"`, `"▒"`, `"░"` | |
+
+**`StackedBarChart`**
+
+| Prop | Value | Meaning |
+| --- | --- | --- |
+| `data` | a list of `(label value)` or `(label value color)` | Required. The segments, left to right. |
+| `mode` | `percentage` or `absolute` | Each segment's share of the whole bar, or its value against `max`. Default `percentage`. |
+| `max` | a number | The value drawn full width in `absolute` mode. Default: the sum of the values. |
+| `width` | an integer | Columns. |
+| `showLabels`, `showValues` | booleans | Labels above the bar, values below it. Default `#true`. |
+| `suffix` | a string | Written after each value shown. |
+
+**`LineGraph`**
+
+| Prop | Value | Meaning |
+| --- | --- | --- |
+| `data` | a list of lists of numbers | Required. One list per series, oldest first. |
+| `colors` | a list of colors | One per series, in order. |
+| `width` | an integer | Columns. |
+| `height` | an integer | Rows. Default 10. |
+| `min`, `max` | numbers | The range of the vertical axis. Default: the range of the data. |
+| `showYAxis` | a boolean | Labels the vertical axis. |
+| `xLabels` | a list of strings | Spread evenly under the horizontal axis. |
+| `caption` | a string | Written under the graph. |
+
+For example, the gateway monitor's request-rate column and its loop split:
+
+```lisp
+`(Sparkline (@ (data ,rates) (width 20) (color cyan) (underline #true)))
+
+`(StackedBarChart (@ (width 40) (showValues #false)
+    (data (("run" ,run blue) ("other" ,other yellow) ("draw" ,draw magenta) ("wait" ,wait gray)))))
+```
+
 ### 3.4 Errors
 
 `tui::render` checks the whole view before anything is drawn. A malformed
 view throws `type-error` from the `tui::render` call, with the offending part
-of the view as the payload. The screen is unchanged.
+of the view as the payload. The screen is unchanged. For a chart, a `data`
+list of the wrong shape, a non-number where a number belongs, an unknown
+color, or a missing `data` prop is such a malformed view.
 
 ## 4. Builtins: `tui::`
 
@@ -234,6 +307,11 @@ deterministically.
 | D5 | Examples that depend on exact virtual time. | `examples/life/12-timer-wheel.slight` decodes cell positions from exact wake times, so under a real clock it computes wrong boards. Keep it only as a test fixture that runs with the virtual clock, and say so in its header. `04-metronome` and `tests/programs/timers.slight` depend on the order of wake-ups, not exact times, so they should stay correct and only their printed times vary. That needs checking once the real clock exists. | Rework 12 so it doesn't need exact times, or remove it. |
 | D6 | Ctrl-C. | An ordinary event while subscribed; ends the image otherwise (section 6). | Always end the image, which gives the CPI no chance to shut down cleanly. |
 | D7 | A CPI that never yields. | Leave it as DESIGN-001 open question 4 for now. | Run the CPI in a worker thread, so the host's thread can always draw, take Ctrl-C and stop a runaway CPI. This is a bigger change to the host, and a possible answer to open question 4 later. |
+| D9 | Who draws charts (Sep 28, 2026). | The host, as components (section 3.2): the CPI passes numbers, and drawing leaves the interpreter and the CPI's loop. | CPI code builds them as text, costing interpreter time in the loop for every character. |
+| D10 | Which props take lists. | Only chart data props (`data`, `colors`, `xLabels`). | Any prop: more general, but nothing else needs it, and it weakens the check that catches a list passed by mistake. |
+| D11 | Which charts. | `Sparkline`, `BarChart`, `StackedBarChart`, `LineGraph`. | Two first, the rest when a monitor needs them. |
+| D12 | Formatting values. | A `suffix` string. | No formatting, or a format string, which is a small language of its own. |
+| D13 | The chart library. | A host detail, as Ink is (section 1). | All four written in the host, with no new dependency. |
 | D8 | Unknown props. | `type-error` against the table in section 3.3: typos surface at once, and the prop list stays portable to a web renderer. | Pass everything through to the renderer (Ink silently ignores unknown props). |
 
 ## Appendix: implementation notes (not normative)
@@ -247,3 +325,57 @@ deterministically.
 
 - ~~**Views can show only strings and numbers.**~~ *Resolved Sep 26, 2026* by the core operation `(value->string v)`, which returns the text `IO::print` shows for any value (proposed SPEC-CPI §5.6 text in the prototype's `DECISIONS.md`). A view shows a value as `(Text ,(value->string v))`.
 
+## 15. Charts
+
+Accepted and implemented Sep 28, 2026 (decisions D9 to D13). The text
+above, in sections 3.1 to 3.4, is where they are specified; this section
+records why, what was left out, and what they measured.
+
+### 15.1 Why
+
+The CPI is for experimenting with concurrency, and `tui::` is how an
+experiment shows what it is doing. Charts are therefore most of what a
+monitor draws: throughput over time, latency, where the loop's time goes.
+
+Today a chart is text that CPI code builds: a sparkline is a string of block
+characters made one value at a time in the interpreter. The gateway monitor
+(`examples/gateway/`) measured the cost. A frame takes 13 to 23 ms, and 40
+to 55% of it is building the view in CPI code. Every one of those
+milliseconds is time no process runs, because the monitor is a step in the
+CPI's loop.
+
+The division of labour that `tui::` already has applies here too: the CPI
+decides what to show, and the host draws it. With chart components, the CPI
+passes numbers and the host turns them into characters. Views stay plain
+data, since a chart's data is numbers and labels, so a view can still be
+logged, compared, stored and replayed.
+
+### 15.2 Left out
+
+- **Functions.** Charting libraries format values and choose colors with callbacks. A view is data, so a prop cannot hold a procedure; `suffix` covers the common case.
+- **Color gradients by threshold.** They are useful for latency, but they need a way to say "red above 50 ms" as data. Left for when a monitor asks for it.
+- **Vertical bar charts, histograms, heat maps.** Added by amending this section when an experiment needs one.
+
+### 15.3 Implementation notes (not normative)
+
+- `@pppp606/ink-chart` 0.2.8 (MIT; needs Ink 6 or later and React 19 or later, which the prototype has) provides `BarChart`, `StackedBarChart` and `LineGraph` with props close to these. `suffix` becomes its `format` callback, and `colors` becomes each series' `color`.
+- Its `Sparkline` scales to the largest value and has no fixed `max`, right alignment or underline, so the prototype draws `Sparkline` itself (`src/tui/charts.ts`). It is a few lines of TypeScript, and it is exactly the work that moves out of the interpreter.
+- The allowlist in `src/tui/views.ts` gains the four components. The data props are converted and checked there, so the chart library never sees a malformed value.
+- The headless backend renders charts with the same `renderToString`, so tests can assert on them.
+- The library's `BarChart` and `StackedBarChart` take `width` as the whole chart's width, labels and values included, and section 3.3.1 says the same. (The proposal said the longest bar's width; it changed to match what a fixed-width box needs.)
+
+### 15.4 What it measured
+
+The gateway monitor switched its two sparkline columns to `Sparkline` and
+added a `StackedBarChart` of the loop's split. It ran on a pseudo-terminal
+under 20 requests a second for 15 seconds, three times each way, alternating:
+
+| Per frame | Text built by CPI code | Host charts |
+| --- | --- | --- |
+| 4 fps: building / painting | 15.7 / 14.7 ms | 12.9 / 15.8 ms |
+| 30 fps: building / painting | 6.6 / 8.3 ms | 5.4 / 9.1 ms |
+
+Building fell by 18%, and painting rose by about 1 ms for the extra
+components. The sparklines were about a fifth of the building: most of the
+rest is the monitor's tables (cells, padding, worker marks), still built in
+CPI code. A table component is the next candidate.

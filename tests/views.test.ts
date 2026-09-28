@@ -79,3 +79,52 @@ test('a view built by CPI code renders', () => {
         '╰──────────────────╯',
     ].join('\n'));
 });
+
+// ---------------------------------------------------------------------------
+// Charts (SPEC-TUI sections 3.2 and 3.3)
+// ---------------------------------------------------------------------------
+
+test('Sparkline: zero is blank, a fixed max, right-aligned in its width', () => {
+    // 1 of 8 is one step, 4 of 8 half height, 8 full.
+    assert.equal(show('(Sparkline (@ (data (0 1 4 8)) (width 6) (max 8)))'), '   ▁▄█');
+});
+
+test('Sparkline: scales to the largest value by default, and drops the oldest values that do not fit', () => {
+    assert.equal(show('(Sparkline (@ (data (1 2 3 4)) (width 2)))'), '▆█');
+});
+
+test('Sparkline: braille puts two values in a column, the newest at the right', () => {
+    // (4 4) fills both columns of the first cell; (2 0) half the left one.
+    assert.equal(show('(Sparkline (@ (data (4 4 2 0)) (max 4) (mode braille)))'), '⣿⡄');
+});
+
+test('BarChart: one row per labelled value, with a suffix', () => {
+    const out = show('(BarChart (@ (data (("fast" 2) ("slow" 8 red))) (width 24) (suffix " ms")))', 40).split('\n');
+    assert.equal(out.length, 2);
+    assert.ok(out[0]!.startsWith('fast') && out[0]!.endsWith('2 ms'), out[0]);
+    assert.ok(out[1]!.startsWith('slow') && out[1]!.endsWith('8 ms'), out[1]);
+});
+
+test('StackedBarChart: segments with their labels', () => {
+    const out = show('(StackedBarChart (@ (data (("run" 1 blue) ("wait" 3 gray))) (width 20) (showValues #false)))', 40);
+    assert.ok(out.includes('run') && out.includes('wait'), out);
+});
+
+test('LineGraph: series drawn over several rows', () => {
+    const out = show('(LineGraph (@ (data ((1 2 3 4) (4 3 2 1))) (colors (cyan magenta)) (width 20) (height 3)))', 40);
+    assert.equal(out.split('\n').length, 3, out);
+});
+
+test('chart errors name the offending part', () => {
+    const fails = (source: string, message: RegExp) =>
+        assert.throws(() => toElement(view(source)), (e: unknown) => e instanceof ViewError && message.test(e.message));
+    fails('(Sparkline (@ (width 4)))', /Sparkline requires data/);
+    fails('(Sparkline (@ (data (1 "two" 3))))', /Sparkline data must be numbers: "two"/);
+    fails('(Sparkline (@ (data 3)))', /Sparkline data must be a list/);
+    fails('(Sparkline (@ (data (1)) (color mauve)))', /Sparkline color must be a color: mauve/);
+    fails('(Sparkline (@ (data (1)) (mode dots)))', /Sparkline mode must be one of block, braille/);
+    fails('(BarChart (@ (data ((1 2)))))', /BarChart data must be \(label value\) or \(label value color\): \(1 2\)/);
+    fails('(LineGraph (@ (data ((1 2) 3))))', /LineGraph data must be lists of numbers: 3/);
+    fails('(Text (Sparkline (@ (data (1)))))', /Sparkline cannot be inside a Text/);
+    fails('(Sparkline (@ (data (1))) (Text "x"))', /Sparkline takes no children/);
+});

@@ -13,6 +13,7 @@
         "cpi": "node bin/cpi.ts"
     },
     "dependencies": {
+        "@pppp606/ink-chart": "^0.2.8",
         "ink": "^7.1.1",
         "react": "^19.3.0"
     }

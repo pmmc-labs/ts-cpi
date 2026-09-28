@@ -31,7 +31,7 @@ the language.
 
 - `../../design-xxx/DESIGN-001.md` and `SPEC-CPI.md` are the design and spec. Never edit them from here.
 - `DECISIONS.md` records every prototype decision, spec issue, and **spec change** (quasiquote, `append`, `value->string`, `list` and the other language additions, roles), with text ready to move into SPEC-CPI.
-- `SPEC-TUI.md` specifies `tui::`, the real clock and `host::wait`, all accepted.
+- `SPEC-TUI.md` specifies `tui::`, the real clock, `host::wait` and chart components, all accepted.
 - `SPEC-HTTP.md` specifies `http::`, requests as messages and reply addresses, accepted.
 - A change to language semantics, a new core operation or builtin, or a change to runtime timing is a spec change: propose it, with options and a recommendation, before building.
 

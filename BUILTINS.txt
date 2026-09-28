@@ -380,7 +380,12 @@ tui:: (privileged; SPEC-TUI.md)
     -> #true. mode is 'inline (below the output) or 'fullscreen.
 (tui::render view)
     -> #true, once the view is on screen. A view is data:
-    (Tag (@ (prop value) ...) child ...), with Box, Text, Newline, Spacer.
+    (Tag (@ (prop value) ...) child ...), with Box, Text, Newline, Spacer,
+    and the charts Sparkline, BarChart, StackedBarChart and LineGraph,
+    which the host draws from numbers: e.g.
+        (Sparkline (@ (data (1 4 2 8)) (width 20) (max 8) (color cyan)))
+        (BarChart (@ (data (("fast" 2) ("slow" 8 red))) (suffix " ms")))
+    Chart data props take lists; see SPEC-TUI section 3.3.1.
 (tui::size)
     -> (columns rows).
 (tui::subscribe address)

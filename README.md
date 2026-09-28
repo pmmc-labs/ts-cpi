@@ -117,7 +117,7 @@ quota from the keyboard.
 | `src/machine.ts` | The pure `step` function and its state: tail calls, local `defun` groups, catch/throw, host requests, the checkpoint slot (sections 6 to 8). |
 | `src/builtins.ts` | The namespace tables: `process::`, `mailbox::`, `host::`, `environment::`, `actor::`, `IO::print`, `timer::sleep`, with arities. |
 | `src/runtime.ts` | `Runtime`: boots the CPI, the process table, mailboxes, `process::run` batches, traps, parking, the clock, dead letters, the TUI and HTTP (sections 10 to 12, SPEC-TUI and SPEC-HTTP). |
-| `src/tui/` | The `tui::` namespace (`SPEC-TUI.md`): views as data (`views.ts`), input events (`events.ts`), and two backends, Ink on a terminal (`terminal.ts`) and headless for tests (`headless.ts`). |
+| `src/tui/` | The `tui::` namespace (`SPEC-TUI.md`): views as data (`views.ts`), charts drawn by the host (`charts.ts`, with `@pppp606/ink-chart`), input events (`events.ts`), and two backends, Ink on a terminal (`terminal.ts`) and headless for tests (`headless.ts`). |
 | `src/http/` | The `http::` namespace (`SPEC-HTTP.md`): the backend interface and request-target parsing (`backend.ts`), and two backends, `node:http` on the loopback interface (`node.ts`) and scripted for tests (`headless.ts`). |
 | `src/loader.ts` | Loads `.slight` files into an environment (section 9). |
 | `bin/cpi.ts` | The command line. |

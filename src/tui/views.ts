@@ -10,6 +10,7 @@ import { Box, Newline, Spacer, Text } from 'ink';
 import type { Value } from '../types.ts';
 import { listToArray } from '../values.ts';
 import { print } from '../printer.ts';
+import { BarChartView, LineGraphView, Sparkline, StackedBarChartView, type Row } from './charts.ts';
 
 const BOX_PROPS = [
     'flexDirection', 'flexGrow', 'flexShrink', 'flexBasis', 'flexWrap', 'alignItems', 'alignSelf',
@@ -20,7 +21,26 @@ const BOX_PROPS = [
 ];
 const TEXT_PROPS = ['color', 'backgroundColor', 'bold', 'italic', 'underline', 'strikethrough', 'inverse', 'dimColor', 'wrap'];
 
-type Component = { readonly type: React.ElementType; readonly props: ReadonlySet<string>; readonly children: boolean };
+// What a chart prop takes (section 3.3). Other components' props take any
+// atom, passed to the renderer unchanged.
+type Kind =
+    | 'number' | 'int' | 'bool' | 'string' | 'color'
+    | 'numbers' | 'rows' | 'series' | 'colors' | 'strings'
+    | readonly string[];
+
+type Component = {
+    readonly type: React.ElementType;
+    readonly props: ReadonlySet<string>;
+    readonly children: boolean;
+    // Chart components: each prop's kind, and the props that must be given.
+    readonly kinds?: ReadonlyMap<string, Kind>;
+    readonly required?: readonly string[];
+};
+
+function chart(type: React.ElementType, kinds: Record<string, Kind>): Component {
+    const all = new Map<string, Kind>(Object.entries(kinds));
+    return { type, props: new Set([...all.keys(), 'key']), children: false, kinds: all, required: ['data'] };
+}
 
 // The allowlist (section 3.2): the capability surface of the namespace.
 const COMPONENTS: ReadonlyMap<string, Component> = new Map<string, Component>([
@@ -28,6 +48,28 @@ const COMPONENTS: ReadonlyMap<string, Component> = new Map<string, Component>([
     ['Text', { type: Text, props: new Set([...TEXT_PROPS, 'key']), children: true }],
     ['Newline', { type: Newline, props: new Set(['key']), children: false }],
     ['Spacer', { type: Spacer, props: new Set(['key']), children: false }],
+    ['Sparkline', chart(Sparkline, {
+        data: 'numbers', width: 'int', min: 'number', max: 'number', color: 'color', underline: 'bool',
+        mode: ['block', 'braille'],
+    })],
+    ['BarChart', chart(BarChartView, {
+        data: 'rows', width: 'int', max: 'number', showValue: ['right', 'inside', 'none'], suffix: 'string',
+        sort: ['none', 'asc', 'desc'], color: 'color', barChar: ['█', '▆', '▓', '▒', '░'],
+    })],
+    ['StackedBarChart', chart(StackedBarChartView, {
+        data: 'rows', mode: ['percentage', 'absolute'], max: 'number', width: 'int', showLabels: 'bool',
+        showValues: 'bool', suffix: 'string',
+    })],
+    ['LineGraph', chart(LineGraphView, {
+        data: 'series', colors: 'colors', width: 'int', height: 'int', min: 'number', max: 'number',
+        showYAxis: 'bool', xLabels: 'strings', caption: 'string',
+    })],
+]);
+
+// Ink's color names, as chalk knows them; anything else must be a hex code.
+const COLOR_NAMES = new Set([
+    'black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white', 'gray', 'grey',
+    'blackBright', 'redBright', 'greenBright', 'yellowBright', 'blueBright', 'magentaBright', 'cyanBright', 'whiteBright',
 ]);
 
 export class ViewError extends Error {
@@ -61,6 +103,7 @@ function convert(v: Value, inText: boolean): Node {
     const component = COMPONENTS.get(tag);
     if (component === undefined) throw new ViewError(`unknown component ${tag}`, v);
     if (tag === 'Newline' && !inText) throw new ViewError('Newline must be inside a Text', v);
+    if (component.kinds !== undefined && inText) throw new ViewError(`${tag} cannot be inside a Text`, v);
 
     let rest = items.slice(1);
     let props: Record<string, unknown> = {};
@@ -94,9 +137,50 @@ function convertProps(at: Value, tag: string, component: Component): Record<stri
         }
         const name = pair[0]!.name;
         if (!component.props.has(name)) throw new ViewError(`${tag} has no prop ${name}`, entry);
-        props[name] = propValue(pair[1]!);
+        const kind = component.kinds?.get(name);
+        props[name] = kind === undefined ? propValue(pair[1]!) : chartValue(kind, pair[1]!, `${tag} ${name}`);
+    }
+    for (const name of component.required ?? []) {
+        if (props[name] === undefined) throw new ViewError(`${tag} requires ${name}`, at);
     }
     return props;
+}
+
+// A chart prop's value, checked against its kind. `what` names the prop in
+// errors; the payload is the offending part.
+function chartValue(kind: Kind, v: Value, what: string): unknown {
+    const fail = (expected: string, at: Value = v): never => {
+        throw new ViewError(`${what} must be ${expected}`, at);
+    };
+    const list = (): Value[] => listToArray(v) ?? fail('a list');
+    const number = (x: Value): number => (x.t === 'int' ? Number(x.v) : x.t === 'float' ? x.v : fail('numbers', x));
+    const color = (x: Value): string => {
+        const name = x.t === 'str' ? x.v : x.t === 'sym' ? x.name : fail('a color', x);
+        return COLOR_NAMES.has(name) || /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(name) ? name : fail('a color', x);
+    };
+    if (typeof kind !== 'string') {
+        const name = v.t === 'sym' ? v.name : v.t === 'str' ? v.v : fail(`one of ${kind.join(', ')}`);
+        return kind.includes(name) ? name : fail(`one of ${kind.join(', ')}`);
+    }
+    switch (kind) {
+        case 'number': return number(v);
+        case 'int': return v.t === 'int' ? Number(v.v) : fail('an integer');
+        case 'bool': return v.t === 'bool' ? v.v : fail('a boolean');
+        case 'string': return v.t === 'str' ? v.v : fail('a string');
+        case 'color': return color(v);
+        case 'numbers': return list().map(number);
+        case 'colors': return list().map(color);
+        case 'strings': return list().map((x) => (x.t === 'str' ? x.v : fail('strings', x)));
+        case 'series': return list().map((s) => (listToArray(s) ?? fail('lists of numbers', s)).map(number));
+        case 'rows': return list().map((r): Row => {
+            const row = listToArray(r);
+            if (row === null || row.length < 2 || row.length > 3 || row[0]!.t !== 'str') {
+                return fail('(label value) or (label value color)', r);
+            }
+            const out: Row = { label: row[0]!.v, value: number(row[1]!) };
+            return row.length === 3 ? { ...out, color: color(row[2]!) } : out;
+        });
+    }
 }
 
 function propValue(v: Value): unknown {

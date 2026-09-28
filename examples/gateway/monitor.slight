@@ -147,7 +147,16 @@
                     (count-span "504" (vector-ref counts 4) 5 'red)
                     (count-span "5xx" (vector-ref counts 5) 5 'red)
                     (count-span "gone" (vector-ref counts 6) 5 'yellow))))
-        ,(line (separated (loop-pieces (m-phases (st-metrics st)))))))
+        ,(line (separated (loop-pieces (m-phases (st-metrics st)))))
+        ,(loop-bar (m-phases (st-metrics st)))))
+
+; The same split as a bar, drawn by the host.
+(defun loop-bar (p)
+    (let parts
+        (list (list "run" (vector-ref p 1) 'blue) (list "other" (vector-ref p 2) 'yellow)
+            (list "draw" (vector-ref p 3) 'magenta) (list "wait" (vector-ref p 4) 'gray)))
+    `(StackedBarChart (@ (width 60) (showLabels #false) (showValues #false)
+        (data ,(if (= 0 (fold (lambda (n x) (+ n (second x))) 0 parts)) (list (list "wait" 1 'gray)) parts)))))
 
 (defun title (text) `(Text (@ (bold #true) (color cyan)) ,text))
 
@@ -208,9 +217,13 @@
         ()
         (cons (cell-view (car cols) (car cells)) (cell-views (cdr cols) (cdr cells)))))
 
+; A chart goes straight into the cell's box; it cannot be inside a Text.
 (defun cell-view (column content)
     `(Box (@ (width ,(second column)) (flexShrink 0) (paddingRight 1) (justifyContent ,(align column)))
-        (Text (@ (wrap truncate-end)) ,content)))
+        ,(if (chart? content) content `(Text (@ (wrap truncate-end)) ,content))))
+
+(defun chart? (content)
+    (and (pair? content) (eq? (car content) 'Sparkline)))
 
 (defun endpoint-label (name)
     (if (eq? name "total") (title name) (bold name)))
@@ -236,12 +249,16 @@
     (list
         (endpoint-label name) workers (value->string queue) (value->string (vector-ref s 0))
         (bin-span (vector-ref s 2)) (bin-span (vector-ref s 4)) (value->string (vector-ref s 6))
-        (spark-span 'cyan (spark (map (lambda (h) (vector-ref h 0)) history) 0))
-        (spark-span 'magenta (spark (map (lambda (h) (+ 1 (vector-ref h 5))) history) 11))))
+        (sparkline 'cyan (map (lambda (h) (vector-ref h 0)) history) #false)
+        ; Percentile bins, one higher so no data (-1) is blank; a fixed top
+        ; keeps heights comparable from frame to frame.
+        (sparkline 'magenta (map (lambda (h) (+ 1 (vector-ref h 5))) history) 11)))
 
-; Underlined, so an empty history still shows as a line.
-(defun spark-span (color text)
-    `(Text (@ (color ,color) (underline #true)) ,text))
+; Drawn by the host (SPEC-TUI section 3.2), underlined so an empty history
+; still shows as a line. `max` is #false to scale to the largest value.
+(defun sparkline (color values max)
+    `(Sparkline (@ (data ,values) (width ,history-length) (color ,color) (underline #true)
+        ,@(if max (list (list 'max max)) ()))))
 
 (defun acc-view (st)
     `(Box (@ (flexDirection column) (paddingX 1) (marginTop 1))
@@ -318,20 +335,6 @@
     (let procs (of-kind (st-procs st) kind))
     (let ready (ready-count procs))
     (dots ready (- (length procs) ready) 0))
-
-; A sparkline of `values`, oldest first, right-aligned in history-length
-; columns. Zero is blank. `top` is the value drawn full height, or 0 for the
-; largest value shown.
-(const spark-chars '(" " "▁" "▂" "▃" "▄" "▅" "▆" "▇" "█"))
-
-(defun spark (values top)
-    (let scale (if (= top 0) (fold max2 1 values) top))
-    (string-append
-        (repeat-string " " (- history-length (length values)))
-        (string-join "" (map (lambda (v) (nth spark-chars (spark-level v scale))) values))))
-
-(defun spark-level (v top)
-    (if (<= v 0) 0 (min2 8 (+ 1 (/ (* (- v 1) 7) (max2 1 (- top 1)))))))
 
 (defun repeat-string (s n)
     (if (<= n 0) "" (string-append s (repeat-string s (- n 1)))))
