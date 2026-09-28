@@ -31,21 +31,29 @@ clock.
 ## The monitor
 
 ```
-╭────────────────────────────────────────────────────────────────────────────────╮
-│ gateway :8080 · up 0:03 · hello max 5 · 4 fps                                  │
-│ requests 9 · 2xx 9 · 4xx 0 · 503 0 · 504 0 · 5xx 0 · gone 0                    │
-│ loop 6/s · run 0% · other 0% · draw 0% · wait 100% · frame 0 ms, 0 building    │
-╰────────────────────────────────────────────────────────────────────────────────╯
- endpoint  workers               queue  req/s  wait p95  work p95  ticks/s  req/s, 20 s          p95, 20 s
- hello     ○◌◌ 1/5               0      1      <1ms      <1ms      307                        █▁                   ▁▁
- counter   ● 0  ○ 0  ◌ 2         0      0      -         -         0                          █                    ▁
- ...
- total     ● 0  ○ 4  ◌ 4         0      1      <1ms      <1ms      427                        █▁                   ▁▁
+╭──────────────────────────────────────────────────────────────────────────────────────────────╮
+│ gateway :8080 · up 0:03 · hello max  5 ·  4 fps                                              │
+│ requests       9 · 2xx       9 · 4xx     0 · 503     0 · 504     0 · 5xx     0 · gone     0  │
+│ loop     6/s · run   0% · other   0% · draw   0% · wait 100% · frame   0 ms,   0 building    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+ endpoint  workers                queue  req/s  wait p95  work p95    ticks/s req/s, 20 s           p95, 20 s
+ hello     ○◌◌ 1/5                    0      1      <1ms      <1ms        307                   █▁                    ▁▁
+ counter   ● 0  ○ 0  ◌ 2              0      0         -         -          0                   █                     ▁
+ slow      ○                          0      0         -         -          0
+ router    ○                          0      0         -         -        120
+ system    the CPI                    0      0         -         -          0
+ other                                0      0         -         -          0
+ total     ● 0  ○ 4  ◌ 4              0      1      <1ms      <1ms        427                   █▁                    ▁▁
 
- since start requests  queue min/avg/max   req/s min/avg/max   wait ms min/avg/max   work ms min/avg/max
- hello       7         0 / 0.1 / 2         0 / 2.3 / 6         0 / 0.0 / 0           0 / 0.0 / 0
- ...
- total       9         0 / 0.6 / 6         0 / 3.0 / 8         0 / 0.0 / 0           0 / 0.0 / 0
+ since start  requests               queue               req/s             wait ms             work ms
+                          min    avg   max    min    avg   max    min    avg   max    min    avg   max
+ hello               7      0    0.1     2      0    2.3     6      0    0.0     0      0    0.0     0
+ counter             2      0    0.0     1      0    0.6     2      0    0.0     0      0    0.0     0
+ slow                0      0    0.0     0      0    0.0     0      -      -     -      -      -     -
+ router              0      0    0.4     6      0    0.0     0      -      -     -      -      -     -
+ system              0      0    0.0     0      0    0.0     0      -      -     -      -      -     -
+ other               0      0    0.0     0      0    0.0     0      -      -     -      -      -     -
+ total               9      0    0.6     6      0    3.0     8      0    0.0     0      0    0.0     0
 ```
 
 (From `tests/gateway.test.ts`, on the virtual clock, where no time passes
