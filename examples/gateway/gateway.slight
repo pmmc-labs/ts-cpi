@@ -347,7 +347,9 @@
 
 (const bin-bounds '(1 2 5 10 20 50 100 200 500 1000))
 (const bin-labels '("<1ms" "<2ms" "<5ms" "<10ms" "<20ms" "<50ms" "<100ms" "<200ms" "<500ms" "<1s" ">=1s"))
-(const endpoint-names '("hello" "counter" "slow" "router" "system" "other"))
+; `total` is the whole gateway: every request and every tick also counts
+; there. No path reaches it.
+(const endpoint-names '("hello" "counter" "slow" "router" "system" "other" "total"))
 
 (defun bin-of (ms) (bin-walk ms bin-bounds 0))
 
@@ -373,18 +375,47 @@
 
 (defun bin-label (i) (if (< i 0) "-" (nth bin-labels i)))
 
+; A running summary of a quantity since the start: (count sum min max).
+(defun acc-new () (vector 0 0 0 0))
+
+(defun acc-add (a x)
+    (if (= (vector-ref a 0) 0)
+        (vector 1 x x x)
+        (vector (+ 1 (vector-ref a 0)) (+ x (vector-ref a 1)) (min2 x (vector-ref a 2)) (max2 x (vector-ref a 3)))))
+
+; "min / avg / max", the average to one decimal place; "-" if empty.
+(defun acc-text (a)
+    (if (= (vector-ref a 0) 0)
+        "-"
+        (string-append
+            (value->string (vector-ref a 2)) " / " (tenths (/ (* 10 (vector-ref a 1)) (vector-ref a 0)))
+            " / " (value->string (vector-ref a 3)))))
+
+(defun tenths (n)
+    (string-append (value->string (/ n 10)) "." (value->string (% n 10))))
+
 ; An endpoint's metrics, a vector: requests in all; this second's requests,
-; wait, work and total histograms, and ticks; and the summaries of the
-; seconds before, newest first. A summary is a vector: requests, the 50th
-; and 95th percentile bins of wait and of work, the 95th of total, ticks.
-(defun new-endpoint () (vector 0 0 (new-hist) (new-hist) (new-hist) 0 ()))
+; wait, work and total histograms, and ticks; the summaries of the seconds
+; before, newest first; and running summaries since the start of wait and
+; work (per request, in ms), of its queue (per loop), and of requests per
+; second (per second). A summary is a vector: requests, the 50th and 95th
+; percentile bins of wait and of work, the 95th of total, ticks.
+(defun new-endpoint () (vector 0 0 (new-hist) (new-hist) (new-hist) 0 () (acc-new) (acc-new) (acc-new) (acc-new)))
 (defun ep-total (ep) (vector-ref ep 0))
 (defun ep-history (ep) (vector-ref ep 6))
+(defun ep-wait-acc (ep) (vector-ref ep 7))
+(defun ep-work-acc (ep) (vector-ref ep 8))
+(defun ep-queue-acc (ep) (vector-ref ep 9))
+(defun ep-rate-acc (ep) (vector-ref ep 10))
 
 (defun add-request (ep wait work total)
-    (vector (+ 1 (vector-ref ep 0)) (+ 1 (vector-ref ep 1))
-        (hist-add (vector-ref ep 2) wait) (hist-add (vector-ref ep 3) work) (hist-add (vector-ref ep 4) total)
-        (vector-ref ep 5) (vector-ref ep 6)))
+    (let counted (vector-set (vector-set ep 0 (+ 1 (vector-ref ep 0))) 1 (+ 1 (vector-ref ep 1))))
+    (let binned
+        (vector-set (vector-set (vector-set counted 2 (hist-add (vector-ref ep 2) wait))
+            3 (hist-add (vector-ref ep 3) work)) 4 (hist-add (vector-ref ep 4) total)))
+    (vector-set (vector-set binned 7 (acc-add (vector-ref ep 7) wait)) 8 (acc-add (vector-ref ep 8) work)))
+
+(defun add-queue-sample (ep n) (vector-set ep 9 (acc-add (vector-ref ep 9) n)))
 
 (defun add-ep-ticks (ep n) (vector-set ep 5 (+ n (vector-ref ep 5))))
 
@@ -397,7 +428,8 @@
 
 (defun close-second (ep)
     (vector (vector-ref ep 0) 0 (new-hist) (new-hist) (new-hist) 0
-        (take (cons (summarize ep) (vector-ref ep 6)) history-length)))
+        (take (cons (summarize ep) (vector-ref ep 6)) history-length)
+        (vector-ref ep 7) (vector-ref ep 8) (vector-ref ep 9) (acc-add (vector-ref ep 10) (vector-ref ep 1))))
 
 (defun close-seconds (ep n)
     (if (<= n 0) ep (close-seconds (close-second ep) (- n 1))))
@@ -436,7 +468,7 @@
 (defun endpoint-of (path)
     (cond
         ((nil? path) "other")
-        ((and (member? (car path) endpoint-names) (not (eq? (car path) "router"))) (car path))
+        ((and (member? (car path) endpoint-names) (not (member? (car path) '("router" "total")))) (car path))
         (#true "other")))
 
 (defun kind-endpoint (kind)
@@ -465,12 +497,34 @@
     (let answered (nth entry 7))
     (let reached (if (nth entry 6) (nth entry 6) answered))
     (let m (st-metrics st))
-    (update-endpoint (with-metrics st (vector-set m 0 (count-status (m-status m) status)))
-        (endpoint-of (nth entry 3))
-        (lambda (ep) (add-request ep (- reached arrived) (- answered reached) (- answered arrived)))))
+    (let add (lambda (ep) (add-request ep (- reached arrived) (- answered reached) (- answered arrived))))
+    (update-endpoint
+        (update-endpoint (with-metrics st (vector-set m 0 (count-status (m-status m) status))) (endpoint-of (nth entry 3)) add)
+        "total" add))
 
 (defun add-ticks (st name n)
-    (update-endpoint st name (lambda (ep) (add-ep-ticks ep n))))
+    (let add (lambda (ep) (add-ep-ticks ep n)))
+    (update-endpoint (update-endpoint st name add) "total" add))
+
+; Each endpoint's queue now: the requests waiting in the mailbox its router
+; route leads to (a counter's own mailbox is not counted). `total` is them all.
+(defun endpoint-queue (w name)
+    (cond
+        ((eq? name "hello") (mailbox::size (world-queue w)))
+        ((eq? name "counter") (mailbox::size (world-counters-box w)))
+        ((eq? name "slow") (mailbox::size (world-slow-box w)))
+        ((eq? name "router") (mailbox::size (world-router-box w)))
+        ((eq? name "system") (mailbox::size (world-inbox w)))
+        (#true 0)))
+
+; Adds this loop's queue lengths to the running summaries.
+(defun sample-queues (w st)
+    (let sizes (map (lambda (name) (list name (endpoint-queue w name))) endpoint-names))
+    (let sum (fold (lambda (n s) (+ n (second s))) 0 sizes))
+    (fold
+        (lambda (acc s)
+            (update-endpoint acc (car s) (lambda (ep) (add-queue-sample ep (if (eq? (car s) "total") sum (second s))))))
+        st sizes))
 
 ; Starts a new second when host::now reaches one, closing the seconds
 ; between on every endpoint.
@@ -726,7 +780,7 @@
             (let t0 (host::now))
             (let st1 (run-round (roll-second st t0) t0))
             (let t1 (host::now))
-            (let st2 (sleep-idle (wake-counters w (scale-hello w (read-served-log w (handle-inbox w st1)) t1) t1) t1))
+            (let st2 (sample-queues w (sleep-idle (wake-counters w (scale-hello w (read-served-log w (handle-inbox w st1)) t1) t1) t1)))
             (let t2 (host::now))
             (let stepped ((car ui) (cdr ui) w st2 t2))
             (let st3 (second stepped))

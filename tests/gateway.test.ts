@@ -92,13 +92,14 @@ test('gateway: scales hello workers, makes counters on first use, parks the idle
             'router total 0 last-second 0 wait-p95 - work-p95 - total-p95 - ticks 736',
             'system total 3 last-second 2 wait-p95 <1ms work-p95 <1ms total-p95 <1ms ticks 0',
             'other total 1 last-second 1 wait-p95 <1ms work-p95 <1ms total-p95 <1ms ticks 0',
+            'total total 15 last-second 4 wait-p95 <1ms work-p95 <1ms total-p95 <1ms ticks 965',
         ].join('\n'),
         '200 bye',
     ]);
     assert.equal(rt.deadLetters.length, 0);
 });
 
-test('gateway monitor: draws the workers and history of each endpoint, and takes keys', async () => {
+test('gateway monitor: draws each endpoint and the whole gateway, the last second and since the start, and takes keys', async () => {
     const script: ScriptedRequest[] = [
         { target: '/hello/ada', after: 1100 },
         { target: '/hello/bob' },
@@ -125,11 +126,19 @@ test('gateway monitor: draws the workers and history of each endpoint, and takes
     const has = (text: string) => assert.ok(last.some((l) => l.includes(text)), `no line with ${JSON.stringify(text)} in\n${last.join('\n')}`);
     has('gateway :8080 · up 0:03 · hello max 5 · 4 fps');
     has('requests 9 · 2xx 9 · 4xx 0 · 503 0 · 504 0 · 5xx 0 · gone 0');
-    has(' hello     ○ 1/5  ◌ 2            0      1      <1ms      <1ms      307                        █▁                   ▁▁');
-    has(' counter   ◌ada ◌bob             0      0      -         -         0                          █                    ▁');
-    has(' 3.2s  counter bob asleep');
+    // One mark per hello worker: one idle, two parked; counters as counts.
+    has(' hello     ○◌◌ 1/5               0      1      <1ms      <1ms      307                        █▁                   ▁▁');
+    has(' counter   ● 0  ○ 0  ◌ 2         0      0      -         -         0                          █                    ▁');
+    has(' total     ● 0  ○ 4  ◌ 4         0      1      <1ms      <1ms      427                        █▁                   ▁▁');
+    // Since the start: 7 hello requests over 3 seconds, 6 in the busiest.
+    has(' hello       7         0 / 0.1 / 2         0 / 2.3 / 6         0 / 0.0 / 0           0 / 0.0 / 0');
+    has(' total       9         0 / 0.6 / 6         0 / 3.0 / 8         0 / 0.0 / 0           0 / 0.0 / 0');
+    assert.ok(!last.some((l) => l.includes('asleep')), 'events are not shown');
 
-    // The events print once the terminal is back, the key's among them.
-    assert.ok(output.includes('[gateway] hello max 5'));
-    assert.equal(output[output.length - 1], '[gateway] stopped: hello 1 cold 2 counters 0 asleep 2');
+    // Events go to the dead-letter queue, the key's among them, and only
+    // the final line is printed.
+    const events = rt.deadLetters.map((d) => print(d.msg));
+    assert.equal(events.length, 12);
+    assert.ok(events.some((e) => e.includes('"hello max 5"')), events.join('\n'));
+    assert.deepEqual(output, ['[gateway] stopped: hello 1 cold 2 counters 0 asleep 2']);
 });
