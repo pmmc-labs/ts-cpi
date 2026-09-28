@@ -2,23 +2,20 @@
 ;
 ;     node bin/cpi.ts examples/gateway/gateway.slight examples/gateway/monitor.slight
 ;
-; Keys: q quits, + and - change the most hello workers, f changes the frame
-; rate. The monitor is one more step in the CPI's loop: while it draws,
-; nothing else runs, so it draws on a timer, and its header shows what the
-; drawing costs.
+; Keys: q quits, + and - change the most hello workers. The monitor is one
+; more step in the CPI's loop, and draws only when there is something new:
+; the plan's monitor node has sent its summary for a new second, or the CPI
+; has logged an event. While it draws, nothing else runs.
 ;
 ; The CPI's events are not shown. Each is sent to a mailbox nobody receives
 ; on, so it ends up in the host's dead-letter queue.
-
-(const fps-default 4)
-(const fps-choices '(1 2 4 10 30))
 
 (defun main ()
     (tui::open 'fullscreen)
     (let keys (mailbox::create #true 64))
     (tui::subscribe keys)
     (let started (start-gateway (list keys)))
-    (let ui (vector keys fps-default 0 (dead-letter-box) 0))
+    (let ui (vector keys (dead-letter-box) 0 -1 -1))
     (let final (gateway (car started) (second started) (cons monitor ui) ()))
     (http::close gateway-port)
     (tui::close)
@@ -32,26 +29,29 @@
     (process::run (process::spawn (environment::lookup env 'done) () env '() box) 10)
     box)
 
-; The UI step: reads keys, sends new events to the dead-letter box, and draws
-; a frame when one is due. The UI state is a vector: the keys mailbox, frames
-; per second, when the next frame is due, the dead-letter box, and the
-; newest event sent there.
+; The UI step: reads keys, sends new events to the dead-letter box, and
+; draws a frame if there is something new to show. It never asks to be
+; woken: the monitor's summaries come once a second. The UI state is a
+; vector: the keys mailbox, the dead-letter box, the newest event sent
+; there, and the summary's second and the newest event in the last frame.
 (defun monitor (ui w st now)
     (let keyed (read-keys ui st))
     (let st2 (second keyed))
     (let ui2 (discard-events (car keyed) st2))
-    (let frame-ms (/ 1000 (vector-ref ui2 1)))
-    (if (>= now (vector-ref ui2 2))
+    (let shown (vector-ref (st-metrics st2) 2))
+    (let newest (newest-event st2))
+    (if (and (= shown (vector-ref ui2 3)) (= newest (vector-ref ui2 4)))
+        (list ui2 st2 #false)
         (do
-            (let view (monitor-view w st2 ui2 now))
-            (let built (host::now))
-            (tui::render view)
-            (list (vector-set ui2 2 (+ now frame-ms)) (add-frame st2 (- built now)) (min2 check-ms frame-ms)))
-        (list ui2 st2 (min2 check-ms (- (vector-ref ui2 2) now)))))
+            (tui::render (monitor-view w st2 ui2 now))
+            (list (vector-set (vector-set ui2 3 shown) 4 newest) st2 #false))))
+
+(defun newest-event (st)
+    (if (nil? (st-events st)) 0 (car (car (st-events st)))))
 
 (defun discard-events (ui st)
-    (for-each (lambda (e) (mailbox::send (vector-ref ui 3) e)) (reverse (newer-than (st-events st) (vector-ref ui 4))))
-    (if (nil? (st-events st)) ui (vector-set ui 4 (car (car (st-events st))))))
+    (for-each (lambda (e) (mailbox::send (vector-ref ui 1) e)) (reverse (newer-than (st-events st) (vector-ref ui 2))))
+    (vector-set ui 2 (newest-event st)))
 
 (defun read-keys (ui st)
     (let event (mailbox::take (vector-ref ui 0)))
@@ -70,16 +70,7 @@
             (list ui (set-hello-max st (+ (st-hello-max st) 1))))
         ((eq? name "-")
             (list ui (set-hello-max st (- (st-hello-max st) 1))))
-        ((eq? name "f")
-            (list (vector-set ui 1 (next-fps (vector-ref ui 1) fps-choices)) st))
         (#true (list ui st))))
-
-(defun next-fps (fps choices)
-    (cond
-        ((nil? choices) (car fps-choices))
-        ((and (= (car choices) fps) (not (nil? (cdr choices)))) (car (cdr choices)))
-        ((= (car choices) fps) (car fps-choices))
-        (#true (next-fps fps (cdr choices)))))
 
 ; ---------------------------------------------------------------------------
 ; Text pieces. A line is a Text of pieces; nested Text runs inline.
@@ -125,7 +116,7 @@
         ,(header-view st ui now)
         ,(table-view w st)
         ,(acc-view st)
-        ,(dim " q quit · + / - hello max · f frame rate")))
+        ,(dim " q quit · + / - hello max")))
 
 (defun header-view (st ui now)
     (let counts (m-status (st-metrics st)))
@@ -135,8 +126,7 @@
                 (list
                     (title (string-append "gateway :" (value->string gateway-port)))
                     (string-append "up " (clock-text now))
-                    (string-append "hello max " (num (st-hello-max st) 2))
-                    (string-append (num (vector-ref ui 1) 2) " fps"))))
+                    (string-append "hello max " (num (st-hello-max st) 2)))))
         ,(line
             (separated
                 (list
@@ -146,37 +136,9 @@
                     (count-span "503" (vector-ref counts 3) 5 'red)
                     (count-span "504" (vector-ref counts 4) 5 'red)
                     (count-span "5xx" (vector-ref counts 5) 5 'red)
-                    (count-span "gone" (vector-ref counts 6) 5 'yellow))))
-        ,(line (separated (loop-pieces (m-phases (st-metrics st)))))
-        ,(loop-bar (m-phases (st-metrics st)))))
-
-; The same split as a bar, drawn by the host.
-(defun loop-bar (p)
-    (let parts
-        (list (list "plan" (vector-ref p 1) 'blue) (list "other" (vector-ref p 2) 'yellow)
-            (list "draw" (vector-ref p 3) 'magenta)))
-    `(StackedBarChart (@ (width 60) (showLabels #false) (showValues #false)
-        (data ,(if (= 0 (fold (lambda (n x) (+ n (second x))) 0 parts)) (list (list "plan" 1 'blue)) parts)))))
+                    (count-span "gone" (vector-ref counts 6) 5 'yellow))))))
 
 (defun title (text) `(Text (@ (bold #true) (color cyan)) ,text))
-
-; The last second of the loop: how often it went round, the share of its
-; time spent in the plan (running processes and waiting), on its own work
-; and drawing, and what a frame cost.
-(defun loop-pieces (p)
-    (let total (max2 1 (+ (vector-ref p 1) (+ (vector-ref p 2) (vector-ref p 3)))))
-    (list
-        (string-append "loop " (num (vector-ref p 0) 5) "/s")
-        (span 'blue (percent "plan" (vector-ref p 1) total))
-        (span 'yellow (percent "other" (vector-ref p 2) total))
-        (span 'magenta (percent "draw" (vector-ref p 3) total))
-        (if (= (vector-ref p 4) 0)
-            (dim "no frames")
-            (string-append "frame " (num (/ (vector-ref p 3) (vector-ref p 4)) 3) " ms, "
-                (num (/ (vector-ref p 5) (vector-ref p 4)) 3) " building"))))
-
-(defun percent (label n total)
-    (string-append label " " (num (/ (* n 100) total) 3) "%"))
 
 (defun clock-text (ms)
     (let s (% (/ ms 1000) 60))

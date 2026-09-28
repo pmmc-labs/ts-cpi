@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Runs one scenario (ramp by default) against the gateway three ways: plain,
-# under the monitor at 4 frames a second, and under it at 30. It starts and
-# stops the gateway itself, so nothing else may be using port 8080. The
+# Runs one scenario (ramp by default) against the gateway two ways: plain,
+# and under the monitor, which draws once a second or on an event. It starts
+# and stops the gateway itself, so nothing else may be using port 8080. The
 # monitor runs on a pseudo-terminal (tools/pty_run.py); its last screen is
 # saved beside the results.
 #
@@ -26,8 +26,6 @@ run_mode() {
 }
 
 run_mode plain node bin/cpi.ts $FILES examples/gateway/plain.slight
-run_mode monitor-4fps python3 tools/pty_run.py --screen "$OUT/monitor-4fps.screen" -- \
+run_mode monitor python3 tools/pty_run.py --screen "$OUT/monitor.screen" -- \
     node bin/cpi.ts $FILES examples/gateway/monitor.slight
-run_mode monitor-30fps python3 tools/pty_run.py --keys ff --after 1 --screen "$OUT/monitor-30fps.screen" -- \
-    node bin/cpi.ts $FILES examples/gateway/monitor.slight
-echo "results and the monitor's last screens are in $OUT"
+echo "results and the monitor's last screen are in $OUT"

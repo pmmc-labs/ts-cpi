@@ -53,17 +53,14 @@ test('gateway: scales hello workers, makes counters on first use, parks the idle
         '[gateway] hello template warmed up in 31 turns',
         '[gateway] listening on port 8080',
         '[gateway] hello +1 from the template: hello 1 cold 0 counters 0 asleep 0',
-        // The CPI adds a worker each time it is woken while requests wait,
-        // not each round: the second worker and the first drain the burst
-        // before the CPI is woken again.
-        '[gateway] hello +1 from the template: hello 2 cold 0 counters 0 asleep 0',
+        // The CPI adds a worker only when it is woken while requests wait,
+        // and nothing wakes it during the burst: the one worker drains it.
         '[gateway] counter ada made',
         '[gateway] counter bob made',
-        '[gateway] hello -1 to cold storage: hello 1 cold 1 counters 2 asleep 0',
         '[gateway] counter ada asleep',
         '[gateway] counter bob asleep',
         '[gateway] counter ada awake',
-        '[gateway] stopped: hello 1 cold 1 counters 1 asleep 1',
+        '[gateway] stopped: hello 1 cold 0 counters 1 asleep 1',
     ]);
 
     // Each request's answer, in request order.
@@ -77,29 +74,25 @@ test('gateway: scales hello workers, makes counters on first use, parks the idle
         '200 hello, di',
         '200 hello, ed',
         '200 hello, flo',
-        '200 hello 2 cold 0 counters 0 asleep 0',
+        '200 hello 1 cold 0 counters 0 asleep 0',
         '200 ada 1',
         '200 ada 2',
         '200 bob 1',
         '200 ada bob',
-        '200 hello 1 cold 1 counters 0 asleep 2',
+        '200 hello 1 cold 0 counters 0 asleep 2',
         '200 ada 3',
         '404 no such endpoint',
-        '200 hello 1 cold 1 counters 1 asleep 1',
+        '200 hello 1 cold 0 counters 1 asleep 1',
         [
             '200 requests 15 2xx 14 4xx 1 503 0 504 0 5xx 0 gone 0',
-            // The loop goes round once each time plan::run returns; plan is
-            // the time spent in it, running processes and waiting.
-            'last-second loops 5 plan 1100 other 0 draw 0 frames 0 build 0',
-            'since-start loops 23 plan 6250 other 0 draw 0 frames 0 build 0',
             'hello total 6 last-second 0 wait-p95 - work-p95 - total-p95 - ticks 0',
             'counter total 5 last-second 1 wait-p95 <1ms work-p95 <1ms total-p95 <1ms ticks 229',
             'slow total 0 last-second 0 wait-p95 - work-p95 - total-p95 - ticks 0',
-            // Ticks are charged when the CPI is first woken in a new second.
-            'router total 0 last-second 0 wait-p95 - work-p95 - total-p95 - ticks 936',
+            // The monitor counts ticks in the second their batch ran.
+            'router total 0 last-second 0 wait-p95 - work-p95 - total-p95 - ticks 736',
             'system total 3 last-second 2 wait-p95 <1ms work-p95 <1ms total-p95 <1ms ticks 0',
             'other total 1 last-second 1 wait-p95 <1ms work-p95 <1ms total-p95 <1ms ticks 0',
-            'total total 15 last-second 4 wait-p95 <1ms work-p95 <1ms total-p95 <1ms ticks 1165',
+            'total total 15 last-second 4 wait-p95 <1ms work-p95 <1ms total-p95 <1ms ticks 965',
         ].join('\n'),
         '200 bye',
     ]);
@@ -127,11 +120,13 @@ test('gateway monitor: draws each endpoint and the whole gateway, the last secon
     const result = await rt.boot(loadFiles([gateway, monitor]));
     assert.equal(result.ok, true, result.ok ? '' : print(result.e));
 
-    // Four frames a second for the 3.6 virtual seconds the gateway ran.
-    assert.equal(tui.frames.length, 15);
+    // A frame only when there is something new: one at the start, one for
+    // each of the monitor's summaries at seconds 1, 2 and 3, and one for each
+    // event (the + key, two counters made, the last before quitting).
+    assert.equal(tui.frames.length, 8);
     const last = tui.frames[tui.frames.length - 1]!.split('\n').map((l) => l.trimEnd());
     const has = (text: string) => assert.ok(last.some((l) => l.includes(text)), `no line with ${JSON.stringify(text)} in\n${last.join('\n')}`);
-    has('gateway :8080 · up 0:03 · hello max  5 ·  4 fps');
+    has('gateway :8080 · up 0:03 · hello max  5');
     has('requests       9 · 2xx       9 · 4xx     0 · 503     0 · 504     0 · 5xx     0 · gone     0');
     // One mark per hello worker: one idle, two parked; counters as counts.
     // The host draws the sparklines: 1 of 6 requests fills 2 of 8 steps.
@@ -139,9 +134,9 @@ test('gateway monitor: draws each endpoint and the whole gateway, the last secon
     has(' counter   ● 0  ○ 0  ◌ 2              0      0         -         -         0                   █                    ▁');
     has(' total     ● 0  ○ 4  ◌ 3              0      1      <1ms      <1ms       427                   █▁                   ▁▁');
     // Since the start: 7 hello requests over 3 seconds, 6 in the busiest.
-    // Queues are sampled each time the CPI is woken.
-    has(' hello              7     0     0.1      3     0     2.3      6     0     0.0      0     0     0.0      0');
-    has(' total              9     0     0.3      5     0     3.0      8     0     0.0      0     0     0.0      0');
+    // The monitor samples queues after every round.
+    has(' hello              7     0     0.5      3     0     2.3      6     0     0.0      0     0     0.0      0');
+    has(' total              9     0     1.4      6     0     3.0      8     0     0.0      0     0     0.0      0');
     assert.ok(!last.some((l) => l.includes('asleep')), 'events are not shown');
 
     // Events go to the dead-letter queue, the key's among them, and only
@@ -200,8 +195,9 @@ function withoutDefuns(source: string, names: readonly string[]): string {
 }
 
 // Runs the gateway under `traceScript`: with plan::run or its reference
-// program, and with the hibernate node or the CPI code it replaces.
-async function traceGateway(opts: { planReference: boolean; hibernateReference: boolean }) {
+// program, with the hibernate node or the CPI code it replaces, and with or
+// without the monitor node.
+async function traceGateway(opts: { planReference: boolean; hibernateReference: boolean; monitor?: boolean }) {
     const http = new HeadlessHttp(traceScript);
     const output: string[] = [];
     const rt = new Runtime({ out: (line) => output.push(line), clock: 'virtual', http: () => http });
@@ -215,6 +211,11 @@ async function traceGateway(opts: { planReference: boolean; hibernateReference: 
         source = withoutDefuns(source, ['gateway-plan', 'on-mail', 'sleep-idle']);
         env = loadSource(readFileSync(hibernateReference, 'utf-8'), hibernateReference, env);
     }
+    if (opts.monitor === false) {
+        // An inbox node naming no mailbox: the plan without the monitor.
+        source = withoutDefuns(source, ['monitor-node']);
+        env = loadSource("(defun monitor-node (w envs) (list 'inbox))", 'test', env);
+    }
     env = loadSource(source, gateway, env);
     env = loadSource(readFileSync(plain, 'utf-8'), plain, env);
     const result = await rt.boot(env);
@@ -227,9 +228,10 @@ async function traceGateway(opts: { planReference: boolean; hibernateReference: 
 
 test('plan::run: the gateway runs exactly as it does under the reference program', async () => {
     // The reference program knows rounds and inboxes, so both runs use the
-    // gateway's CPI code for sleeping counters.
-    const builtin = await traceGateway({ planReference: false, hibernateReference: true });
-    const byReference = await traceGateway({ planReference: true, hibernateReference: true });
+    // gateway's CPI code for sleeping counters, and neither has the monitor
+    // node, which tests/monitor.test.ts checks against its own reference.
+    const builtin = await traceGateway({ planReference: false, hibernateReference: true, monitor: false });
+    const byReference = await traceGateway({ planReference: true, hibernateReference: true, monitor: false });
     assert.deepEqual(builtin, byReference);
     assert.ok(builtin.output.some((l) => l.includes('counter ada asleep')), builtin.output.join('\n'));
     assert.ok(builtin.answers.some((a) => a.endsWith('200 slow, done')), builtin.answers.join('\n'));

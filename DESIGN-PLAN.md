@@ -182,6 +182,13 @@ plan, and hierarchical quotas (DESIGN-001 section 12) as each part's budget.
 - **Membership by env ref keeps voices out of the plan.** The gateway's plan no longer changes as counters sleep and wake. hello with 513 counters asleep ran at 2,789 requests a second, and 2,904 after the host's wait stopped checking every waiting process.
 - **The cost moved to the CPI's lists.** Each event the CPI handles walks its process list, which grows with the processes: about 25,000 ticks per hibernate event with 700 counters. The CPI acts per event now, as intended, so how it keeps its books is the next thing that grows with scale.
 
+## Findings from step 3a (the monitor node, Sep 28, 2026)
+
+- **A faux actor is checked against a real one.** Given the same messages, the node and the actor in `tests/programs/monitor-reference.slight` send identical summaries. Being an actor from the outside is what makes this possible: every input the host gives the node could have been a message.
+- **The CPI left the per-request path.** hello went from 3,220 to 17,878 requests a second with metrics on, and the CPI's share of the CPU from 70% to 0.1%. Metrics in the host cost about nothing.
+- **The CPI is now woken about once a second** plus events, so anything it still decides by looking around when woken, like growing the hello pool, happens rarely. That is the pool node's job (step 4).
+- **Next in step 3:** the view as a template the node fills in and draws (3b), with the CPI sending it the facts only it knows.
+
 ## Open questions
 
 1. **The plan's shape.** Which fields each node kind has, and how the host diffs two plans: by node name, with a changed node's state carried over where its kind allows.

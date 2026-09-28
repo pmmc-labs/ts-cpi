@@ -6,8 +6,8 @@
 
 ; No hibernate node: a counter asleep has its mailbox in the plan's inbox,
 ; so its first request wakes the CPI.
-(defun gateway-plan (counter-env inboxes asleep)
-    (list (list 'round quota idle-ms) (cons 'inbox (append inboxes (map second asleep)))))
+(defun gateway-plan (st asleep)
+    (list (list 'round quota idle-ms) (vector-ref st 10) (cons 'inbox (append (vector-ref st 8) (map second asleep)))))
 
 ; Mail for a counter asleep: unpark it. The CPI reads its own mailboxes
 ; every time it is woken.

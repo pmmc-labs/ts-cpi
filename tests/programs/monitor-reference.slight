@@ -1,0 +1,182 @@
+; The reference for the plan's monitor node (DECISIONS.md, Spec changes): an
+; actor doing in the language what the node does in the host, as the gateway
+; did in its own CPI code before. tests/runtime.test.ts sends it and the node
+; the same messages and requires the same summaries.
+;
+; Spawned as (monitor to rows routes bins history). Its messages:
+;
+;     (served port method path status arrived delivered answered)
+;         a request finished (SPEC-HTTP section 6)
+;     (sample (row size) ...)
+;         one sample of queue lengths: rows not named are 0, total the sum
+;     (ticks row n)
+;         the processes of `row` used n ticks
+;     (second s)
+;         second s has begun: close the seconds before it, send a summary
+;
+; A summary, sent to `to` when it starts and at each new second:
+; (metrics second status endpoints). `status` counts requests: all, 1xx to
+; 3xx, 4xx, 503, 504, other 5xx, and those with no status (the client went
+; away). `endpoints` is a list of (row endpoint), the rows and then "total".
+; An endpoint is a vector: requests in all; this second's requests, wait,
+; work and total histograms, and ticks; a summary of each second before,
+; newest first, as a vector (requests, the 50th and 95th percentile bins of
+; wait, of work, the 95th of total, ticks); and running summaries (count sum
+; min max) of wait and work per request, queue length per sample, and
+; requests per second.
+;
+; A histogram has a bin for times under each bound in `bins`, in
+; milliseconds, and a last bin for the rest; a percentile is a bin's index,
+; or -1 when there were no requests.
+
+(defun monitor-code ()
+    (role
+        (require actor::recv actor::send)
+
+        (defun monitor (to rows routes bins history)
+            (let names (append rows (list "total")))
+            (let m (vector 0 (make-vector 7 0) (map1 (lambda (name) (list name (new-endpoint bins))) names)))
+            (actor::send to (summary m))
+            (monitor-loop to routes bins history m))
+
+        (defun monitor-loop (to routes bins history m)
+            (let msg (actor::recv))
+            (monitor-loop to routes bins history
+                (case (car msg)
+                    (:served (served routes bins m msg))
+                    (:sample (sample m (cdr msg)))
+                    (:ticks (add-ticks m (car (cdr msg)) (car (cdr (cdr msg)))))
+                    (:second (next-second to history m (car (cdr msg))))
+                    (else m))))
+
+        (defun summary (m)
+            (list 'metrics (vector-ref m 0) (vector-ref m 1) (vector-ref m 2)))
+
+        ; Lists.
+
+        (defun map1 (f xs)
+            (if (nil? xs) () (cons (f (car xs)) (map1 f (cdr xs)))))
+
+        (defun fold (f acc xs)
+            (if (nil? xs) acc (fold f (f acc (car xs)) (cdr xs))))
+
+        (defun nth (xs i)
+            (if (= i 0) (car xs) (nth (cdr xs) (- i 1))))
+
+        (defun take (xs n)
+            (if (or (nil? xs) (= n 0)) () (cons (car xs) (take (cdr xs) (- n 1)))))
+
+        (defun member? (x xs)
+            (and (not (nil? xs)) (or (eq? x (car xs)) (member? x (cdr xs)))))
+
+        (defun min2 (a b) (if (< a b) a b))
+        (defun max2 (a b) (if (> a b) a b))
+
+        ; Endpoints.
+
+        (defun update-endpoint (m name f)
+            (vector-set m 2 (map1 (lambda (e) (if (eq? (car e) name) (list name (f (car (cdr e)))) e)) (vector-ref m 2))))
+
+        (defun update-all (m f)
+            (vector-set m 2 (map1 (lambda (e) (list (car e) (f (car e) (car (cdr e))))) (vector-ref m 2))))
+
+        (defun new-endpoint (bins)
+            (vector 0 0 (new-hist bins) (new-hist bins) (new-hist bins) 0 () (acc-new) (acc-new) (acc-new) (acc-new)))
+
+        (defun new-hist (bins) (make-vector (+ 1 (length bins)) 0))
+
+        (defun length (xs) (fold (lambda (n x) (+ n 1)) 0 xs))
+
+        (defun bin-of (ms bounds i)
+            (cond
+                ((nil? bounds) i)
+                ((< ms (car bounds)) i)
+                (#true (bin-of ms (cdr bounds) (+ i 1)))))
+
+        (defun hist-add (bins h ms)
+            (let i (bin-of ms bins 0))
+            (vector-set h i (+ 1 (vector-ref h i))))
+
+        (defun hist-quantile (h n q)
+            (if (= n 0) -1 (quantile-walk h (/ (+ (* n q) 99) 100) 0 0)))
+
+        (defun quantile-walk (h target i seen)
+            (let now-seen (+ seen (vector-ref h i)))
+            (if (or (>= now-seen target) (= i (- (vector-length h) 1))) i (quantile-walk h target (+ i 1) now-seen)))
+
+        (defun acc-new () (vector 0 0 0 0))
+
+        (defun acc-add (a x)
+            (if (= (vector-ref a 0) 0)
+                (vector 1 x x x)
+                (vector (+ 1 (vector-ref a 0)) (+ x (vector-ref a 1)) (min2 x (vector-ref a 2)) (max2 x (vector-ref a 3)))))
+
+        (defun add-request (bins ep wait work total)
+            (let counted (vector-set (vector-set ep 0 (+ 1 (vector-ref ep 0))) 1 (+ 1 (vector-ref ep 1))))
+            (let binned
+                (vector-set (vector-set (vector-set counted 2 (hist-add bins (vector-ref ep 2) wait))
+                    3 (hist-add bins (vector-ref ep 3) work)) 4 (hist-add bins (vector-ref ep 4) total)))
+            (vector-set (vector-set binned 7 (acc-add (vector-ref ep 7) wait)) 8 (acc-add (vector-ref ep 8) work)))
+
+        (defun summarize (ep)
+            (let n (vector-ref ep 1))
+            (vector n
+                (hist-quantile (vector-ref ep 2) n 50) (hist-quantile (vector-ref ep 2) n 95)
+                (hist-quantile (vector-ref ep 3) n 50) (hist-quantile (vector-ref ep 3) n 95)
+                (hist-quantile (vector-ref ep 4) n 95) (vector-ref ep 5)))
+
+        (defun close-second (history ep)
+            (let bins-plus-one (vector-length (vector-ref ep 2)))
+            (vector (vector-ref ep 0) 0
+                (make-vector bins-plus-one 0) (make-vector bins-plus-one 0) (make-vector bins-plus-one 0) 0
+                (take (cons (summarize ep) (vector-ref ep 6)) history)
+                (vector-ref ep 7) (vector-ref ep 8) (vector-ref ep 9) (acc-add (vector-ref ep 10) (vector-ref ep 1))))
+
+        (defun close-seconds (history ep n)
+            (if (<= n 0) ep (close-seconds history (close-second history ep) (- n 1))))
+
+        ; The messages.
+
+        (defun served (routes bins m entry)
+            (let path (nth entry 3))
+            (let arrived (nth entry 5))
+            (let answered (nth entry 7))
+            (let reached (if (nth entry 6) (nth entry 6) answered))
+            (let key (if (and (not (nil? path)) (member? (car path) routes)) (car path) "other"))
+            (let add (lambda (ep) (add-request bins ep (- reached arrived) (- answered reached) (- answered arrived))))
+            (update-endpoint (update-endpoint (vector-set m 1 (count-status (vector-ref m 1) (nth entry 4))) key add) "total" add))
+
+        (defun bump (v i) (vector-set v i (+ 1 (vector-ref v i))))
+
+        (defun count-status (counts status)
+            (let all (bump counts 0))
+            (cond
+                ((not (integer? status)) (bump all 6))
+                ((< status 400) (bump all 1))
+                ((< status 500) (bump all 2))
+                ((= status 503) (bump all 3))
+                ((= status 504) (bump all 4))
+                (#true (bump all 5))))
+
+        (defun sample (m pairs)
+            (let sum (fold (lambda (n p) (+ n (car (cdr p)))) 0 pairs))
+            (update-all m (lambda (name ep) (vector-set ep 9 (acc-add (vector-ref ep 9) (if (eq? name "total") sum (size-of name pairs)))))))
+
+        (defun size-of (name pairs)
+            (cond
+                ((nil? pairs) 0)
+                ((eq? (car (car pairs)) name) (car (cdr (car pairs))))
+                (#true (size-of name (cdr pairs)))))
+
+        (defun add-ticks (m row n)
+            (let add (lambda (ep) (vector-set ep 5 (+ n (vector-ref ep 5)))))
+            (if (= n 0) m (update-endpoint (update-endpoint m row add) "total" add)))
+
+        (defun next-second (to history m s)
+            (let gap (min2 history (- s (vector-ref m 0))))
+            (if (> gap 0)
+                (do
+                    (let closed (vector s (vector-ref m 1) (map1 (lambda (e) (list (car e) (close-seconds history (car (cdr e)) gap))) (vector-ref m 2))))
+                    (actor::send to (summary closed))
+                    closed)
+                m))))

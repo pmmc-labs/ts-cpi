@@ -29,9 +29,9 @@
 ;   mailbox is durable, so requests wait for it, and the CPI unparks it when
 ;   one does. Its count survives, because it is in the parked continuation.
 ;
-; The CPI also keeps metrics: the host reports every finished request on the
-; served log (http::subscribe-log), and process::ticks gives each
-; process's cost. Run it, then try it with curl:
+; Metrics are counted in the host, by the plan's monitor node: the served
+; log (http::subscribe-log), ticks by environment, and queue lengths, sent
+; to the CPI as a summary each second. Run it, then try it with curl:
 ;
 ;     node bin/cpi.ts examples/gateway/gateway.slight examples/gateway/plain.slight
 ;     curl localhost:8080/hello/ada
@@ -43,7 +43,6 @@
 (const request-timeout 2000)
 (const quota 200)             ; ticks a process may run per turn
 (const idle-ms 2000)          ; a worker idle this long is put to sleep
-(const check-ms 500)          ; the longest the CPI waits when nothing is ready
 (const hello-min 1)
 (const hello-max-default 4)
 (const hello-max-limit 16)
@@ -264,8 +263,8 @@
 
 ; What stays fixed while the gateway runs: its mailboxes, the hello
 ; template, and the environments hello workers and counters run in.
-(defun world (inbox queue template hello-env counter-env router-box counters-box log-box slow-box)
-    (vector inbox queue template hello-env counter-env router-box counters-box log-box slow-box))
+(defun world (inbox queue template hello-env counter-env router-box counters-box monitor-box slow-box)
+    (vector inbox queue template hello-env counter-env router-box counters-box monitor-box slow-box))
 (defun world-inbox (w) (vector-ref w 0))
 (defun world-queue (w) (vector-ref w 1))
 (defun world-template (w) (vector-ref w 2))
@@ -273,28 +272,28 @@
 (defun world-counter-env (w) (vector-ref w 4))
 (defun world-router-box (w) (vector-ref w 5))
 (defun world-counters-box (w) (vector-ref w 6))
-(defun world-log-box (w) (vector-ref w 7))
+(defun world-monitor-box (w) (vector-ref w 7))
 (defun world-slow-box (w) (vector-ref w 8))
 
 ; ---------------------------------------------------------------------------
 ; The CPI's state, a vector:
 ;
-;   procs      the processes running, each (pid kind charged): kind is
-;              router, counters, hello, slow or (counter name address), and
-;              charged the ticks already added to its endpoint's metrics
+;   procs      the processes running, each (pid kind): kind is router,
+;              counters, hello, slow or (counter name address)
 ;   cold       hello workers in cold storage, as parked data
 ;   asleep     counters asleep, each (name address): the plan's hibernate
 ;              node holds them
 ;   running    #false once the gateway has been told to stop
 ;   hello-max  the most hello workers there may be
 ;   events     what the CPI has done, newest first, each (seq time text)
-;   metrics    see Metrics below
+;   metrics    the monitor's last summary: see Metrics below
 ;   plan       what the host runs: see gateway-plan
 ;   inboxes    the CPI's and the UI's mailboxes
 ;   counter-env the environment counters run in
+;   monitor    the plan's monitor node
 
-(defun state (procs inboxes counter-env)
-    (with-asleep (vector procs () () #true hello-max-default () (new-metrics) () inboxes counter-env) ()))
+(defun state (procs inboxes counter-env monitor)
+    (with-asleep (vector procs () () #true hello-max-default () (no-metrics) () inboxes counter-env monitor) ()))
 (defun st-procs (st) (vector-ref st 0))
 (defun st-cold (st) (vector-ref st 1))
 (defun st-asleep (st) (vector-ref st 2))
@@ -308,24 +307,23 @@
 ; The plan changes only when a counter falls asleep or wakes, so the host
 ; reads it again only then.
 (defun with-asleep (st asleep)
-    (vector-set (vector-set st 2 asleep) 7 (gateway-plan (vector-ref st 9) (vector-ref st 8) asleep)))
+    (vector-set (vector-set st 2 asleep) 7 (gateway-plan st asleep)))
 
 ; The plan the host runs (DESIGN-PLAN.md): a round for every process; a
 ; hibernate node, which parks a counter idle for idle-ms and resumes it at
-; its first request; and the mailboxes whose mail wakes the CPI, its own and
-; the UI's. The counters asleep are the hibernate node's, not the plan's, so
-; the plan stays the same as they come and go.
-(defun gateway-plan (counter-env inboxes asleep)
-    (list (list 'round quota idle-ms) (list 'hibernate counter-env idle-ms) (cons 'inbox inboxes)))
+; its first request; the monitor node; and the mailboxes whose mail wakes
+; the CPI, its own and the UI's. The counters asleep are the hibernate
+; node's, not the plan's, so the plan stays the same as they come and go.
+(defun gateway-plan (st asleep)
+    (list (list 'round quota idle-ms) (list 'hibernate (vector-ref st 9) idle-ms) (vector-ref st 10) (cons 'inbox (vector-ref st 8))))
 (defun stop (st) (vector-set st 3 #false))
 (defun with-metrics (st m) (vector-set st 6 m))
 
 (defun proc-pid (p) (car p))
 (defun proc-kind (p) (second p))
-(defun proc-charged (p) (third p))
 
 (defun add-proc (st pid kind)
-    (with-procs st (append (st-procs st) (list (list pid kind 0)))))
+    (with-procs st (append (st-procs st) (list (list pid kind)))))
 
 (defun find-proc (procs pid)
     (cond
@@ -362,67 +360,55 @@
 ; ---------------------------------------------------------------------------
 ; Metrics.
 ;
-; Request times go into histograms with fixed bins, so a percentile is a walk
-; over eleven counts, not a sort: bin i holds times under the i-th bound in
-; milliseconds, and the last bin the rest. Each endpoint keeps this second's
-; histograms and a summary of each second before it.
+; The plan's monitor node counts them in the host (DESIGN-PLAN.md): it takes
+; the served log, the ticks of each row's processes, found by the
+; environments they run in, and the length of each row's queue after every
+; round. Each second it sends the CPI's inbox a summary, which the CPI keeps
+; for /system/metrics and the monitor's view. What each number means is in
+; tests/programs/monitor-reference.slight, an actor that does the same work.
+;
+; Request times are in histograms with fixed bins, so a percentile is a bin:
+; bin i holds times under the i-th bound in milliseconds, the last the rest.
 
 (const bin-bounds '(1 2 5 10 20 50 100 200 500 1000))
 (const bin-labels '("<1ms" "<2ms" "<5ms" "<10ms" "<20ms" "<50ms" "<100ms" "<200ms" "<500ms" "<1s" ">=1s"))
-; `total` is the whole gateway: every request and every tick also counts
-; there. No path reaches it.
+; A request counts in the row its first path segment names, if that is a
+; route, and in "other" if not. `total` is the whole gateway: every request
+; and every tick also counts there.
+(const endpoint-rows '("hello" "counter" "slow" "router" "system" "other"))
+(const endpoint-routes '("hello" "counter" "slow" "system"))
 (const endpoint-names '("hello" "counter" "slow" "router" "system" "other" "total"))
 
-(defun bin-of (ms) (bin-walk ms bin-bounds 0))
-
-(defun bin-walk (ms bounds i)
-    (cond
-        ((nil? bounds) i)
-        ((< ms (car bounds)) i)
-        (#true (bin-walk ms (cdr bounds) (+ i 1)))))
-
-(defun new-hist () (make-vector 11 0))
-
-(defun hist-add (h ms)
-    (let i (bin-of ms))
-    (vector-set h i (+ 1 (vector-ref h i))))
-
-; The bin holding the q-th percentile of the n times in h; -1 if n is 0.
-(defun hist-quantile (h n q)
-    (if (= n 0) -1 (quantile-walk h (/ (+ (* n q) 99) 100) 0 0)))
-
-(defun quantile-walk (h target i seen)
-    (let now-seen (+ seen (vector-ref h i)))
-    (if (or (>= now-seen target) (= i 10)) i (quantile-walk h target (+ i 1) now-seen)))
+; The monitor node: its own address, the CPI's inbox for its summaries, and
+; what it counts. `envs` are each row's environments, as (row env ...).
+(defun monitor-node (w envs)
+    (list 'monitor (world-monitor-box w) (world-inbox w)
+        (cons 'rows endpoint-rows) (cons 'routes endpoint-routes) (cons 'bins bin-bounds) (list 'history history-length)
+        (cons 'ticks envs)
+        (list 'queues (list "hello" (world-queue w)) (list "counter" (world-counters-box w)) (list "slow" (world-slow-box w))
+            (list "router" (world-router-box w)) (list "system" (world-inbox w)))))
 
 (defun bin-label (i) (if (< i 0) "-" (nth bin-labels i)))
-
-; A running summary of a quantity since the start: (count sum min max).
-(defun acc-new () (vector 0 0 0 0))
-
-(defun acc-add (a x)
-    (if (= (vector-ref a 0) 0)
-        (vector 1 x x x)
-        (vector (+ 1 (vector-ref a 0)) (+ x (vector-ref a 1)) (min2 x (vector-ref a 2)) (max2 x (vector-ref a 3)))))
-
-; "min / avg / max", the average to one decimal place; "-" if empty.
-(defun acc-text (a)
-    (if (= (vector-ref a 0) 0)
-        "-"
-        (string-append
-            (value->string (vector-ref a 2)) " / " (tenths (/ (* 10 (vector-ref a 1)) (vector-ref a 0)))
-            " / " (value->string (vector-ref a 3)))))
 
 (defun tenths (n)
     (string-append (value->string (/ n 10)) "." (value->string (% n 10))))
 
-; An endpoint's metrics, a vector: requests in all; this second's requests,
-; wait, work and total histograms, and ticks; the summaries of the seconds
-; before, newest first; and running summaries since the start of wait and
-; work (per request, in ms), of its queue (per loop), and of requests per
-; second (per second). A summary is a vector: requests, the 50th and 95th
-; percentile bins of wait and of work, the 95th of total, ticks.
-(defun new-endpoint () (vector 0 0 (new-hist) (new-hist) (new-hist) 0 () (acc-new) (acc-new) (acc-new) (acc-new)))
+; The last summary: status counts (requests, 2xx and 3xx, 4xx, 503, 504,
+; other 5xx, clients gone), each row as (name endpoint), and its second.
+(defun no-metrics () (vector (make-vector 7 0) () 0))
+(defun m-status (m) (vector-ref m 0))
+(defun m-endpoints (m) (vector-ref m 1))
+
+; A summary from the monitor: (metrics second status endpoints).
+(defun take-summary (st msg)
+    (with-metrics st (vector (third msg) (nth msg 3) (second msg))))
+
+; An endpoint, a vector: requests in all; this second's requests, wait,
+; work and total histograms, and ticks; the summaries of the seconds before,
+; newest first; and running summaries (count sum min max) of wait and work
+; per request, queue length per round, and requests per second. A second's
+; summary is a vector: requests, the 50th and 95th percentile bins of wait
+; and of work, the 95th of total, ticks.
 (defun ep-total (ep) (vector-ref ep 0))
 (defun ep-history (ep) (vector-ref ep 6))
 (defun ep-wait-acc (ep) (vector-ref ep 7))
@@ -430,115 +416,19 @@
 (defun ep-queue-acc (ep) (vector-ref ep 9))
 (defun ep-rate-acc (ep) (vector-ref ep 10))
 
-(defun add-request (ep wait work total)
-    (let counted (vector-set (vector-set ep 0 (+ 1 (vector-ref ep 0))) 1 (+ 1 (vector-ref ep 1))))
-    (let binned
-        (vector-set (vector-set (vector-set counted 2 (hist-add (vector-ref ep 2) wait))
-            3 (hist-add (vector-ref ep 3) work)) 4 (hist-add (vector-ref ep 4) total)))
-    (vector-set (vector-set binned 7 (acc-add (vector-ref ep 7) wait)) 8 (acc-add (vector-ref ep 8) work)))
-
-(defun add-queue-sample (ep n) (vector-set ep 9 (acc-add (vector-ref ep 9) n)))
-
-(defun add-ep-ticks (ep n) (vector-set ep 5 (+ n (vector-ref ep 5))))
-
-(defun summarize (ep)
-    (let n (vector-ref ep 1))
-    (vector n
-        (hist-quantile (vector-ref ep 2) n 50) (hist-quantile (vector-ref ep 2) n 95)
-        (hist-quantile (vector-ref ep 3) n 50) (hist-quantile (vector-ref ep 3) n 95)
-        (hist-quantile (vector-ref ep 4) n 95) (vector-ref ep 5)))
-
-(defun close-second (ep)
-    (vector (vector-ref ep 0) 0 (new-hist) (new-hist) (new-hist) 0
-        (take (cons (summarize ep) (vector-ref ep 6)) history-length)
-        (vector-ref ep 7) (vector-ref ep 8) (vector-ref ep 9) (acc-add (vector-ref ep 10) (vector-ref ep 1))))
-
-(defun close-seconds (ep n)
-    (if (<= n 0) ep (close-seconds (close-second ep) (- n 1))))
-
 ; The last full second's summary.
 (defun ep-last (ep)
     (if (nil? (ep-history ep)) (vector 0 -1 -1 -1 -1 -1 0) (car (ep-history ep))))
 
-; All metrics, a vector: status counts (requests, 2xx and 3xx, 4xx, 503, 504,
-; other 5xx, clients gone); each endpoint as (name metrics); this second's
-; loop phases and the last second's, each a vector (loops plan other draw
-; frames build) of counts and milliseconds, where plan is the time in
-; plan::run (running processes and waiting), build is the part of draw spent
-; making the view in CPI code, and the rest of draw is the host painting it;
-; the current second; and the loop phases since the start.
-(defun new-metrics ()
-    (vector (make-vector 7 0) (map (lambda (name) (list name (new-endpoint))) endpoint-names)
-        (make-vector 6 0) (make-vector 6 0) 0 (make-vector 6 0)))
-(defun m-status (m) (vector-ref m 0))
-(defun m-endpoints (m) (vector-ref m 1))
-(defun m-phases (m) (vector-ref m 3))
-
-(defun bump (v i) (vector-set v i (+ 1 (vector-ref v i))))
-
+; An endpoint in the last summary; before the first, one with nothing in it.
 (defun endpoint (st name)
     (endpoint-in (m-endpoints (st-metrics st)) name))
 
 (defun endpoint-in (eps name)
-    (if (eq? (car (car eps)) name) (second (car eps)) (endpoint-in (cdr eps) name)))
-
-(defun update-endpoint (st name f)
-    (let m (st-metrics st))
-    (with-metrics st
-        (vector-set m 1
-            (map (lambda (e) (if (eq? (car e) name) (list name (f (second e))) e)) (m-endpoints m)))))
-
-(defun endpoint-of (path)
     (cond
-        ((nil? path) "other")
-        ((and (member? (car path) endpoint-names) (not (member? (car path) '("router" "total")))) (car path))
-        (#true "other")))
-
-(defun kind-endpoint (kind)
-    (cond
-        ((eq? kind 'hello) "hello")
-        ((eq? kind 'router) "router")
-        ((eq? kind 'slow) "slow")
-        (#true "counter")))
-
-(defun count-status (counts status)
-    (let all (bump counts 0))
-    (cond
-        ((not (integer? status)) (bump all 6))
-        ((< status 400) (bump all 1))
-        ((< status 500) (bump all 2))
-        ((= status 503) (bump all 3))
-        ((= status 504) (bump all 4))
-        (#true (bump all 5))))
-
-; A served-log entry: (served port method path status arrived delivered
-; answered). Wait is arrival to delivery (#false for a refusal, which never
-; waited for a worker); work is delivery to answer.
-(defun record-served (st entry)
-    (let status (nth entry 4))
-    (let arrived (nth entry 5))
-    (let answered (nth entry 7))
-    (let reached (if (nth entry 6) (nth entry 6) answered))
-    (let m (st-metrics st))
-    (let add (lambda (ep) (add-request ep (- reached arrived) (- answered reached) (- answered arrived))))
-    (update-endpoint
-        (update-endpoint (with-metrics st (vector-set m 0 (count-status (m-status m) status))) (endpoint-of (nth entry 3)) add)
-        "total" add))
-
-(defun add-ticks (st name n)
-    (let add (lambda (ep) (add-ep-ticks ep n)))
-    (if (= n 0) st (update-endpoint (update-endpoint st name add) "total" add)))
-
-; Adds the ticks a process has used since it was last charged to its
-; endpoint. Its entry in procs is not updated: see charge-all.
-(defun charge (st p)
-    (add-ticks st (kind-endpoint (proc-kind p)) (- (process::ticks (proc-pid p)) (proc-charged p))))
-
-; Charges every process, once a second and not every turn: the round runs
-; the turns in the host, so the CPI sees their ticks only as totals.
-(defun charge-all (st)
-    (with-procs (fold charge st (st-procs st))
-        (map (lambda (p) (list (proc-pid p) (proc-kind p) (process::ticks (proc-pid p)))) (st-procs st))))
+        ((nil? eps) (vector 0 0 () () () 0 () (vector 0 0 0 0) (vector 0 0 0 0) (vector 0 0 0 0) (vector 0 0 0 0)))
+        ((eq? (car (car eps)) name) (second (car eps)))
+        (#true (endpoint-in (cdr eps) name))))
 
 ; Each endpoint's queue now: the requests waiting in the mailbox its router
 ; route leads to (a counter's own mailbox is not counted). `total` is them all.
@@ -551,68 +441,17 @@
         ((eq? name "system") (mailbox::size (world-inbox w)))
         (#true 0)))
 
-; Adds this loop's queue lengths to the running summaries.
-(defun sample-queues (w st)
-    (let sizes (map (lambda (name) (list name (endpoint-queue w name))) endpoint-names))
-    (let sum (fold (lambda (n s) (+ n (second s))) 0 sizes))
-    (fold
-        (lambda (acc s)
-            (update-endpoint acc (car s) (lambda (ep) (add-queue-sample ep (if (eq? (car s) "total") sum (second s))))))
-        st sizes))
-
-; Starts a new second when host::now reaches one, closing the seconds
-; between on every endpoint, after charging the ticks used since the last.
-(defun roll-second (st0 now)
-    (let s (/ now 1000))
-    (let gap (min2 history-length (- s (vector-ref (st-metrics st0) 4))))
-    (let st (if (> gap 0) (charge-all st0) st0))
-    (let m (st-metrics st))
-    (if (> gap 0)
-        (with-metrics st
-            (vector (m-status m)
-                (map (lambda (e) (list (car e) (close-seconds (second e) gap))) (m-endpoints m))
-                (make-vector 6 0) (vector-ref m 2) s (vector-ref m 5)))
-        st))
-
-(defun add-phases (st plan other draw)
-    (let m (st-metrics st))
-    (with-metrics st
-        (vector-set (vector-set m 2 (phases-plus (vector-ref m 2) plan other draw))
-            5 (phases-plus (vector-ref m 5) plan other draw))))
-
-(defun phases-plus (p plan other draw)
-    (vector (+ 1 (vector-ref p 0)) (+ plan (vector-ref p 1)) (+ other (vector-ref p 2))
-        (+ draw (vector-ref p 3)) (vector-ref p 4) (vector-ref p 5)))
-
-; A frame was drawn, and making its view took `build` ms.
-(defun add-frame (st build)
-    (let m (st-metrics st))
-    (with-metrics st
-        (vector-set (vector-set m 2 (frame-plus (vector-ref m 2) build)) 5 (frame-plus (vector-ref m 5) build))))
-
-(defun frame-plus (p build)
-    (vector-set (bump p 4) 5 (+ build (vector-ref p 5))))
-
-; The metrics as text, for /system/metrics.
+; The metrics as text, for /system/metrics: the last summary.
 (defun metrics-text (st)
     (let counts (m-status (st-metrics st)))
     (string-join "\n"
-        (append
-            (list
-                (string-join " "
-                    (list "requests" (value->string (vector-ref counts 0))
-                        "2xx" (value->string (vector-ref counts 1)) "4xx" (value->string (vector-ref counts 2))
-                        "503" (value->string (vector-ref counts 3)) "504" (value->string (vector-ref counts 4))
-                        "5xx" (value->string (vector-ref counts 5)) "gone" (value->string (vector-ref counts 6))))
-                (phases-text "last-second" (m-phases (st-metrics st)))
-                (phases-text "since-start" (vector-ref (st-metrics st) 5)))
-            (map (lambda (e) (endpoint-text (car e) (second e))) (m-endpoints (st-metrics st))))))
-
-(defun phases-text (label p)
-    (string-join " "
-        (list label "loops" (value->string (vector-ref p 0)) "plan" (value->string (vector-ref p 1))
-            "other" (value->string (vector-ref p 2)) "draw" (value->string (vector-ref p 3))
-            "frames" (value->string (vector-ref p 4)) "build" (value->string (vector-ref p 5)))))
+        (cons
+            (string-join " "
+                (list "requests" (value->string (vector-ref counts 0))
+                    "2xx" (value->string (vector-ref counts 1)) "4xx" (value->string (vector-ref counts 2))
+                    "503" (value->string (vector-ref counts 3)) "504" (value->string (vector-ref counts 4))
+                    "5xx" (value->string (vector-ref counts 5)) "gone" (value->string (vector-ref counts 6))))
+            (map (lambda (name) (endpoint-text name (endpoint st name))) endpoint-names))))
 
 (defun endpoint-text (name ep)
     (let s (ep-last ep))
@@ -642,13 +481,13 @@
         ((eq? (car what) :hibernated) (counter-asleep st p (list (second (proc-kind p)) (second what))))
         ((eq? (car what) :idle) (sleep-idle st p))
         ((or (eq? (car what) :exited) (eq? (car what) :failed))
-            (log-event (remove-proc (charge st p) (proc-pid p))
+            (log-event (remove-proc st (proc-pid p))
                 (string-join " " (list (value->string (proc-kind p)) "ended:" (value->string what)))))
         (#true st)))
 
 ; ---------------------------------------------------------------------------
-; The CPI's mailboxes: /system requests and counters to make in its inbox,
-; and the served log.
+; The CPI's inbox: /system requests, counters to make, and the monitor's
+; summaries.
 
 (defun handle-inbox (w st)
     (let msg (mailbox::take (world-inbox w)))
@@ -660,6 +499,7 @@
     (case (car msg)
         (:request (handle-system st msg))
         (:make-counter (make-counter w st (second msg) (third msg)))
+        (:metrics (take-summary st msg))
         (else st)))
 
 (defun handle-system (st req)
@@ -684,12 +524,6 @@
     (let pid (spawn-on (world-counter-env w) 'counter (list name 0) to))
     (mailbox::send root (list 'child name to))
     (add-proc (log-event st (string-append "counter " name " made")) pid (list 'counter name to)))
-
-(defun read-served-log (w st)
-    (let entry (mailbox::take (world-log-box w)))
-    (if entry
-        (read-served-log w (record-served st entry))
-        st))
 
 ; ---------------------------------------------------------------------------
 ; Waking and scaling up.
@@ -720,7 +554,7 @@
 
 ; The counter process `p` is asleep, as `a` in asleep.
 (defun counter-asleep (st p a)
-    (log-event (with-asleep (remove-proc (charge st p) (proc-pid p)) (append (st-asleep st) (list a)))
+    (log-event (with-asleep (remove-proc st (proc-pid p)) (append (st-asleep st) (list a)))
         (string-append "counter " (car a) " asleep")))
 
 (defun find-asleep (asleep to)
@@ -744,7 +578,7 @@
 (defun sleep-hello (st p)
     (if (> (count-kind (st-procs st) 'hello) hello-min)
         (do
-            (let parked (with-cold (remove-proc (charge st p) (proc-pid p)) (cons (process::park (proc-pid p)) (st-cold st))))
+            (let parked (with-cold (remove-proc st (proc-pid p)) (cons (process::park (proc-pid p)) (st-cold st))))
             (log-event parked (string-append "hello -1 to cold storage: " (stats parked))))
         st))
 
@@ -773,19 +607,27 @@
     (let queue (mailbox::create #true 100))
     (let router-box (mailbox::create #true 100))
     (let counters-box (mailbox::create #true 100))
-    (let log-box (mailbox::create #true 1000))
+    (let monitor-box (mailbox::create #true 100))
     (let slow-box (mailbox::create #true 100))
     (let hello-env (process-env (hello-code)))
     (let warm (warm-template hello-env queue))
-    (let w (world inbox queue (car warm) hello-env (process-env (counter-code)) router-box counters-box log-box slow-box))
+    (let w (world inbox queue (car warm) hello-env (process-env (counter-code)) router-box counters-box monitor-box slow-box))
     (let routes (list (list "hello" queue) (list "counter" counters-box) (list "slow" slow-box) (list "system" inbox)))
-    (let router (spawn-on (process-env (router-code)) 'router (list routes) router-box))
-    (let counters (spawn-on (process-env (counters-code)) 'counters (list inbox ()) counters-box))
-    (let slow (spawn-on (process-env (slow-code)) 'slow-worker () slow-box))
-    (let st (log-event (state (list (list router 'router 0) (list counters 'counters 0) (list slow 'slow 0)) (cons inbox (cons log-box ui-inboxes)) (world-counter-env w))
+    (let router-env (process-env (router-code)))
+    (let counters-env (process-env (counters-code)))
+    (let slow-env (process-env (slow-code)))
+    (let router (spawn-on router-env 'router (list routes) router-box))
+    (let counters (spawn-on counters-env 'counters (list inbox ()) counters-box))
+    (let slow (spawn-on slow-env 'slow-worker () slow-box))
+    (let envs
+        (list (list "hello" hello-env) (list "counter" counters-env (world-counter-env w))
+            (list "slow" slow-env) (list "router" router-env)))
+    (let st (log-event
+        (state (list (list router 'router) (list counters 'counters) (list slow 'slow)) (cons inbox ui-inboxes)
+            (world-counter-env w) (monitor-node w envs))
         (string-append "hello template warmed up in " (value->string (second warm)) " turns")))
     (http::listen gateway-port router-box request-timeout)
-    (http::subscribe-log log-box)
+    (http::subscribe-log monitor-box)
     (list w (add-hello w (log-event st (string-append "listening on port " (value->string gateway-port))))))
 
 ; The supervisor loop. `ui` is (step . ui-state): once each time round, the
@@ -794,28 +636,22 @@
 ; what the last plan::run returned.
 ;
 ; The host runs the plan until the CPI is needed: a process ended or went
-; idle, a counter fell asleep or woke, mail reached the CPI's inbox, its
-; served log or the UI, or `wait` passed. The CPI then does its own work, lets the UI step, and hands the
-; plan back. It times each part with host::now: its own work, the UI, and
-; the plan, which is running processes and waiting together.
+; idle, a counter fell asleep or woke, the monitor sent its summary for the
+; second, mail reached the CPI's inbox or the UI's, or `wait` passed. The CPI
+; then does its own work, lets the UI step, and hands the plan back.
 (defun gateway (w st ui events)
     (if (st-running? st)
         (do
-            (let t0 (host::now))
-            (let st1 (sample-queues w (scale-hello w (read-served-log w (handle-inbox w (handle-events w (roll-second st t0) events))))))
-            (let t1 (host::now))
-            (let stepped ((car ui) (cdr ui) w st1 t1))
-            (let st2 (second stepped))
-            (let t2 (host::now))
-            (let next (plan::run (st-plan st2) (third stepped)))
-            (let t3 (host::now))
-            (gateway w (add-phases st2 (- t3 t2) (- t1 t0) (- t2 t1)) (cons (car ui) (car stepped)) next))
+            (let st1 (scale-hello w (handle-inbox w (handle-events w st events))))
+            (let stepped ((car ui) (cdr ui) w st1 (host::now)))
+            (let next (plan::run (st-plan (second stepped)) (third stepped)))
+            (gateway w (second stepped) (cons (car ui) (car stepped)) next))
         st))
 
 ; A UI step that prints each event once: `seen` is the newest one printed.
 (defun print-events (seen w st now)
     (for-each (lambda (e) (IO::print "[gateway]" (third e))) (reverse (newer-than (st-events st) seen)))
-    (list (if (nil? (st-events st)) seen (car (car (st-events st)))) st check-ms))
+    (list (if (nil? (st-events st)) seen (car (car (st-events st)))) st #false))
 
 (defun newer-than (events seq)
     (if (or (nil? events) (<= (car (car events)) seq))

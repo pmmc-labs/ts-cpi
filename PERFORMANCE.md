@@ -148,3 +148,26 @@ of the CPU with 150 counters awake); it now records them as they wake.
 
 - **A new counter costs 5.6 ms** with one client, against 0.6 ms for one that exists, and eight clients queue behind each other. The CPI's books are lists: each hibernate event walks the process list twice and appends to the list of sleepers, about 25,000 ticks with 700 counters, and the counters endpoint looks names up in a list too.
 - **Every round walks every live process** in the host to find the ready ones; cheap per process, but it grows with the blocked ones.
+
+## After the monitor node (Sep 28, 2026)
+
+Metrics are counted in the host by the plan's monitor node, a faux actor:
+the served log goes to its address, it counts ticks by environment and
+queue lengths after every round, and sends the CPI one summary a second.
+The monitor draws when there is a new summary or event.
+
+| Scenario | After the hibernate node | After the monitor node |
+| --- | --- | --- |
+| hello, 1 client | 1,698/s, p50 0.6 ms | 10,199/s, p50 0.1 ms |
+| hello, 8 clients | 3,220/s, p50 2.3 ms | 17,878/s, p50 0.4 ms |
+| hello, 32 clients | 3,028/s, p50 10.6 ms | 16,894/s, p50 1.7 ms |
+| CPU: the CPI / process batches / outside the CPI | 69.5% / 7.8% / 11.1% | 0.1% / 44% / 30% |
+| New counters, 8 clients | 118/s, p50 70 ms | 131/s, p50 61 ms |
+| hello after the counters | 2,904/s with 555 asleep | 17,463/s with 628 asleep |
+| `/slow` beside hello | hello 3,220/s | hello 15,090/s; every slow request still 504 |
+| hello under the live monitor, 8 clients | | 16,527/s |
+
+- **The CPI is out of the per-request path.** At 17,878 requests a second it used 15 ms of CPU in a 25-second run. The gateway is now five to eleven times faster than at the start of the day (1,627/s), and the limit is the processes (44%) and HTTP and Node (30%).
+- **Metrics in the host cost about nothing:** throughput with the monitor node is what it was with no served log at all (17,416/s).
+- **Many processes no longer matter for hello:** 17,463/s with 628 counters asleep and 169 awake.
+- **What is left:** new counters (the CPI's list bookkeeping and the counters endpoint's linear lookups, 5 to 6 ms each), `/slow` (capacity, for `parallel::`), and the interpreter itself, which now sets the speed of everything.

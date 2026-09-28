@@ -708,7 +708,7 @@ counter was asleep. The gateway logged:
 
 Two things about the supervisor loop matter for any server:
 
-- **It waits every time round.** Requests enter mailboxes only while the image waits, inside `host::wait` or `plan::run`, so a CPI that never waits accepts nothing. The gateway's `plan::run` runs processes and takes in requests until something needs the CPI: a process ended or went idle, a counter fell asleep or woke, or mail reached the CPI's inbox, its served log or the monitor's keys.
+- **It waits every time round.** Requests enter mailboxes only while the image waits, inside `host::wait` or `plan::run`, so a CPI that never waits accepts nothing. The gateway's `plan::run` runs processes and takes in requests until something needs the CPI: a process ended or went idle, a counter fell asleep or woke, or mail reached the CPI's inbox (a `/system` request, a counter to make, or the monitor node's summary for the second) or the monitor's keys.
 - **Handling order is not arrival order.** Two requests taken by two workers finish in whichever order the workers are run.
 
 `tests/gateway.test.ts` drives the gateway with a script: a burst of six
@@ -721,10 +721,13 @@ every response is exact.
 - `(process::ticks pid)` is the number of ticks a process has used over all its runs. The ticks one turn used are the difference around `process::run`.
 - `(http::subscribe-log address)` makes the host report each finished request as `(served port method path status arrived delivered answered)`. `delivered - arrived` is the time the request waited for the CPI's loop, and `answered - delivered` the time the processes took.
 
-`monitor.slight` shows these live, per endpoint, with sparklines of the last
-20 seconds and the share of the loop spent running processes, on the CPI's
-own work, drawing and waiting. `/system/metrics` returns the same numbers as
-text, and the curl scripts in `examples/gateway/scenarios/` play bursts,
+The gateway doesn't read these itself. Its plan has a **monitor node**, a
+faux actor: the served log is sent to its address, and the host counts
+requests, times, ticks and queue lengths there, with no CPI code run per
+request, and sends the CPI a summary each second. `monitor.slight` shows
+the summary live, per endpoint, with sparklines of the last 20 seconds,
+drawing only when something is new. `/system/metrics` returns the same
+numbers as text, and the curl scripts in `examples/gateway/scenarios/` play bursts,
 ramps and overloads against a running gateway. The gateway's `README.md` has
 what they showed: the processes are cheap, and the pressure comes from the
 CPI's own supervisor loop.

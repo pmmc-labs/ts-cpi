@@ -324,6 +324,14 @@ at most one; (inbox address ...), mailboxes whose mail wakes the CPI; and
 durable mailbox, that has waited in recv for idle ms is parked by the host,
 (pid (hibernated address)), and unparked with env by the first message to
 it, (new-pid (resumed address)).
+(monitor self to (rows name ...) (routes name ...) (bins ms ...)
+(history n) (ticks (row env ...) ...) (queues (row address) ...)) is a
+faux actor: the host takes each message sent to self as it arrives
+((served ...) from the served log, (sample (row n) ...), (ticks row n),
+(second s)), feeds it queue lengths each round, ticks by env ref and each
+new second itself, and sends to a summary each second:
+(metrics second status endpoints). What each number means is written as
+an actor in tests/programs/monitor-reference.slight.
 
 (plan::run plan timeout)
     -> the events the CPI must act on, after running the plan until there

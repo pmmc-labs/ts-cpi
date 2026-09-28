@@ -12,6 +12,7 @@ import {
     NIL, TRUE, FALSE, sym, int, str, cons, list, listToArray, newAddr, pid,
 } from './values.ts';
 import { makeError } from './errors.ts';
+import { Monitor, type MonitorConfig } from './monitor.ts';
 import { start, startExpr, step, resumeValue, resumeThrow } from './machine.ts';
 import {
     compose, conflicts, lookup, bindingHashOf, define, requiredNames, unfilledNames, missingNamespace,
@@ -125,6 +126,9 @@ type MailboxEntry = {
     receivers: Set<ProcEntry>;
     hadReceiver: boolean;
     reply?: ReplyState;
+    // A faux actor's mailbox (DESIGN-PLAN.md): the host handles each message
+    // as it is delivered, so nothing queues.
+    faux?: (msg: Value) => void;
 };
 
 type ReplyState = {
@@ -194,10 +198,20 @@ type DeadLetter = { readonly from: Addr | null; readonly to: Addr; readonly msg:
 // threshold, if it has a round; the CPI's mailboxes whose mail wakes it; and
 // the hibernate nodes, each an env ref and an idle threshold.
 type Hibernate = { readonly envV: Value; readonly idle: number };
+// A monitor node: the faux actor's own address, where its summaries go, what
+// it counts, and which env refs' ticks and which mailboxes' lengths it takes.
+type MonitorNode = {
+    readonly self: Addr;
+    readonly to: Addr;
+    readonly config: MonitorConfig;
+    readonly ticks: readonly (readonly [string, readonly Value[]])[];
+    readonly queues: readonly (readonly [string, Addr])[];
+};
 type Plan = {
     readonly round: { readonly n: number; readonly idle: number | null } | null;
     readonly inboxes: readonly Addr[];
     readonly hibernate: readonly Hibernate[];
+    readonly monitors: readonly MonitorNode[];
 };
 
 export type RuntimeOptions = {
@@ -259,7 +273,12 @@ export class Runtime implements Handlers {
     // The last plan plan::run was given, and what it says: a plan is only
     // read again when the CPI passes a different value.
     private planValue: Value | null = null;
-    private plan: Plan = { round: null, inboxes: [], hibernate: [] };
+    private plan: Plan = { round: null, inboxes: [], hibernate: [], monitors: [] };
+    // Installed monitor nodes, by their address: the aggregate, the node,
+    // and ticks used since the last second, by row.
+    private readonly monitors = new Map<string, { monitor: Monitor; node: MonitorNode; ticks: Map<string, number> }>();
+    // Env ref to the monitor and row its processes' ticks count for.
+    private tickRows = new Map<Value, { ticks: Map<string, number>; row: string }>();
     // Processes a hibernate node has parked, by address, in the order they
     // were parked, and the addresses of those with mail waiting.
     private readonly hibernated = new Map<string, { readonly data: Value; readonly envV: Value; readonly addr: Addr }>();
@@ -483,6 +502,10 @@ export class Runtime implements Handlers {
     private deliverNow(fromAddr: Addr | null, addr: Addr, msg: Value): ActionResult {
         const mbox = this.mailboxes.get(addr.id);
         if (mbox === undefined) return T('type-error', 'unknown mailbox address', addr);
+        if (mbox.faux !== undefined) {
+            mbox.faux(msg);
+            return V(TRUE);
+        }
         if (mbox.reply !== undefined) {
             this.deliverReply(fromAddr, mbox, msg);
             return V(TRUE);
@@ -505,6 +528,10 @@ export class Runtime implements Handlers {
         for (const { addr, msg } of outbox) {
             const mbox = this.mailboxes.get(addr.id);
             if (mbox === undefined) continue;
+            if (mbox.faux !== undefined) {
+                mbox.faux(msg);
+                continue;
+            }
             if (mbox.reply !== undefined) {
                 this.deliverReply(null, mbox, msg);
                 continue;
@@ -595,7 +622,10 @@ export class Runtime implements Handlers {
         const sleepy: { entry: ProcEntry; node: Hibernate }[] = [];
         for (const entry of this.live) {
             if (entry.status === 'ready') {
+                const before = entry.ticks;
                 const stop = this.runBatch(entry, n);
+                const counted = this.tickRows.size === 0 ? undefined : this.tickRows.get(entry.envRef);
+                if (counted !== undefined) counted.ticks.set(counted.row, (counted.ticks.get(counted.row) ?? 0) + entry.ticks - before);
                 const why = (stop as Pair).car as Sym;
                 if (why.name === 'exited' || why.name === 'failed' || why.name === 'trap') {
                     events.push(list(pid(entry.pid), stop));
@@ -984,6 +1014,7 @@ export class Runtime implements Handlers {
             if ('e' in parsed) return parsed.e;
             this.plan = parsed;
             this.planValue = planV;
+            this.installMonitors(parsed.monitors);
         }
         let timeout: number | null;
         if (timeoutV.t === 'bool' && timeoutV.v === false) timeout = null;
@@ -992,7 +1023,9 @@ export class Runtime implements Handlers {
         const { round, inboxes, hibernate } = this.plan;
         const deadline = timeout === null ? null : this.now() + timeout;
         for (;;) {
+            this.rollMonitors();
             const r = round === null ? { events: [], ready: 0 } : this.runRound(round.n, round.idle, hibernate);
+            this.sampleQueues();
             if (r.events.length > 0) return V(list(...r.events));
             const mail = [...this.mailEvents(inboxes), ...this.resumeHibernated(hibernate)];
             if (mail.length > 0) return V(list(...mail));
@@ -1002,7 +1035,8 @@ export class Runtime implements Handlers {
                 continue;
             }
             const idles = [round?.idle ?? null, ...hibernate.map((h) => h.idle)];
-            const limits = [...idles, deadline === null ? null : deadline - this.now()].filter((t): t is number => t !== null);
+            const seconds = [...this.monitors.values()].map((m) => (m.monitor.currentSecond + 1) * 1000 - this.now());
+            const limits = [...idles, ...seconds, deadline === null ? null : deadline - this.now()].filter((t): t is number => t !== null);
             const limit = limits.length === 0 ? null : Math.min(...limits);
             const before = this.now();
             const answer = await this.hostWait(limit === null ? FALSE : int(limit));
@@ -1020,6 +1054,7 @@ export class Runtime implements Handlers {
         let round: Plan['round'] = null;
         const inboxes: Addr[] = [];
         const hibernate: Hibernate[] = [];
+        const monitors: MonitorNode[] = [];
         for (const node of nodes) {
             const parts = listToArray(node);
             const kind = parts?.[0];
@@ -1033,6 +1068,11 @@ export class Runtime implements Handlers {
                 else if (idleV!.t === 'int' && idleV!.v >= 0n) idle = Number(idleV!.v);
                 else return bad('a round\'s idle is a non-negative integer or #false', node);
                 round = { n: Number(nV!.v), idle };
+            } else if (kind.name === 'monitor') {
+                const read = this.readMonitor(parts);
+                if (typeof read === 'string') return bad(read, node);
+                if (monitors.some((m) => m.self.id === read.self.id)) return bad('a plan has one monitor node per address', node);
+                monitors.push(read);
             } else if (kind.name === 'hibernate') {
                 const [, envV, idleV] = parts;
                 if (parts.length !== 3 || envV!.t !== 'env' || idleV!.t !== 'int' || idleV!.v < 0n) {
@@ -1049,7 +1089,109 @@ export class Runtime implements Handlers {
                 return bad(`unknown plan node: ${kind.name}`, node);
             }
         }
-        return { round, inboxes, hibernate };
+        return { round, inboxes, hibernate, monitors };
+    }
+
+    // (monitor self to (rows name ...) (routes name ...) (bins ms ...)
+    //     (history n) (ticks (row env ...) ...) (queues (row address) ...)).
+    // Returns the node, or what is wrong with it.
+    private readMonitor(parts: readonly Value[]): MonitorNode | string {
+        const shape = 'a monitor node is (monitor self to (rows ...) (routes ...) (bins ...) (history n) (ticks ...) (queues ...))';
+        const [, self, to, ...sections] = parts;
+        const known = (a: Value | undefined): a is Addr => a !== undefined && a.t === 'addr' && this.mailboxes.has(a.id);
+        if (!known(self) || !known(to)) return shape;
+        const strings = (xs: readonly Value[]) => xs.every((x) => x.t === 'str') ? xs.map((x) => (x as { v: string }).v) : null;
+        let rows: string[] | null = null;
+        let routes: string[] = [];
+        let bins: number[] = [];
+        let history = 20;
+        const ticks: [string, Value[]][] = [];
+        const queues: [string, Addr][] = [];
+        for (const section of sections) {
+            const items = listToArray(section);
+            const head = items?.[0];
+            if (items === null || head?.t !== 'sym') return shape;
+            const rest = items.slice(1);
+            if (head.name === 'rows' || head.name === 'routes') {
+                const names = strings(rest);
+                if (names === null) return `${head.name} are strings`;
+                if (head.name === 'rows') rows = names; else routes = names;
+            } else if (head.name === 'bins') {
+                if (!rest.every((b) => b.t === 'int')) return 'bins are integers';
+                bins = rest.map((b) => Number((b as { v: bigint }).v));
+                if (bins.some((b, i) => i > 0 && b <= bins[i - 1]!)) return 'bins increase';
+            } else if (head.name === 'history') {
+                const n = rest[0];
+                if (rest.length !== 1 || n?.t !== 'int' || n.v < 1n) return 'history is a positive integer';
+                history = Number(n.v);
+            } else if (head.name === 'ticks' || head.name === 'queues') {
+                for (const entry of rest) {
+                    const e = listToArray(entry);
+                    const row = e?.[0];
+                    if (e === null || row?.t !== 'str') return `${head.name} are (row ...)`;
+                    if (head.name === 'ticks') {
+                        if (!e.slice(1).every((x) => x.t === 'env')) return 'ticks are (row env ...)';
+                        ticks.push([row.v, e.slice(1)]);
+                    } else {
+                        const a = e[1];
+                        if (e.length !== 2 || !known(a)) return 'queues are (row address)';
+                        queues.push([row.v, a]);
+                    }
+                }
+            } else {
+                return shape;
+            }
+        }
+        if (rows === null) return 'a monitor node needs its rows';
+        return { self, to, config: { rows, routes: new Set(routes), bins, history }, ticks, queues };
+    }
+
+    // Starts each new monitor node: a summary at once, and any messages that
+    // reached its address before it was installed. A node no longer in the
+    // plan stops taking its messages, which queue again.
+    private installMonitors(nodes: readonly MonitorNode[]): void {
+        for (const [id, m] of this.monitors) {
+            if (nodes.some((n) => n.self.id === id)) continue;
+            delete this.mailboxes.get(id)!.faux;
+            this.monitors.delete(id);
+        }
+        this.tickRows = new Map();
+        for (const node of nodes) {
+            let installed = this.monitors.get(node.self.id);
+            if (installed === undefined) {
+                installed = { monitor: new Monitor(node.config), node, ticks: new Map() };
+                this.monitors.set(node.self.id, installed);
+                const { monitor } = installed;
+                const mbox = this.mailboxes.get(node.self.id)!;
+                const send = (summary: Value | null) => { if (summary !== null) this.deliverNow(null, node.to, summary); };
+                send(monitor.summary());
+                for (const msg of mbox.queue.splice(0)) send(monitor.handle(msg));
+                mbox.faux = (msg) => send(monitor.handle(msg));
+            }
+            for (const [row, envs] of node.ticks) for (const e of envs) this.tickRows.set(e, { ticks: installed.ticks, row });
+        }
+    }
+
+    // A new second for each monitor: the ticks since the last, then the
+    // second itself, which closes the ones before and sends a summary.
+    private rollMonitors(): void {
+        if (this.monitors.size === 0) return;
+        const s = Math.floor(this.now() / 1000);
+        for (const { monitor, node, ticks } of this.monitors.values()) {
+            if (s <= monitor.currentSecond) continue;
+            for (const [row, n] of ticks) monitor.ticks(row, n);
+            ticks.clear();
+            const summary = monitor.nextSecond(s);
+            if (summary !== null) this.deliverNow(null, node.to, summary);
+        }
+    }
+
+    // One sample of each monitor's queues, after a round.
+    private sampleQueues(): void {
+        for (const { monitor, node } of this.monitors.values()) {
+            if (node.queues.length === 0) continue;
+            monitor.sample(node.queues.map(([row, a]) => [row, this.mailboxes.get(a.id)!.queue.length] as const));
+        }
     }
 
     private mailEvents(inboxes: readonly Addr[]): Value[] {

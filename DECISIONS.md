@@ -609,6 +609,39 @@ Found while building:
 1. **The CPI's lists are now the cost of each event.** Each hibernate event walks the process list twice (`find-proc`, `remove-proc`) and appends to the list of sleepers: about 25,000 ticks with 700 counters. Per event, not per round, but it grows with the processes. A new counter costs 5.6 ms with one client (0.6 ms for an existing one), and the counters endpoint's own `find-child` is linear too. This is the prompt's question about data structures in CPI code.
 2. **Every round walks every live process** to find the ready ones and check idle times, in the host: cheap per process, but it grows with blocked processes, as `settle` did.
 
+### The monitor node (2026-09-28)
+
+*Status.* Agreed and implemented 2026-09-28, as part 3a of `DESIGN-PLAN.md` step 3: aggregation in the host, the view still built by the CPI from a summary each second; part 3b (the view as a template the node draws) is next. A faux actor is checked against a real actor given the same messages (option A), not by a whole-gateway trace. Tests in `tests/monitor.test.ts`; `tests/gateway.test.ts` updated.
+
+*Motivation.* After step 2, metrics were about 70% of the gateway's CPU: every served request was aggregated in interpreted CPI code, and the served log woke the CPI in every wait.
+
+*How a faux actor is checked.* The old CPI metrics sampled queues whenever the CPI woke, and the node samples every round and no longer wakes the CPI for metrics at all, so no reference could reproduce the old timing. The options were **A. a real actor running the same aggregation, sent the same messages, with identical summaries required** (chosen), and B. a whole-gateway trace against a second gateway loop built on `process::run-ready` only for the test. A checks the node where it can be observed: its messages in, its summaries out.
+
+**Section 10.6, Plans.** Add a node:
+
+> | `(monitor self to (rows name …) (routes name …) (bins ms …) (history n) (ticks (row env …) …) (queues (row addr) …))` | A **faux actor**: the host takes every message sent to `self` as it is delivered (nothing queues there while the node is in the plan), and counts. Its messages are `(served …)` (a served-log entry, SPEC-HTTP section 6), `(sample (row n) …)`, `(ticks row n)` and `(second s)`; the host also sends it, itself, a sample of the named queues after every round, the ticks each row's processes used (found by their env refs) and each new second of `host::now`. It sends `to` a summary when installed and at each new second: `(metrics second status endpoints)`. One node per `self`. |
+
+and to the reference behaviour: "A wait inside `plan::run` is also capped at the next second, while the plan has a monitor node."
+
+The meaning of every number in a summary is written down, as a program, in `tests/programs/monitor-reference.slight`: it is the gateway's former metrics code as an actor. In short: a request counts in the row its first path segment names if that is one of `routes`, else in `"other"`, and always in `"total"`; each row keeps request counts, wait, work and total-time histograms with bounds `bins`, and ticks, for the current second, a summary of each of the last `history` seconds (requests, p50 and p95 bins of wait and work, p95 of total, ticks), and running min, max, sum and count of wait, work, queue length per sample and requests per second.
+
+Rationale:
+
+- **Per-request work in the host.** The CPI now sees one summary a second, whatever the load.
+- **An actor from the outside.** Anything can send it messages, the served log goes to its address like any subscriber's, and a real actor is its reference. Facts the CPI knows (the hello pool's size, events) will reach it the same way in part 3b.
+- **Ticks by environment.** Each kind of process in the gateway runs in its own environment, so the host can charge a batch's ticks to a row with no CPI bookkeeping. The counters endpoint and the counters share the `counter` row.
+
+Implementation (ts-cpi):
+
+- `src/monitor.ts` holds the aggregate and makes summaries; `Runtime` installs a node when a plan names it (sending the first summary and handling any messages already in the mailbox), gives the mailbox a `faux` handler that `deliverNow` and `flushOutbox` call instead of queueing, counts ticks by env ref in `runRound`, samples the queues after each round, and sends `(second s)` at the top of each `plan::run` loop once `host::now` reaches a new second.
+- The gateway: the plan has a monitor node; the served log goes to its address; the CPI keeps the last summary (`take-summary`) for `/system/metrics` and the monitor's view; the metrics code, the served-log reading and the per-process tick charging are gone, and so are the loop-phase metrics. The monitor draws when there is a new summary or event, with no frame rate or `f` key.
+- Tests: the node and the reference actor, given requests on every route, refusals, a client that went away, 503, 504, 500 and 404, samples, ticks, a repeated second, a gap longer than the history and an unknown message, send the same five summaries (four mutations of the node were each caught); in a plan, the host feeds ticks by env ref, samples queues each round, rolls seconds on the clock, and hands the node messages that arrived before it was installed.
+
+Found while building:
+
+1. **The hello pool rarely scales now.** The CPI adds a worker only when it is woken while requests wait, and nothing wakes it during a burst: in the test's burst one worker drained six requests. On one thread more workers add no throughput, so it matters for the pool node (step 4) and for parallel schedulers.
+2. **The `plan::run` trace test runs without the monitor node,** which its reference program does not know; the node is checked against its own reference instead.
+
 ## Spec issues
 
 - A library that the CPI and its processes both use cannot be a role, because the CPI's environment comes from its files and a role's procedures resolve their globals through the environment of whoever runs them. Processes that need such a library get a role composed onto `environment::self`: they can see every CPI definition, and the host actions the library uses are neither declared nor checked by `environment::resolve`. Two ways to close it, both spec changes: read each loaded file as a role (open question 5 above), so the CPI's environment is a composition of library roles it can also give to processes; or add a projection, `(environment::select e names)`, so a process takes exactly the names its role requires. Found by migrating the examples (the CPI-Roles field notes). A plain projection was tried on Sep 27, 2026 and reverted (commit `d9d1cbf` and its revert): because library procedures call each other by name, every role had to list what its library calls reach in turn (18 names for version 08's universe), and a forgotten one surfaced only at run time, once as a supervisor restarting a failing worker forever.

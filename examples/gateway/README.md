@@ -31,43 +31,43 @@ clock.
 ## The monitor
 
 ```
-╭──────────────────────────────────────────────────────────────────────────────────────────────╮
-│ gateway :8080 · up 0:03 · hello max  5 ·  4 fps                                              │
-│ requests       9 · 2xx       9 · 4xx     0 · 503     0 · 504     0 · 5xx     0 · gone     0  │
-│ loop     6/s · run   0% · other   0% · draw   0% · wait 100% · frame   0 ms,   0 building    │
-╰──────────────────────────────────────────────────────────────────────────────────────────────╯
- endpoint  workers                queue  req/s  wait p95  work p95    ticks/s req/s, 20 s           p95, 20 s
- hello     ○◌◌ 1/5                    0      1      <1ms      <1ms        307                   █▁                    ▁▁
- counter   ● 0  ○ 0  ◌ 2              0      0         -         -          0                   █                     ▁
- slow      ○                          0      0         -         -          0
- router    ○                          0      0         -         -        120
- system    the CPI                    0      0         -         -          0
- other                                0      0         -         -          0
- total     ● 0  ○ 4  ◌ 4              0      1      <1ms      <1ms        427                   █▁                    ▁▁
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ gateway :8080 · up 0:03 · hello max  5                                                                               │
+│ requests       9 · 2xx       9 · 4xx     0 · 503     0 · 504     0 · 5xx     0 · gone     0                          │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ endpoint  workers                queue  req/s  wait p95  work p95   ticks/s req/s, 20 s          p95, 20 s
+ hello     ○◌ 1/5                     0      1      <1ms      <1ms       307                   █▂                   ▁▁
+ counter   ● 0  ○ 0  ◌ 2              0      0         -         -         0                   █                    ▁
+ slow      ○                          0      0         -         -         0
+ router    ○                          0      0         -         -       120
+ system    the CPI                    0      0         -         -         0
+ other                                0      0         -         -         0
+ total     ● 0  ○ 4  ◌ 3              0      1      <1ms      <1ms       427                   █▁                   ▁▁
 
- since start  requests               queue               req/s             wait ms             work ms
-                          min    avg   max    min    avg   max    min    avg   max    min    avg   max
- hello               7      0    0.1     2      0    2.3     6      0    0.0     0      0    0.0     0
- counter             2      0    0.0     1      0    0.6     2      0    0.0     0      0    0.0     0
- slow                0      0    0.0     0      0    0.0     0      -      -     -      -      -     -
- router              0      0    0.4     6      0    0.0     0      -      -     -      -      -     -
- system              0      0    0.0     0      0    0.0     0      -      -     -      -      -     -
- other               0      0    0.0     0      0    0.0     0      -      -     -      -      -     -
- total               9      0    0.6     6      0    3.0     8      0    0.0     0      0    0.0     0
+ since start requests                queue                req/s              wait ms              work ms
+                        min     avg    max   min     avg    max   min     avg    max   min     avg    max
+ hello              7     0     0.5      3     0     2.3      6     0     0.0      0     0     0.0      0
+ counter            2     0     0.0      0     0     0.6      2     0     0.0      0     0     0.0      0
+ slow               0     0     0.0      0     0     0.0      0     -       -      -     -       -      -
+ router             0     0     0.6      6     0     0.0      0     -       -      -     -       -      -
+ system             0     0     0.2      1     0     0.0      0     -       -      -     -       -      -
+ other              0     0     0.0      0     0     0.0      0     -       -      -     -       -      -
+ total              9     0     1.4      6     0     3.0      8     0     0.0      0     0     0.0      0
 ```
 
 (From `tests/gateway.test.ts`, on the virtual clock, where no time passes
 while the CPI works.)
 
-- **Header.** Status counts (2xx green, 4xx yellow, 5xx red, zero dimmed), and the last second of the CPI's loop: how often it went round, and its time split into running processes (`run`), its own work (`other`: the served log, scaling, parking), drawing, and waiting in `host::wait`, in numbers and as a stacked bar. A frame's cost is split into building the view in CPI code and the host painting it.
+- **Header.** How long the gateway has been up, the most hello workers, and status counts (2xx green, 4xx yellow, 5xx red, zero dimmed).
 - **The last second, one row per endpoint.** Workers (● ready, ○ waiting in `recv`, ◌ parked; the hello pool shows a mark per worker and its maximum, the rest show counts), the queue in its mailbox, requests, the 95th percentile of **wait** (arrival to delivery: time spent waiting for the CPI's loop) and of **work** (delivery to answer: the processes' time, queueing included), coloured green under 5 ms, yellow under 50 ms and red above, and the ticks its processes used. The sparklines are the last 20 seconds of requests and of 95th percentile total time, underlined so an empty stretch still shows. They and the stacked bar are chart components, and both tables are `Table`s (SPEC-TUI section 3.2): the CPI passes content and numbers, and the host aligns and draws them. `total` is the whole gateway.
-- **Since the start.** Min, average and max of each endpoint's queue (sampled every time round the loop), requests per second (every second), and wait and work (every request, in ms).
-- **Where the numbers come from.** Request times come from the host's served log (`http::subscribe-log`), and ticks from `process::ticks`. Percentiles come from fixed-bin histograms (`<1ms`, `<2ms`, `<5ms` ...), so they cost the CPI no sorting.
+- **Since the start.** Min, average and max of each endpoint's queue (sampled after every round), requests per second (every second), and wait and work (every request, in ms).
+- **Where the numbers come from.** The plan's monitor node counts them in the host (`DESIGN-PLAN.md`): request times from the served log (`http::subscribe-log`, sent to the node's address), ticks by the environment each process runs in, and queue lengths after every round. Percentiles come from fixed-bin histograms (`<1ms`, `<2ms`, `<5ms` ...). Each second the node sends the CPI a summary; `tests/programs/monitor-reference.slight` is an actor doing the same work, and says what each number means.
 - **Events are not shown.** The monitor sends each of the CPI's events to a mailbox whose only receiver has ended, so they collect in the host's dead-letter queue. `plain.slight` prints them.
-- **Keys.** `q` quits, `+` and `-` change the most hello workers, `f` cycles the frame rate through 1, 2, 4, 10 and 30.
+- **Keys.** `q` quits, `+` and `-` change the most hello workers.
 
 The monitor is one more step in the CPI's loop, and nothing else runs while
-it draws. It draws on a timer, and its header shows what drawing costs.
+it draws. It draws only when there is something new: the monitor node's
+summary for a new second, or an event. It has no frame rate.
 
 ## Scenarios
 
@@ -85,7 +85,7 @@ beside the gateway's `/system/metrics`.
 | `overload.sh` | 2000 requests, 250 at a time |
 | `slow.sh` | hello at 20 a second beside 6 slow requests |
 | `all.sh` | every scenario in turn, against one gateway |
-| `compare.sh [scenario]` | starts the gateway three ways (plain, monitor at 4 fps, monitor at 30 fps) and runs the scenario against each |
+| `compare.sh [scenario]` | starts the gateway two ways (plain, and under the monitor) and runs the scenario against each |
 
 `compare.sh` runs the monitor on a pseudo-terminal with `tools/pty_run.py`
 and saves its last screen. `all.sh` runs everything against one gateway, so
