@@ -256,6 +256,7 @@ least there: 338 ms against the VM's 394 for the ring of 10.
    drops an ended process once no value refers to its PID, and a mailbox
    once none refers to its address (`DECISIONS.md`, "Reclaiming what
    nothing can name"), so a ring the CPI has let go of costs nothing: the
-   benchmark peaks at 350 MB on the VM instead of 800. The schedulers still
-   take turns within each size, so each is timed with the image in much the
-   same state.
+   benchmark peaks at 350 MB on the VM instead of 800, and with the
+   laptop's extra rows, 3.8 million processes in all, it finished in a 4 GB
+   heap, peaking at 1.3 GB. The schedulers still take turns within each
+   size, so each is timed with the image in much the same state.

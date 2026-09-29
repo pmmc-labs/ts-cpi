@@ -300,6 +300,7 @@ its address (`DECISIONS.md`, "Reclaiming what nothing can name").
 | Heap kept per ended ring process with its mailbox, from snapshots of 50,000 | 1,153 bytes; 1,309 after 10 laps | 42 and 15 bytes, in tables sized for the biggest ring |
 | Rings of 100,000 processes in a 600 MB heap | out of heap after 300,000 to 400,000 processes | 3 million processes, peak 530 MB |
 | The benchmark, peak memory | 741 to 804 MB | 353 MB |
+| The benchmark with the laptop's extra rows, 100,000 × 1 and × 10 in both tables, in a 4 GB heap | out of heap on the laptop after about 3 million processes | all 3.8 million processes, peak 1,303 MB |
 
 - **Messages cost what they did.** CPU time, medians of interleaved runs:
   3,684 ms against 3,671 before for rings of 10 passing 600,000 messages
