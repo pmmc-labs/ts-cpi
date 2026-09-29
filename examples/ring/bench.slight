@@ -1,0 +1,31 @@
+; Times rings of different sizes. Load ring.slight first:
+;
+;     node bin/cpi.ts examples/ring/ring.slight examples/ring/bench.slight
+;
+; Every size sends the same number of messages, so the rows show what the
+; number of processes costs. Each size is (N M); change them here.
+
+(const sizes '((10 10000) (100 1000) (1000 100) (10000 10)))
+(const order-sizes '((10 1000) (100 100) (1000 10) (10000 1)))
+(const repeats 3)
+
+(defun main ()
+    (let env (environment::resolve (ring-code) '(actor)))
+    ; One untimed run of each, so the interpreter is warm before the first row.
+    (for-each (lambda (s) (time-ring env 100 100 :rising (second s))) schedulers)
+    (IO::print "The ring benchmark: N processes in a ring, and a message sent round it")
+    (IO::print "M times, N × M messages in all. Each ring is timed three ways, by how much")
+    (IO::print "of the running the CPI hands to the host. Times are in milliseconds, each")
+    (IO::print (string-append "the fastest of " (value->string repeats) " runs:"))
+    (IO::print "")
+    (IO::print "    process::run         the CPI runs each turn: one process, until it blocks")
+    (IO::print "    process::run-ready   the host runs each round: every ready process, once")
+    (IO::print "    plan::run            the host runs rounds until a process ends")
+    (IO::print "")
+    (ring-table env sizes repeats)
+    (IO::print "")
+    (IO::print "process::run-ready's round runs processes in PID order. With PIDs falling")
+    (IO::print "round the ring, every hop but one a lap waits for the next round. The CPI's")
+    (IO::print "own round (process::run) goes in ring order, whichever way the PIDs go:")
+    (IO::print "")
+    (order-table env order-sizes repeats))

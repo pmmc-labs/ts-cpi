@@ -75,6 +75,17 @@ node bin/cpi.ts examples/gateway/gateway.slight examples/gateway/monitor.slight 
 `examples/life/` holds the Game of Life written 22 different ways, as a tour of
 what the CPI's builtins can do. See [`examples/life/README.md`](examples/life/README.md).
 
+`examples/ring/` is the ring benchmark from *Programming Erlang*: N processes
+in a ring, and a message sent round it M times. Each ring is timed three ways,
+by how much of the running the CPI hands to the host at once: a turn
+(`process::run`), a round (`process::run-ready`), or everything until the
+ring ends (`plan::run`). See [`examples/ring/README.md`](examples/ring/README.md)
+for what it measured.
+
+```sh
+node bin/cpi.ts examples/ring/ring.slight examples/ring/bench.slight
+```
+
 ## The terminal UI
 
 The CPI can draw on the terminal and read the keyboard through the privileged

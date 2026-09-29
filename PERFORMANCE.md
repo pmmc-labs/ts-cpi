@@ -191,3 +191,16 @@ The monitor node draws the view itself, from a template the CPI gives it
 once; the CPI builds no frames. Live on a terminal, the gateway served
 17,625 hello requests a second at 8 clients under the monitor, the same as
 without it within noise (17,476/s): the CPI's share of the CPU stays 0.1%.
+
+## The ring benchmark (Sep 29, 2026)
+
+`examples/ring/` times the ring benchmark from *Programming Erlang*, N
+processes passing a message round M times, run by `process::run`,
+`process::run-ready` and `plan::run`. It was measured on a different
+machine, a cloud VM at about half the M2 Max's speed; its README has the
+tables. In short: a message costs about 4.5 µs when the host runs the
+rounds, and twice that when the CPI runs every turn. Spawning a process
+costs 17 µs, most of it the CPI's own code. And because a round runs
+processes in PID order, a ring whose PIDs fall round it waits a round at
+all but one hop a lap: 10,000 messages round 10,000 processes took
+956 ms instead of 56.
