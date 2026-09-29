@@ -268,13 +268,16 @@ to 74, 89, 98 and 106 for N = 10, 100, 1,000 and 10,000.
   ring order, where it took about 60 times as long. Each hop is still a
   round: about 18 µs with `process::run-ready`, which goes round the CPI's
   loop, and 22 µs with `plan::run`, against about 6 µs a message with PIDs
-  rising.
+  rising. On the laptop the ring of 100,000 took 782 ms after the change,
+  against 55,849 before, 678 under `process::run` and 275 with PIDs rising.
 - **Messages cost what they did.** Every message changes a process's
   status twice, so what a status change costs shows in every ring. CPU
   time, medians of eight interleaved runs of each build: 4,114 ms against
   3,999 before for rings of 10 passing 600,000 messages, 200,000 under each
   scheduler, and 4,189 against 4,370 for 1,000 processes that are all
   ready in each of 721 rounds. The runs of the two builds overlap in both.
+  On the laptop, no figure in the benchmark's first table moved by more
+  than 4% between the runs before and after the change.
 - **A first version cost about 13% on both.** It kept the ready processes
   and the waits in Sets, which hash on every status change and make
   garbage, and put every turn in a heap. Now the ready processes are an

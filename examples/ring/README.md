@@ -7,7 +7,7 @@ The exercise from Joe Armstrong's *Programming Erlang*:
 > this takes for different values of N and M.
 
 ```sh
-node bin/cpi.ts examples/ring/ring.slight examples/ring/bench.slight   # about 45 s on the VM below
+node bin/cpi.ts examples/ring/ring.slight examples/ring/bench.slight   # about 30 s on the VM below
 node bin/cpi.ts examples/ring/ring.slight examples/ring/check.slight
 ```
 
@@ -69,15 +69,19 @@ timed with the image in much the same state (finding 7).
 
 ## Results
 
-Two runs of the benchmark, on Sep 29, 2026: on the cloud VM this example was
-written on, and on a laptop.
+Two runs of the benchmark on Sep 29, 2026, both after that day's changes
+to the interpreter and to the round (`PERFORMANCE.md`, "Actor requests and
+code lists" and "A round visits only what can act"): on the cloud VM this
+example was written on, and on a laptop. The runs from before the changes
+are in this file's history.
 
 ### Cloud VM
 
-A 4-core Intel Xeon at 2.1 GHz with Node 22.22. This machine runs
+A 4-core Intel Xeon at 2.1 GHz with Node 22.22. This machine ran
 `tools/bench/interpreter.slight` at about half the speed of the M2 Max in
-`PERFORMANCE.md`: 9.7 million ticks a second on the counting loop. The
-benchmark took 47 seconds and peaked at 720 MB.
+`PERFORMANCE.md`: 9.7 million ticks a second on the counting loop before
+the changes, 13.7 million after. The benchmark took 32 seconds and peaked
+at 800 MB.
 
 ```
 The ring benchmark: N processes in a ring, and a message sent round it
@@ -89,11 +93,11 @@ the fastest of 3 runs:
     process::run-ready   the host runs each round: every ready process, once
     plan::run            the host runs rounds until a process ends
 
-      N       M  messages  spawn ms  process::run  process::run-ready  plan::run
-     10  10,000   100,000         0           971                 456        475
-    100   1,000   100,000         1         1,200                 576        557
-  1,000     100   100,000        16         1,270                 606        622
- 10,000      10   100,000       169         1,499                 846        736
+      N       M   messages  spawn ms  process::run  process::run-ready  plan::run
+     10  10,000    100,000         0           721                 380        394
+    100   1,000    100,000         1           866                 403        406
+  1,000     100    100,000        13           896                 431        433
+ 10,000      10    100,000       142         1,048                 633        607
 
 process::run-ready's round runs processes in PID order. With PIDs falling
 round the ring, every hop but one a lap waits for the next round. The CPI's
@@ -102,20 +106,22 @@ own round (process::run) goes in ring order, whichever way the PIDs go:
                                  run-ready       run-ready    process::run
                                PIDs rising    PIDs falling    PIDs falling
        N       M  messages   rounds     ms   rounds     ms   rounds     ms
-      10   1,000    10,000    1,001     48    9,001     92    1,001     86
-     100     100    10,000      101     48    9,901    136      101     96
-   1,000      10    10,000       11     59    9,991    229       11    139
-  10,000       1    10,000        2     56   10,000    956        2    131
+      10   1,000    10,000    1,001     41    9,001     78    1,001     72
+     100     100    10,000      101     42    9,901    101      101     86
+   1,000      10    10,000       11     43    9,991    100       11     84
+  10,000       1    10,000        2     46   10,000    150        2    111
 ```
 
 Every ring sent exactly N × M messages. This machine is noisy: over three
-runs of the benchmark, figures in the first table moved by up to 25%, and
-in the second by up to 50%. Read the tables for their factors of two and
-more, which held in every run, not for their last digits.
+runs of the benchmark, figures in the first table moved by up to 22%, and
+in the second by up to two thirds. Read the tables for their factors of two
+and more, which held in every run, not for their last digits.
 
 ### Laptop
 
-The same benchmark, one run.
+The same benchmark, one run, with a row of 100,000 processes added to each
+table (the sizes are at the top of `bench.slight`; the first table's new
+row alone takes about six minutes).
 
 ```
 The ring benchmark: N processes in a ring, and a message sent round it
@@ -127,11 +133,12 @@ the fastest of 3 runs:
     process::run-ready   the host runs each round: every ready process, once
     plan::run            the host runs rounds until a process ends
 
-      N       M  messages  spawn ms  process::run  process::run-ready  plan::run
-     10  10,000   100,000         0           450                 252        368
-    100   1,000   100,000         0           439                 220        238
-  1,000     100   100,000         8           488                 247        255
- 10,000      10   100,000        84           548                 291        289
+      N       M   messages  spawn ms  process::run  process::run-ready  plan::run
+     10  10,000    100,000         0           419                 231        338
+    100   1,000    100,000         0           394                 199        209
+  1,000     100    100,000         8           444                 217        221
+ 10,000      10    100,000        83           499                 266        269
+100,000     100 10,000,000       917        56,225              32,746     34,849
 
 process::run-ready's round runs processes in PID order. With PIDs falling
 round the ring, every hop but one a lap waits for the next round. The CPI's
@@ -140,34 +147,37 @@ own round (process::run) goes in ring order, whichever way the PIDs go:
                                  run-ready       run-ready    process::run
                                PIDs rising    PIDs falling    PIDs falling
        N       M  messages   rounds     ms   rounds     ms   rounds     ms
-      10   1,000    10,000    1,001     25    9,001     50    1,001     47
-     100     100    10,000      101     23    9,901     58      101     45
-   1,000      10    10,000       11     24    9,991    128       11     51
-  10,000       1    10,000        2     22   10,000    404        2     62
+      10   1,000    10,000    1,001     24    9,001     48    1,001     45
+     100     100    10,000      101     21    9,901     55      101     46
+   1,000      10    10,000       11     24    9,991     68       11     54
+  10,000       1    10,000        2     27   10,000     77        2     70
+ 100,000       1   100,000        2    275  100,000    782        2    678
 ```
 
-The laptop ran about twice as fast as the VM, and the factors of two and
-more held. Two things differed: a bigger ring cost it much less extra per
-message (finding 4), and `plan::run` was slower than `process::run-ready`
-when rounds were short (finding 3).
+And a second run with only 100,000 × 1 in the first table:
 
-Both runs came before three changes the same day. Two to the interpreter
-cut the ring's CPU time by about 18% on the VM without changing its ticks
-(`PERFORMANCE.md`, "Actor requests and code lists"), and one to the round
-makes the falling rings in the second table faster the more processes
-they have (finding 6).
+```
+      N       M   messages  spawn ms  process::run  process::run-ready  plan::run
+100,000       1    100,000       910           581                 215        229
+```
+
+The laptop ran 1.5 to 2.4 times as fast as the VM, and the factors of two
+and more held. Two things differed: a bigger ring cost it much less extra
+per message (finding 4), and `plan::run` was slower than
+`process::run-ready` when rounds were short (finding 3), so it gained
+least there: 338 ms against the VM's 394 for the ring of 10.
 
 ## What it shows
 
-1. **A message costs 2.5 µs on the laptop and 4.6 on the VM when the host
-   runs the rounds:** 252 and 456 ms for 100,000 messages round 10
-   processes, about 400,000 and 220,000 a second. On the VM, about two
-   thirds of that is the processes' own code, 31 ticks a message. The rest
+1. **A message costs 2.3 µs on the laptop and 3.8 on the VM when the host
+   runs the rounds:** 231 and 380 ms for 100,000 messages round 10
+   processes, about 430,000 and 260,000 a second. On the VM, about three
+   fifths of that is the processes' own code, 31 ticks a message. The rest
    is the turn around it: two host requests, the message delivered when the
    batch ends, and the next process woken.
-2. **When the CPI runs every turn, a message costs about twice as much.**
-   `process::run` took 450 ms where `process::run-ready` took 252 on the
-   laptop, and 971 where it took 456 on the VM. For every message the CPI
+2. **When the CPI runs every turn, a message costs nearly twice as much.**
+   `process::run` took 419 ms where `process::run-ready` took 231 on the
+   laptop, and 721 where it took 380 on the VM. For every message the CPI
    asks for a process's state, runs it, and goes round its own loop in the
    interpreter, which costs about as much as the message itself. This is
    `PERFORMANCE.md`'s lesson in miniature: work the CPI does per turn costs
@@ -176,47 +186,51 @@ they have (finding 6).
    processes faster.** The CPI wakes M + 1 times with `run-ready` (10,001
    for the ring of 10), and twice with `plan::run`. On the VM the two ran
    equally fast, within the noise. On the laptop `plan::run` was slower
-   when rounds were short: 368 ms against 252 for the ring of 10, whose
-   10,001 rounds carry ten messages each, about 12 µs a round; 238 against
-   220 with ten times fewer rounds; and 255 against 247 at 1,000
-   processes. Between rounds `plan::run` waits 0 ms to take in input,
-   which is the likeliest cost. It was one run, so it wants confirming.
-4. **Bigger rings cost more per message, by how much depends on the
-   machine:** 1.5 to 1.9 times as much at 10,000 processes as at 10 on the
-   VM, for the same ticks, and about 1.2 times on the laptop. On the VM it
-   holds when the sizes take turns too, so it is not the heap growing from
-   row to row, and about half of it is garbage collection. A process's
-   state is replaced at every turn, and in a ring of 10,000 each state
-   lives for a whole round. In one run the young-generation collections
-   took 180 ms at N = 10,000 against 53 ms at N = 10, with a 22 ms full
-   collection besides (`node --trace-gc`).
-5. **Spawning a process costs as much as three or four messages:** 84 ms
-   for 10,000 on the laptop and 169 on the VM, 8.4 and 17 µs each.
-   `process::spawn` itself takes about 1.5 µs on the VM (a CPU profile).
-   Most of the rest is the CPI's own code making the ring: for each
-   process, in the interpreter, a mailbox, a procedure that spawns the
-   process, and the call.
+   when rounds were short: 338 ms against 231 for the ring of 10, whose
+   10,001 rounds carry ten messages each, about 11 µs a round; 209 against
+   199 with ten times fewer rounds; and 221 against 217 at 1,000
+   processes. Three laptop runs, before the changes and after, found the
+   same 11 to 12 µs a round. Between rounds `plan::run` waits 0 ms to take
+   in input, which is the likeliest cost.
+4. **Big rings cost more per message when they live long.** On the VM a
+   message cost 1.7 times as much at 10,000 processes as at 10 (633 ms
+   against 380), for the same ticks, and on the laptop 1.15 times (266
+   against 231). Sent round 100,000 processes 100 times, a message cost the
+   laptop 3.3 µs, 1.4 times as much as round 10; sent round them once, it
+   cost 2.2 µs (215 ms for 100,000), no more than round 10. What costs is a
+   big ring living long. A process's state is replaced at every turn and
+   lives until the process's next turn, a lap later. Round 10 processes it
+   dies young; round 10,000 it lives through young-generation collections,
+   which copy it and then promote it to the old generation. With
+   `node --trace-gc`, each ring alone in a fresh process on the VM,
+   young-generation collections took 0.13 µs a message round 10 processes,
+   and about 2.7 µs round 100,000 in the nine laps after the first: about
+   half of the bigger ring's extra cost, 9.2 µs a message against 3.8.
+5. **Spawning a process costs as much as three or four messages:** 83 ms
+   for 10,000 on the laptop and 142 on the VM, 8.3 and 14 µs each, and
+   about 9 µs each for 100,000 on the laptop. `process::spawn` itself takes
+   about 1.5 µs on the VM (a CPU profile). Most of the rest is the CPI's
+   own code making the ring: for each process, in the interpreter, a
+   mailbox, a procedure that spawns the process, and the call.
 6. **Which way the message goes round matters to the host.** A round runs
    processes in PID order, and `DECISIONS.md` specifies what follows: a
    process woken by a message sent in a round runs in that round if its PID
    is higher than the sender's, and in the next round otherwise. With PIDs
    falling round the ring every hop but one a lap waits, so a ring takes
-   (N − 1) × M + 1 rounds instead of M + 1. In the runs above each round
-   also walked every live process, so the bigger the ring, the more a
-   message cost. At N = 10,000 and M = 1, 10,000 messages took 404 ms
-   instead of 22 on the laptop, and 956 instead of 56 on the VM; a later
-   laptop run at N = 100,000 took 55,849 ms instead of 271. The CPI's own
-   round goes in ring order whichever way the PIDs go, and took 62 and
-   131 ms: slower turns, but 2 rounds. `DECISIONS.md` gives this answer
-   too: a CPI that needs a different loop writes it with `process::run`.
+   (N − 1) × M + 1 rounds instead of M + 1, and each round is a trip round
+   the CPI's loop. At N = 10,000 and M = 1, 10,000 messages took 77 ms
+   instead of 27 on the laptop, and 150 instead of 46 on the VM: about 5
+   and 10 µs more a hop. The CPI's own round goes in ring order whichever
+   way the PIDs go, and took 70 and 111 ms: slower turns, but 2 rounds.
+   `DECISIONS.md` gives this answer too: a CPI that needs a different loop
+   writes it with `process::run`.
 
-   A round now visits only the processes that can act (`PERFORMANCE.md`,
-   "A round visits only what can act"), so a falling ring pays for its
-   rounds but not for its size. On the VM, the second table's falling
-   `run-ready` column now reads 74, 89, 98 and 106 ms from N = 10 to
-   10,000, against 73, 94, 169 and 816 for the old round in the same
-   session; round 100,000 processes it takes about 1.8 s instead of 115, as
-   long as `process::run` takes. The extra rounds remain.
+   Until the round change, a round also walked every live process, so a
+   falling ring's time grew with the square of its size: at N = 10,000 the
+   laptop took 404 ms instead of 22, and at N = 100,000, 55,849 ms instead
+   of 271. It now takes 782 ms there, against 275 with PIDs rising and 678
+   under `process::run` (`PERFORMANCE.md`, "A round visits only what can
+   act").
 
    Erlang's schedulers run processes in the order they became runnable, so
    there a ring runs the same either way. Doing that here would change what
@@ -224,7 +238,8 @@ they have (finding 6).
    `DESIGN-PLAN.md`, not something this example changes.
 7. **Nothing is reclaimed.** Ended processes stay in the process table
    (`examples/life/README.md`, finding 4), about 1.5 KB each after garbage
-   collection. The benchmark spawns about 200,000 of them, so later rows run
-   with a bigger heap than earlier ones. That is why the schedulers take
-   turns within each size, rather than one scheduler timing every size and
-   then the next.
+   collection. The benchmark spawns about 200,000 of them, and the laptop's
+   run with its extra rows about 2 million, so later rows run with a bigger
+   heap than earlier ones. That is why the schedulers take turns within
+   each size, rather than one scheduler timing every size and then the
+   next.

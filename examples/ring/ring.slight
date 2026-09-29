@@ -195,7 +195,7 @@
 ; One row for each size, (N M), of a ring with PIDs rising round it: the
 ; time to spawn it, and the time to send its messages with each scheduler.
 (defun ring-table (env sizes repeats)
-    (let widths (list 7 8 10 10 14 20 11))
+    (let widths (list 7 8 11 10 14 20 11))
     (IO::print (row (append (list "N" "M" "messages" "spawn ms") (map car schedulers)) widths))
     (for-each
         (lambda (size)

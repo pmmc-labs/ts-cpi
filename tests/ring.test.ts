@@ -48,9 +48,9 @@ test('the benchmark tables, on small rings', async () => {
     (ring-table env '((3 2) (10 100)) 2)
     (order-table env '((5 4) (100 10)) 1))`, 'tables', files('ring.slight'));
     assert.deepEqual(await run(env), [
-        '      N       M  messages  spawn ms  process::run  process::run-ready  plan::run',
-        '      3       2         6         0             0                   0          0',
-        '     10     100     1,000         0             0                   0          0',
+        '      N       M   messages  spawn ms  process::run  process::run-ready  plan::run',
+        '      3       2          6         0             0                   0          0',
+        '     10     100      1,000         0             0                   0          0',
         '                                 run-ready       run-ready    process::run',
         '                               PIDs rising    PIDs falling    PIDs falling',
         '       N       M  messages   rounds     ms   rounds     ms   rounds     ms',
