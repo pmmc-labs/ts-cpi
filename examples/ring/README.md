@@ -247,10 +247,15 @@ least there: 338 ms against the VM's 394 for the ring of 10.
    there a ring runs the same either way. Doing that here would change what
    `process::run-ready` is specified to do, so it is a question for
    `DESIGN-PLAN.md`, not something this example changes.
-7. **Nothing is reclaimed.** Ended processes stay in the process table
-   (`examples/life/README.md`, finding 4), about 1.5 KB each after garbage
-   collection. The benchmark spawns about 200,000 of them, and the laptop's
-   run with its extra rows about 2 million, so later rows run with a bigger
-   heap than earlier ones. That is why the schedulers take turns within
-   each size, rather than one scheduler timing every size and then the
-   next.
+7. **Ended rings are reclaimed now.** In the runs above, every process and
+   mailbox stayed in the host's tables, about 1.2 KB for a ring process and
+   its mailbox, so later rows ran with a bigger heap than earlier ones. A
+   later laptop run with a row of 100,000 × 10 in both tables ran out of
+   heap after about 3 million processes, and its falling ring of 100,000,
+   timed near the limit, took 1,329 ms instead of about 790. The host now
+   drops an ended process once no value refers to its PID, and a mailbox
+   once none refers to its address (`DECISIONS.md`, "Reclaiming what
+   nothing can name"), so a ring the CPI has let go of costs nothing: the
+   benchmark peaks at 350 MB on the VM instead of 800. The schedulers still
+   take turns within each size, so each is timed with the image in much the
+   same state.

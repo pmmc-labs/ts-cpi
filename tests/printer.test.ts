@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { display, print } from '../src/printer.ts';
-import { sym, NIL, TRUE, FALSE, int, float, str, cons, list, newAddr, pid } from '../src/values.ts';
+import { sym, NIL, TRUE, FALSE, int, float, str, cons, list, newAddr, newPid } from '../src/values.ts';
 import { makeError } from '../src/errors.ts';
 
 describe('printer', () => {
@@ -159,7 +159,7 @@ describe('printer', () => {
 
     // PIDs
     it('prints pids', () => {
-        const p = pid(42);
+        const p = newPid(42);
         assert.equal(print(p), '#<pid 42>');
     });
 

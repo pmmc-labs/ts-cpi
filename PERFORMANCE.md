@@ -285,3 +285,28 @@ to 74, 89, 98 and 106 for N = 10, 100, 1,000 and 10,000.
   first round with a threshold, and a round sorts the processes it starts
   with once (they are mostly in PID order already), keeping a heap only for
   those woken during it.
+
+## Reclaiming what nothing can name (Sep 29, 2026)
+
+Every process and mailbox stayed in the host's tables for the life of the
+image: about 1.2 KB for a ring process and its mailbox. A laptop run of the
+ring benchmark with a row of 100,000 × 10 in both tables made about 3
+million of them and ran out of heap. The host now drops an ended or parked
+process once no value refers to its PID, and a mailbox once none refers to
+its address (`DECISIONS.md`, "Reclaiming what nothing can name").
+
+| On the ring benchmark's VM | Before | After |
+| --- | --- | --- |
+| Heap kept per ended ring process with its mailbox, from snapshots of 50,000 | 1,153 bytes; 1,309 after 10 laps | 42 and 15 bytes, in tables sized for the biggest ring |
+| Rings of 100,000 processes in a 600 MB heap | out of heap after 300,000 to 400,000 processes | 3 million processes, peak 530 MB |
+| The benchmark, peak memory | 741 to 804 MB | 353 MB |
+
+- **Messages cost what they did.** CPU time, medians of interleaved runs:
+  3,684 ms against 3,671 before for rings of 10 passing 600,000 messages
+  (eight runs each), and 4,209 against 4,143 for 1,000 processes all ready
+  in each of 721 rounds (six runs each). The runs of the two builds overlap
+  in both.
+- **A first version cost 11% on the rings of 10.** It dropped a mailbox's
+  set of waiters when the set emptied, so every message made a new set.
+  The waiters now live on the mailbox's entry, and each process keeps its
+  own mailbox's entry, so a message needs fewer table lookups than before.

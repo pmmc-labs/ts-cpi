@@ -1010,6 +1010,36 @@ test('process::watch: an address watcher gets a terminated signal, appended like
     assert.equal(print(sigArr[3]!), '(exited 5)');
 });
 
+test('process::watch: a PID watcher that has ended is still told, at its mailbox', async () => {
+    const v = await ok(`
+        (defun quit () :bye)
+        (defun waiter () (actor::recv))
+        (defun main ()
+            (let box (mailbox::create #true 10))
+            (let watcher (process::spawn quit () (environment::self) '() box))
+            (let target (process::spawn waiter () (environment::self) '(actor) #false))
+            (process::watch target watcher)
+            (process::run watcher 10)
+            (process::kill target :stop)
+            (list (process::state watcher) (mailbox::take box)))
+    `);
+    assert.equal(print(v), '((ended exited bye) (signal terminated #<pid 2> (killed stop)))');
+});
+
+test('every PID value for a process is the one process::spawn returned, in round events and signals too', async () => {
+    const v = await ok(`
+        (defun worker () 5)
+        (defun main ()
+            (let box (mailbox::create #false 10))
+            (let p (process::spawn worker () (environment::self) '() #false))
+            (process::watch p box)
+            (let events (car (process::run-ready 100 #false)))
+            (let signal (mailbox::take box))
+            (list (eq? (car (car events)) p) (eq? (car (cdr (cdr signal))) p)))
+    `);
+    assert.equal(print(v), '(#true #true)');
+});
+
 test('dead letters: a send to a non-durable mailbox whose process has ended is recorded', async () => {
     const output: string[] = [];
     const rt = new Runtime({ out: (line) => output.push(line), clock: 'virtual' });

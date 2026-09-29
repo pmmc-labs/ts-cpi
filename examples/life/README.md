@@ -85,13 +85,14 @@ combined and de-duplicated here, the most significant first.
 
 **Fixed.** PIDs were not interned, so a PID returned by `host::wait` was not
 `eq?` to the one from `process::spawn`. `pid()` now interns them like symbols
-(found by 04).
+(found by 04). Since Sep 29, 2026, each process keeps its one PID value
+instead, since a table of them kept every ended process alive.
 
 **Worth a design decision**
 1. **No hot reload from the language** (20, 08). No builtin creates, adds or replaces a binding. Every env ref derives from `environment::self`, so `process::set-env` can only swap in an env with identical bindings. SPEC-CPI section 6's hot reload cannot be exercised from control plane code. Swaps that do work pass code as values: closures in loop arguments, in messages, or in edited checkpoints. A primitive such as `(environment::bind e name value)` would close the gap. *Resolved Sep 27, 2026:* roles (`DECISIONS.md`). 20's swap A now patches the running world's `hr-step` with `set-env`, and 08's forks run one `universe` loop under rules given as roles.
 2. **Mailbox ownership is underspecified** (17, 13, 18). Spawning onto an address a live process owns succeeds silently. Unparking one parked value twice makes two live clones share one address. "Owner" becomes the newest process, so when it ends, a non-durable mailbox dead-letters sends meant for the survivors, and `mailbox::send` still returns `#true`. A send wakes every process blocked on the address (a thundering herd).
 3. **The CPI can't wait on a process.** `actor::join` and `actor::recv` are `bad-state` in the CPI, so it polls `process::state`. `host::wait` returns PIDs but not which deadline fired (11, 12).
-4. **Nothing is reclaimed** (11, 09). Ended processes stay in the process table forever, waking joiners scans the whole table, and the park table never shrinks because parked data may be unparked again.
+4. **Nothing is reclaimed** (11, 09). Ended processes stay in the process table forever, waking joiners scans the whole table, and the park table never shrinks because parked data may be unparked again. *Resolved Sep 29, 2026, for processes and mailboxes:* the host drops an ended process once no value refers to its PID, and a mailbox once none refers to its address (`DECISIONS.md`, "Reclaiming what nothing can name"), and joiners are woken from an index. The park table still only grows.
 5. **Metering is invisible** (09, 19, 15). `process::run` doesn't report ticks used, so a scheduler can only meter in whole quotas. Tick costs are implementation-defined but exact and repeatable, and 15 depends on the boundary between `(quota)` and `(exited …)` at exactly n ticks, which the spec doesn't promise.
 6. **`actor::join` has two result shapes** (11, 17): `(exited v)`, `(failed e)` or `(killed r)`, but the bare symbol `ended` for a parked or unknown target.
 7. **Timers** (12, 04): `timer::sleep 0` sets no timer, a sleep counts from the process's first run rather than from spawn, and processes can't read the clock, so drift correction needs the CPI to send the time.
