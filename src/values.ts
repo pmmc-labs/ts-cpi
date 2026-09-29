@@ -54,18 +54,12 @@ export function newAddr(): Addr {
     return { t: 'addr', id: `a${addrCounter}` };
 }
 
-const pids = new Map<number, Pid>();
-
-// Interned, like symbols: every PID value for process n is the same object,
-// so `eq?` (identity for PIDs) holds however the runtime produced it.
-export function pid(id: number): Pid {
-    let p = pids.get(id);
-    if (p === undefined) {
-        p = { t: 'pid', id };
-        pids.set(id, p);
-    }
-    return p;
-}
+// A process's PID value. The runtime makes one when it makes the process and
+// keeps it with the process, so every PID value for a process is the same
+// object and `eq?` (identity for PIDs) holds. It is not interned: a table of
+// PIDs would keep every PID, and so every ended process, alive (DECISIONS.md,
+// "Reclaiming what nothing can name").
+export const newPid = (id: number): Pid => ({ t: 'pid', id });
 
 export function list(...items: Value[]): Value {
     let out: Value = NIL;
@@ -82,6 +76,23 @@ export function listToArray(v: Value): Value[] | null {
         cur = cur.cdr;
     }
     return cur.t === 'nil' ? out : null;
+}
+
+const NO_ELEMENTS: readonly Value[] = [];
+
+// A list the machine evaluates as code, as an array of its elements. Code is
+// evaluated again and again and pairs never change, so the array is made once
+// and kept on the list's first pair. It is shared: callers must not change
+// it. Returns null if v is not a proper list, as listToArray does.
+export function codeArray(v: Value): readonly Value[] | null {
+    if (v.t === 'nil') return NO_ELEMENTS;
+    if (v.t !== 'pair') return null;
+    if (v.elements === undefined) {
+        const out = listToArray(v);
+        if (out === null) return null;
+        v.elements = out;
+    }
+    return v.elements;
 }
 
 export const isFalse = (v: Value): boolean => v === FALSE;

@@ -114,6 +114,62 @@ test('send and recv between two processes: delivery at the batch boundary', asyn
 });
 
 // ---------------------------------------------------------------------------
+// A batch's sends reserve capacity until the batch ends
+// ---------------------------------------------------------------------------
+
+test("a batch's sends reserve capacity in their mailboxes, per address, until the batch ends", async () => {
+    // box holds 2: the third send in one batch is full, though nothing has
+    // been delivered yet, and a send to another mailbox is not. Once the
+    // batch has ended and the CPI has taken one message, a send fits again.
+    const v = await ok(`
+        (defun sender (box other)
+            (actor::send box 1)
+            (actor::send box 2)
+            (let third (catch (actor::send box 3) e (error-tag e)))
+            (let elsewhere (actor::send other 4))
+            (actor::recv)
+            (let fourth (actor::send box 5))
+            (list third elsewhere fourth))
+        (defun main ()
+            (let box (mailbox::create #true 2))
+            (let other (mailbox::create #true 1))
+            (let p (process::spawn sender (list box other) (environment::self) '(actor) #false))
+            (let r1 (process::run p 1000))
+            (let sizes (list (mailbox::size box) (mailbox::size other)))
+            (mailbox::take box)
+            (mailbox::send (process::address p) :go)
+            (let r2 (process::run p 1000))
+            (list r1 sizes r2 (mailbox::take box) (mailbox::take box)))
+    `);
+    const [r1, sizes, r2, first, second] = arr(v);
+    assert.equal(print(r1!), '(blocked recv)');
+    assert.equal(print(sizes!), '(2 1)');
+    assert.equal(print(r2!), '(exited (full #true #true))');
+    assert.equal(print(first!), '2');
+    assert.equal(print(second!), '5');
+});
+
+test('actor:: requests: a wrong arity, a missing grant and an unknown action are errors', async () => {
+    const v = await ok(`
+        (defun misuse (to)
+            (list
+                (catch (actor::send to) e (error-tag e))
+                (catch (actor::recv to) e (error-tag e))
+                (catch (actor::self to) e (error-tag e))
+                (catch (actor::join) e (error-tag e))
+                (catch (actor::nope) e (error-tag e))))
+        (defun ungranted () (catch (actor::self) e (error-tag e)))
+        (defun main ()
+            (let p (process::spawn misuse (list (mailbox::create #false 1)) (environment::self) '(actor) #false))
+            (let q (process::spawn ungranted () (environment::self) '() #false))
+            (list (process::run p 1000) (process::run q 1000)))
+    `);
+    const [rp, rq] = arr(v);
+    assert.equal(print(rp!), '(exited (arity-error arity-error arity-error arity-error unknown-action))');
+    assert.equal(print(rq!), '(exited not-granted)');
+});
+
+// ---------------------------------------------------------------------------
 // (blocked recv) becoming ready when a message arrives (a direct CPI send)
 // ---------------------------------------------------------------------------
 
@@ -355,6 +411,60 @@ test('process::run-ready: a process waiting in recv for idle ms is reported once
     assert.equal(print(v), '((() 0) (() 0) (((#<pid 1> (idle))) 0) (() 0) (() 0) (() 0) (((#<pid 1> (idle))) 0))');
 });
 
+test('process::run-ready: idle reports and exits come in PID order, and a process woken before its turn runs instead', async () => {
+    // All four wait 50 ms. In the next round 1 is reported idle, 2 runs and
+    // wakes 3, which runs in the same round instead of being reported idle,
+    // and 4 runs. Then 1 stays reported, and 2 is idle once it has waited
+    // long enough again.
+    const v = await ok(`
+        (defun idler () (actor::recv))
+        (defun waker (to) (actor::recv) (actor::send to :wake) (actor::recv))
+        (defun sleeper () (actor::recv))
+        (defun main ()
+            (let box (mailbox::create #true 10))
+            (let p1 (process::spawn idler () (environment::self) '(actor) #false))
+            (let p2 (process::spawn waker (list box) (environment::self) '(actor) #false))
+            (let p3 (process::spawn sleeper () (environment::self) '(actor) box))
+            (let p4 (process::spawn sleeper () (environment::self) '(actor) #false))
+            (let r1 (process::run-ready 100 #false))
+            (host::wait 50)
+            (mailbox::send (process::address p2) :go)
+            (mailbox::send (process::address p4) :go)
+            (let r2 (process::run-ready 100 40))
+            (let r3 (process::run-ready 100 40))
+            (host::wait 50)
+            (let r4 (process::run-ready 100 40))
+            (list r1 r2 r3 r4))
+    `);
+    assert.equal(print(v), [
+        '((() 0)',
+        '(((#<pid 1> (idle)) (#<pid 3> (exited wake)) (#<pid 4> (exited go))) 0)',
+        '(() 0)',
+        '(((#<pid 2> (idle))) 0))',
+    ].join(' '));
+});
+
+test('process::run-ready: idle reports come in PID order, whichever wait began first', async () => {
+    // 2 starts waiting before 1 does, since 1 gets a message and waits again.
+    // The first two rounds have no idle threshold, or one too long to reach.
+    for (const early of ['#false', '1000']) {
+        const v = await ok(`
+            (defun waiter () (actor::recv) (actor::recv))
+            (defun main ()
+                (let p1 (process::spawn waiter () (environment::self) '(actor) #false))
+                (let p2 (process::spawn waiter () (environment::self) '(actor) #false))
+                (let r1 (process::run-ready 100 ${early}))
+                (host::wait 10)
+                (mailbox::send (process::address p1) :again)
+                (let r2 (process::run-ready 100 ${early}))
+                (host::wait 50)
+                (let r3 (process::run-ready 100 40))
+                (list r1 r2 r3))
+        `);
+        assert.equal(print(v), '((() 0) (() 0) (((#<pid 1> (idle)) (#<pid 2> (idle))) 0))', early);
+    }
+});
+
 // ---------------------------------------------------------------------------
 // plan::run (DECISIONS.md, Spec changes, 2026-09-28; DESIGN-PLAN.md)
 // ---------------------------------------------------------------------------
@@ -513,6 +623,33 @@ test('plan::run: a member woken later in the same round is not parked', async ()
             (list r1 r2))
     `);
     assert.equal(print(v), '(((#<pid 2> (exited sent))) ((#<pid 1> (exited got))))');
+});
+
+test('plan::run: a wait already reported idle can still be parked by a hibernate node', async () => {
+    // process::run-ready reports both idle. A plan with a hibernate node for
+    // their env then parks the one on a durable mailbox once it has waited
+    // 50 ms; the other's mailbox is not durable, so it waits on.
+    const v = await ok(`
+        (defun waiter () (actor::recv))
+        (defun main ()
+            (let env (environment::self))
+            (let box (mailbox::create #true 10))
+            (let p (process::spawn waiter () env '(actor) box))
+            (let q (process::spawn waiter () env '(actor) #false))
+            (let r1 (process::run-ready 100 0))
+            (let r2 (process::run-ready 100 0))
+            (let t0 (host::now))
+            (let r3 (plan::run (list (list 'round 100 #false) (list 'hibernate env 50)) 5000))
+            (list
+                r1 r2 (- (host::now) t0)
+                (car (car r3)) (car (car (cdr (car r3)))) (eq? (car (cdr (car (cdr (car r3))))) box) (cdr r3)
+                (process::state p) (process::state q)))
+    `);
+    assert.equal(print(v), [
+        '((() 0) (((#<pid 1> (idle)) (#<pid 2> (idle))) 0) 50',
+        '#<pid 1> hibernated #true ()',
+        '(parked) (blocked recv))',
+    ].join(' '));
 });
 
 test('plan::run: a hibernate node is (hibernate env idle), one per env', async () => {
@@ -871,6 +1008,36 @@ test('process::watch: an address watcher gets a terminated signal, appended like
     assert.equal((sigArr[1] as Sym).name, 'terminated');
     assert.equal(sigArr[2]!.t, 'pid');
     assert.equal(print(sigArr[3]!), '(exited 5)');
+});
+
+test('process::watch: a PID watcher that has ended is still told, at its mailbox', async () => {
+    const v = await ok(`
+        (defun quit () :bye)
+        (defun waiter () (actor::recv))
+        (defun main ()
+            (let box (mailbox::create #true 10))
+            (let watcher (process::spawn quit () (environment::self) '() box))
+            (let target (process::spawn waiter () (environment::self) '(actor) #false))
+            (process::watch target watcher)
+            (process::run watcher 10)
+            (process::kill target :stop)
+            (list (process::state watcher) (mailbox::take box)))
+    `);
+    assert.equal(print(v), '((ended exited bye) (signal terminated #<pid 2> (killed stop)))');
+});
+
+test('every PID value for a process is the one process::spawn returned, in round events and signals too', async () => {
+    const v = await ok(`
+        (defun worker () 5)
+        (defun main ()
+            (let box (mailbox::create #false 10))
+            (let p (process::spawn worker () (environment::self) '() #false))
+            (process::watch p box)
+            (let events (car (process::run-ready 100 #false)))
+            (let signal (mailbox::take box))
+            (list (eq? (car (car events)) p) (eq? (car (cdr (cdr signal))) p)))
+    `);
+    assert.equal(print(v), '(#true #true)');
 });
 
 test('dead letters: a send to a non-durable mailbox whose process has ended is recorded', async () => {

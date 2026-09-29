@@ -22,8 +22,17 @@ export type Int   = { readonly t: 'int';   readonly v: bigint };      // always 
 export type Float = { readonly t: 'float'; readonly v: number };
 export type Str   = { readonly t: 'str';   readonly v: string };
 
-// pos is reader metadata only: never part of equality.
-export type Pair  = { readonly t: 'pair';  readonly car: Value; readonly cdr: Value; readonly pos: Pos | null };
+// pos is reader metadata only: never part of equality. elements is the
+// machine's cache of the list this pair starts, as an array, filled the first
+// time it is evaluated as code (codeArray in values.ts); never part of the
+// value. Pairs never change, so it cannot go stale.
+export type Pair  = {
+    readonly t: 'pair';
+    readonly car: Value;
+    readonly cdr: Value;
+    readonly pos: Pos | null;
+    elements?: readonly Value[];
+};
 
 // A local defun's group member (SPEC-CPI section 7.2).
 export type GroupMember = { readonly name: Sym; readonly params: readonly Sym[]; readonly body: readonly Value[] };

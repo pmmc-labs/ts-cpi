@@ -6,10 +6,10 @@
 // shape (arities, and which method an action calls).
 
 import type {
-    Addr, Env, ErrorContext, ErrorValue, Pair, Scope, State, Sym, Value,
+    Addr, Env, ErrorContext, ErrorValue, Pair, Pid, Scope, State, Sym, Value,
 } from './types.ts';
 import {
-    NIL, TRUE, FALSE, sym, int, str, cons, list, listToArray, newAddr, pid,
+    NIL, TRUE, FALSE, sym, int, str, cons, list, listToArray, newAddr, newPid,
 } from './values.ts';
 import { makeError } from './errors.ts';
 import { Monitor, TemplateError, type MonitorConfig, type ViewContext } from './monitor.ts';
@@ -94,7 +94,11 @@ type EndedDetail = { readonly kind: 'exited' | 'failed' | 'killed'; readonly v: 
 
 type ProcEntry = {
     readonly pid: number;
+    // Its PID value: every PID value for it is this object (see `gone`).
+    readonly pidV: Pid;
     addr: Addr;
+    // Its mailbox's entry: a process's address never changes.
+    readonly mbox: MailboxEntry;
     envRef: { readonly t: 'env'; readonly env: Env };
     grants: ReadonlySet<string>;
     state: State;
@@ -114,7 +118,10 @@ type ProcEntry = {
     // reported it idle since (set by setStatus).
     recvSince?: number;
     idleReported?: boolean;
-    watchers: Array<{ t: 'pid'; pid: number } | { t: 'addr'; addr: Addr }>;
+    // The mailboxes told when it ends (process::watch).
+    watchers: Addr[];
+    // Its place in Runtime.readyProcs while it is ready, else -1.
+    readyAt: number;
 };
 
 // `receivers` are the processes spawned or unparked onto the mailbox that are
@@ -127,7 +134,12 @@ type MailboxEntry = {
     durable: boolean;
     capacity: number;
     queue: Value[];
+    // Messages sent to it during the batch now running, which it receives
+    // when the batch ends: their capacity is reserved at send time.
+    reserved: number;
     receivers: Set<ProcEntry>;
+    // Those of them waiting in recv, longest first; null until one waits.
+    waiters: Set<ProcEntry> | null;
     hadReceiver: boolean;
     reply?: ReplyState;
     // A faux actor's mailbox (DESIGN-PLAN.md): the host handles each message
@@ -150,7 +162,7 @@ type ReplyState = {
 };
 
 function newMailbox(durable: boolean, capacity: number): MailboxEntry {
-    return { durable, capacity, queue: [], receivers: new Set(), hadReceiver: false };
+    return { durable, capacity, queue: [], reserved: 0, receivers: new Set(), waiters: null, hadReceiver: false };
 }
 
 function isClosed(mbox: MailboxEntry): boolean {
@@ -279,15 +291,37 @@ export class Runtime implements Handlers {
     private nextParkKey = 1;
     private cpiEnv: Env | null = null;
 
+    // The processes that have neither ended nor been parked, by PID, in the
+    // order they were made. The others are in `gone`, keyed by their PID
+    // value, so each is kept while a value refers to its PID: after that
+    // nothing can ask about it, since only the host makes PIDs and nothing
+    // lists them (DECISIONS.md, "Reclaiming what nothing can name").
     private readonly procs = new Map<number, ProcEntry>();
+    private readonly gone = new WeakMap<Pid, ProcEntry>();
     // Indexes over `procs`, kept by setStatus, so delivering a message, ending
-    // a process and waiting touch only the processes concerned: the table
-    // itself keeps every process ever spawned (ended ones stay readable).
-    private readonly live = new Set<ProcEntry>();
-    private readonly recvWaiters = new Map<string, Set<ProcEntry>>();
+    // a process and waiting touch only the processes concerned.
+    //
+    // The processes that are ready, in no order: a round starts from
+    // these. Each knows its place (readyAt), so one that stops being ready is
+    // replaced by the last: cheaper than a Set, which hashes on every change.
+    private readonly readyProcs: ProcEntry[] = [];
+    // Processes waiting in recv whose wait has not been reported idle, in the
+    // order their waits began: the round's idle threshold, a pool's or a
+    // hibernate node's can come for them. And those reported idle whose
+    // mailbox is durable, which a hibernate node can still park. Kept from
+    // the first round that has a threshold (see trackWaits); until then no
+    // round has needed them.
+    private waitsTracked = false;
+    private readonly idleCandidates = new Set<ProcEntry>();
+    private readonly reportedIdle = new Set<ProcEntry>();
+    // The round being run, if one is: its turns still to come, and the PID
+    // whose turn it is.
+    private round: { readonly turns: Turns; at: number } | null = null;
     private readonly joinWaiters = new Map<number, Set<ProcEntry>>();
     private readonly sleepers = new Set<ProcEntry>();
-    private readonly mailboxes = new Map<string, MailboxEntry>();
+    // Every mailbox, by its address value: kept while a value refers to the
+    // address, as a process is by its PID. A process's entry holds its own.
+    private readonly mailboxes = new WeakMap<Addr, MailboxEntry>();
     private readonly parkTable = new Map<number, ParkedRecord>();
     private readonly deadLettersList: DeadLetter[] = [];
     private traps = new Set<string>();
@@ -356,7 +390,7 @@ export class Runtime implements Handlers {
                 // Section 12: the host stops every process when the CPI fails.
                 // DECISION: the spec does not say what stop detail those processes
                 // get; `killed` with a nil reason is the simplest choice.
-                for (const entry of [...this.live]) this.endProcess(entry, { kind: 'killed', v: NIL });
+                for (const entry of [...this.procs.values()]) this.endProcess(entry, { kind: 'killed', v: NIL });
                 return { ok: false, e: state.mode.e };
             }
             if (state.mode.m === 'host') {
@@ -400,13 +434,15 @@ export class Runtime implements Handlers {
 
     private runBatch(entry: ProcEntry, n: number): Value {
         const outbox: { addr: Addr; msg: Value }[] = [];
+        const ctx: RunCtx = { pid: entry.pid, outbox };
         let used = 0;
         // Its first step retries the recv it was woken for, so the wake-up is used.
         entry.wokenForMessage = false;
         for (;;) {
             const mode = entry.state.mode;
             if (mode.m === 'host') {
-                const result = this.dispatchHost(mode.ns, mode.action, mode.args, entry.grants, { pid: entry.pid, outbox });
+                const direct = mode.ns === 'actor' && entry.grants.has('actor') ? this.answerActor(mode.action, mode.args, ctx) : null;
+                const result = direct ?? this.dispatchHost(mode.ns, mode.action, mode.args, entry.grants, ctx);
                 // A process can't reach the requests that take real time: they are
                 // the CPI's (host::, tui::) or answered at once for a process.
                 if (result instanceof Promise) throw new Error(`internal: ${mode.ns}::${mode.action} answered a process asynchronously`);
@@ -452,11 +488,28 @@ export class Runtime implements Handlers {
         }
     }
 
+    // The actor:: requests a process makes for every message, answered without
+    // dispatchHost's table lookups. Anything else, a wrong arity included, is
+    // null here and goes through dispatchHost, so every answer is the same.
+    private answerActor(action: string, args: readonly Value[], ctx: RunCtx): ActionResult | null {
+        switch (action) {
+            case 'recv': return args.length === 0 ? this.actorRecv(ctx) : null;
+            case 'send': return args.length === 2 ? this.actorSend(ctx, args[0]!, args[1]!) : null;
+            case 'self': return args.length === 0 ? this.actorSelf(ctx) : null;
+            case 'join': return args.length === 1 ? this.actorJoin(ctx, args[0]!) : null;
+            default: return null;
+        }
+    }
+
     // The one place a process's status changes, so the indexes stay right.
     private setStatus(entry: ProcEntry, status: ProcStatus): void {
         const before = entry.status;
-        if (before === 'blocked-recv') this.recvWaiters.get(entry.addr.id)?.delete(entry);
-        if (before === 'blocked-join' && entry.joinTarget !== undefined) this.joinWaiters.get(entry.joinTarget)?.delete(entry);
+        if (before === 'ready' && status !== 'ready') this.dropReady(entry);
+        if (before === 'blocked-recv') {
+            entry.mbox.waiters!.delete(entry);
+            if (this.waitsTracked) (entry.idleReported ? this.reportedIdle : this.idleCandidates).delete(entry);
+        }
+        if (before === 'blocked-join' && entry.joinTarget !== undefined) unindex(this.joinWaiters, entry.joinTarget, entry);
         if (before === 'blocked-host') this.sleepers.delete(entry);
         entry.status = status;
         if ((status === 'ended' || status === 'parked') && this.poolOf.size > 0) {
@@ -464,15 +517,21 @@ export class Runtime implements Handlers {
             this.poolOf.delete(entry);
         }
         if (status === 'ended' || status === 'parked') {
-            this.live.delete(entry);
-            this.mailboxes.get(entry.addr.id)?.receivers.delete(entry);
-        } else {
-            this.live.add(entry);
+            this.procs.delete(entry.pid);
+            this.gone.set(entry.pidV, entry);
+            entry.mbox.receivers.delete(entry);
+        }
+        if (status === 'ready' && before !== 'ready') {
+            this.addReady(entry);
+            // Woken during a round: it takes its turn in this round if the
+            // round has not reached its PID yet, and in the next one if it has.
+            if (this.round !== null && entry.pid > this.round.at) this.round.turns.push(entry);
         }
         if (status === 'blocked-recv') {
-            indexed(this.recvWaiters, entry.addr.id).add(entry);
+            (entry.mbox.waiters ??= new Set()).add(entry);
             entry.recvSince = this.now();
             entry.idleReported = false;
+            if (this.waitsTracked) this.idleCandidates.add(entry);
         }
         if (status === 'blocked-join') {
             const mode = entry.state.mode;
@@ -481,6 +540,26 @@ export class Runtime implements Handlers {
             if (entry.joinTarget !== undefined) indexed(this.joinWaiters, entry.joinTarget).add(entry);
         }
         if (status === 'blocked-host' && entry.sleepDeadline !== undefined) this.sleepers.add(entry);
+    }
+
+    private addReady(entry: ProcEntry): void {
+        entry.readyAt = this.readyProcs.length;
+        this.readyProcs.push(entry);
+    }
+
+    private dropReady(entry: ProcEntry): void {
+        const last = this.readyProcs.pop()!;
+        if (last !== entry) {
+            this.readyProcs[entry.readyAt] = last;
+            last.readyAt = entry.readyAt;
+        }
+        entry.readyAt = -1;
+    }
+
+    // The process a PID value names: running, or kept in `gone` while the
+    // value exists.
+    private entryOf(pidV: Pid): ProcEntry | undefined {
+        return this.procs.get(pidV.id) ?? this.gone.get(pidV);
     }
 
     private bindingHashOf(env: Env): string {
@@ -492,13 +571,10 @@ export class Runtime implements Handlers {
         entry.endedDetail = detail;
         if (entry.wokenForMessage === true) {
             entry.wokenForMessage = false;
-            this.wakeRecv(entry.addr);
+            this.wakeRecv(entry.mbox);
         }
-        const sig = list(sym('signal'), sym('terminated'), pid(entry.pid), list(sym(detail.kind), detail.v));
-        for (const w of entry.watchers) {
-            const addr = w.t === 'addr' ? w.addr : this.procs.get(w.pid)?.addr;
-            if (addr !== undefined) this.deliverNow(null, addr, sig);
-        }
+        const sig = list(sym('signal'), sym('terminated'), entry.pidV, list(sym(detail.kind), detail.v));
+        for (const addr of entry.watchers) this.deliverNow(null, addr, sig);
         this.wakeJoiners(entry.pid);
     }
 
@@ -507,13 +583,10 @@ export class Runtime implements Handlers {
     }
 
     // One message wakes one receiver: the one that has waited longest in
-    // recv. `recvWaiters` is a Set, so its iteration order is wait order.
-    private wakeRecv(addr: Addr): void {
-        const mbox = this.mailboxes.get(addr.id);
-        if (mbox === undefined || mbox.queue.length === 0) return;
-        const waiters = this.recvWaiters.get(addr.id);
-        if (waiters === undefined) return;
-        for (const e of waiters) {
+    // recv. `waiters` is a Set, so its iteration order is wait order.
+    private wakeRecv(mbox: MailboxEntry): void {
+        if (mbox.queue.length === 0 || mbox.waiters === null) return;
+        for (const e of mbox.waiters) {
             this.setStatus(e, 'ready');
             e.wokenForMessage = true;
             this.wokenBySettle?.push(e);
@@ -522,15 +595,13 @@ export class Runtime implements Handlers {
     }
 
     private addReceiver(entry: ProcEntry): void {
-        const mbox = this.mailboxes.get(entry.addr.id);
-        if (mbox === undefined) return;
-        mbox.receivers.add(entry);
-        mbox.hadReceiver = true;
+        entry.mbox.receivers.add(entry);
+        entry.mbox.hadReceiver = true;
     }
 
     // Immediate delivery (mailbox::send, and watcher signals): SPEC-CPI 10.2.
     private deliverNow(fromAddr: Addr | null, addr: Addr, msg: Value): ActionResult {
-        const mbox = this.mailboxes.get(addr.id);
+        const mbox = this.mailboxes.get(addr);
         if (mbox === undefined) return T('type-error', 'unknown mailbox address', addr);
         if (mbox.faux !== undefined) {
             mbox.faux(msg);
@@ -547,7 +618,7 @@ export class Runtime implements Handlers {
         if (mbox.queue.length >= mbox.capacity) return T('full', 'mailbox is at capacity', addr);
         mbox.queue.push(msg);
         if (this.hibernated.has(addr.id)) this.hibernatedMail.add(addr.id);
-        this.wakeRecv(addr);
+        this.wakeRecv(mbox);
         return V(TRUE);
     }
 
@@ -556,8 +627,9 @@ export class Runtime implements Handlers {
     // send time; see `actorSend`), when the batch ends.
     private flushOutbox(outbox: readonly { addr: Addr; msg: Value }[]): void {
         for (const { addr, msg } of outbox) {
-            const mbox = this.mailboxes.get(addr.id);
+            const mbox = this.mailboxes.get(addr);
             if (mbox === undefined) continue;
+            mbox.reserved -= 1;
             if (mbox.faux !== undefined) {
                 mbox.faux(msg);
                 continue;
@@ -573,7 +645,10 @@ export class Runtime implements Handlers {
             mbox.queue.push(msg);
             if (this.hibernated.has(addr.id)) this.hibernatedMail.add(addr.id);
         }
-        for (const { addr } of outbox) this.wakeRecv(addr);
+        for (const { addr } of outbox) {
+            const mbox = this.mailboxes.get(addr);
+            if (mbox !== undefined) this.wakeRecv(mbox);
+        }
     }
 
     // ===========================================================================
@@ -596,11 +671,13 @@ export class Runtime implements Handlers {
         const missing = missingNamespace(envV.env, grants);
         if (missing !== null) return T('not-granted', `the environment needs ${missing}, which is not granted`, sym(missing));
         let addr: Addr;
+        let mbox: MailboxEntry | undefined;
         if (mailboxV.t === 'bool' && mailboxV.v === false) {
             addr = newAddr();
-            this.mailboxes.set(addr.id, newMailbox(false, 1000));
+            mbox = newMailbox(false, 1000);
+            this.mailboxes.set(addr, mbox);
         } else if (mailboxV.t === 'addr') {
-            const mbox = this.mailboxes.get(mailboxV.id);
+            mbox = this.mailboxes.get(mailboxV);
             if (mbox === undefined) return T('type-error', 'unknown mailbox address', mailboxV);
             if (mbox.reply !== undefined) return T('bad-state', 'a reply address cannot be received on', mailboxV);
             addr = mailboxV;
@@ -609,11 +686,13 @@ export class Runtime implements Handlers {
         }
         const pidNum = this.nextPid++;
         const state = start(fV, argsArr, envV.env);
-        const entry: ProcEntry = { pid: pidNum, addr, envRef: envV, grants, state, status: 'ready', watchers: [], ticks: 0 };
+        const entry: ProcEntry = {
+            pid: pidNum, pidV: newPid(pidNum), addr, mbox, envRef: envV, grants, state, status: 'ready', watchers: [], ticks: 0, readyAt: -1,
+        };
         this.procs.set(pidNum, entry);
-        this.live.add(entry);
+        this.addReady(entry);
         this.addReceiver(entry);
-        return V(pid(pidNum));
+        return V(entry.pidV);
     }
 
     processRun(pidV: Value, nV: Value): ActionResult {
@@ -621,7 +700,7 @@ export class Runtime implements Handlers {
         if (nV.t !== 'int') return T('type-error', 'process::run requires an integer', nV);
         const n = Number(nV.v);
         if (n < 1) return T('type-error', 'process::run requires n >= 1', nV);
-        const entry = this.procs.get(pidV.id);
+        const entry = this.entryOf(pidV);
         if (entry === undefined || entry.status !== 'ready') {
             return T('bad-state', 'process::run requires a ready process', pidV);
         }
@@ -630,8 +709,7 @@ export class Runtime implements Handlers {
 
     // (process::run-ready n idle): the same as the CPI calling process::run
     // on each process that is ready when its turn comes, in PID order, and
-    // keeping the stop reasons it must act on. `live` holds processes in the
-    // order they were made, which is PID order, and a round adds none.
+    // keeping the stop reasons it must act on.
     processRunReady(nV: Value, idleV: Value): ActionResult {
         if (nV.t !== 'int' || nV.v < 1n) return T('type-error', 'process::run-ready requires an integer n >= 1', nV);
         let idle: number | null;
@@ -642,48 +720,52 @@ export class Runtime implements Handlers {
         return V(list(list(...round.events), int(round.ready)));
     }
 
-    // One round. A member of a hibernate node is never reported idle: once
-    // it has waited `idle` ms it is parked at the end of the round, if it is
-    // still waiting then, since a message sent later in the round may have
-    // woken it.
+    // One round: in PID order, each process takes its turn, running if it is
+    // ready and checked for idleness if it waits in recv. Only processes that
+    // something can happen to take a turn, so a round costs what it runs, not
+    // what is alive: those ready when it starts, those woken before their turn
+    // comes (setStatus adds them), and those that have waited long enough for
+    // the shortest idle threshold in use.
+    //
+    // A member of a hibernate node is never reported idle: once it has waited
+    // `idle` ms it is parked at the end of the round, if it is still waiting
+    // then, since a message sent later in the round may have woken it.
     private runRound(n: number, idle: number | null, hibernate: readonly Hibernate[] = []): { events: Value[]; ready: number } {
         const now = this.now();
         const events: Value[] = [];
         const sleepy: { entry: ProcEntry; node: Hibernate }[] = [];
         const spare: ProcEntry[] = [];
-        for (const entry of this.live) {
-            if (entry.status === 'ready') {
-                const before = entry.ticks;
-                const stop = this.runBatch(entry, n);
-                const counted = this.tickRows.size === 0 ? undefined : this.tickRows.get(entry.envRef);
-                if (counted !== undefined) counted.ticks.set(counted.row, (counted.ticks.get(counted.row) ?? 0) + entry.ticks - before);
-                const why = (stop as Pair).car as Sym;
-                if (why.name === 'exited' || why.name === 'failed' || why.name === 'trap') {
-                    events.push(list(pid(entry.pid), stop));
-                }
-            } else if (entry.status === 'blocked-recv') {
-                const pool = this.poolOf.size === 0 ? undefined : this.poolOf.get(entry);
-                const node = hibernate.length === 0 ? undefined : this.hibernateNodeOf(entry, hibernate);
-                if (pool !== undefined) {
-                    // Considered once per wait, as the round's own idle report is.
-                    if (!entry.idleReported && now - entry.recvSince! >= pool.node.idle) {
-                        entry.idleReported = true;
-                        spare.push(entry);
-                    }
-                } else if (node !== undefined) {
-                    if (now - entry.recvSince! >= node.idle) sleepy.push({ entry, node });
-                } else if (idle !== null && !entry.idleReported && now - entry.recvSince! >= idle) {
-                    entry.idleReported = true;
-                    events.push(list(pid(entry.pid), IDLE));
-                }
+        const start = this.readyProcs.slice();
+        let shortest = idle ?? Infinity;
+        for (const node of hibernate) shortest = Math.min(shortest, node.idle);
+        for (const pool of this.pools.values()) shortest = Math.min(shortest, pool.node.idle);
+        if (shortest !== Infinity && !this.waitsTracked) this.trackWaits();
+        // Waits are in the order they began, so the long ones are at the front.
+        for (const entry of this.idleCandidates) {
+            if (now - entry.recvSince! < shortest) break;
+            start.push(entry);
+        }
+        if (hibernate.length > 0) {
+            for (const entry of this.reportedIdle) if (now - entry.recvSince! >= shortest) start.push(entry);
+        }
+        const turns = new Turns(start);
+        const round = { turns, at: 0 };
+        this.round = round;
+        try {
+            for (let entry = turns.pop(); entry !== undefined; entry = turns.pop()) {
+                if (entry.pid <= round.at) continue; // a second place in the queue
+                round.at = entry.pid;
+                this.takeTurn(entry, n, idle, hibernate, now, events, sleepy, spare);
             }
+        } finally {
+            this.round = null;
         }
         for (const { entry, node } of sleepy) {
             if (entry.status !== 'blocked-recv') continue;
-            const parked = this.processPark(pid(entry.pid));
+            const parked = this.processPark(entry.pidV);
             if (parked.kind !== 'value') continue;
             this.hibernated.set(entry.addr.id, { data: parked.v, envV: node.envV, addr: entry.addr });
-            events.push(list(pid(entry.pid), list(HIBERNATED, entry.addr)));
+            events.push(list(entry.pidV, list(HIBERNATED, entry.addr)));
             this.workersChanged();
         }
         if (this.pools.size > 0) {
@@ -691,9 +773,59 @@ export class Runtime implements Handlers {
             if (tended.length > 0) this.workersChanged();
             events.push(...tended);
         }
-        let ready = 0;
-        for (const entry of this.live) if (entry.status === 'ready') ready += 1;
-        return { events, ready };
+        return { events, ready: this.readyProcs.length };
+    }
+
+    // A process's turn in a round: it runs if it is ready, and if it waits in
+    // recv, the round's idle threshold, its pool's or its hibernate node's
+    // may have come.
+    private takeTurn(
+        entry: ProcEntry, n: number, idle: number | null, hibernate: readonly Hibernate[], now: number,
+        events: Value[], sleepy: { entry: ProcEntry; node: Hibernate }[], spare: ProcEntry[],
+    ): void {
+        if (entry.status === 'ready') {
+            const before = entry.ticks;
+            const stop = this.runBatch(entry, n);
+            const counted = this.tickRows.size === 0 ? undefined : this.tickRows.get(entry.envRef);
+            if (counted !== undefined) counted.ticks.set(counted.row, (counted.ticks.get(counted.row) ?? 0) + entry.ticks - before);
+            const why = (stop as Pair).car as Sym;
+            if (why.name === 'exited' || why.name === 'failed' || why.name === 'trap') {
+                events.push(list(entry.pidV, stop));
+            }
+        } else if (entry.status === 'blocked-recv') {
+            const pool = this.poolOf.size === 0 ? undefined : this.poolOf.get(entry);
+            const node = hibernate.length === 0 ? undefined : this.hibernateNodeOf(entry, hibernate);
+            if (pool !== undefined) {
+                // Considered once per wait, as the round's own idle report is.
+                if (!entry.idleReported && now - entry.recvSince! >= pool.node.idle) {
+                    this.reportIdle(entry);
+                    spare.push(entry);
+                }
+            } else if (node !== undefined) {
+                if (now - entry.recvSince! >= node.idle) sleepy.push({ entry, node });
+            } else if (idle !== null && !entry.idleReported && now - entry.recvSince! >= idle) {
+                this.reportIdle(entry);
+                events.push(list(entry.pidV, IDLE));
+            }
+        }
+    }
+
+    // Starts keeping idleCandidates, from the processes waiting in recv now,
+    // longest waits first. None has been reported idle: only a round with a
+    // threshold reports one, and this is the first.
+    private trackWaits(): void {
+        this.waitsTracked = true;
+        const waits = [...this.procs.values()].filter((e) => e.status === 'blocked-recv');
+        for (const entry of waits.sort((a, b) => a.recvSince! - b.recvSince!)) this.idleCandidates.add(entry);
+    }
+
+    // A wait reported idle, to the round or to its pool, is not reported
+    // again. Only a hibernate node can still act on it, in a later round
+    // with one for its env ref, and only on a durable mailbox.
+    private reportIdle(entry: ProcEntry): void {
+        entry.idleReported = true;
+        this.idleCandidates.delete(entry);
+        if (entry.mbox.durable) this.reportedIdle.add(entry);
     }
 
     // The hibernate node a process belongs to: the one for its env ref, if
@@ -701,7 +833,7 @@ export class Runtime implements Handlers {
     // non-durable one open, so its messages would be lost).
     private hibernateNodeOf(entry: ProcEntry, hibernate: readonly Hibernate[]): Hibernate | undefined {
         const node = hibernate.find((h) => h.envV === entry.envRef);
-        return node !== undefined && this.mailboxes.get(entry.addr.id)?.durable === true ? node : undefined;
+        return node !== undefined && entry.mbox.durable ? node : undefined;
     }
 
     // Unparks each hibernated process with mail, in the order they were
@@ -723,7 +855,7 @@ export class Runtime implements Handlers {
 
     processResume(pidV: Value, v: Value): ActionResult {
         if (pidV.t !== 'pid') return T('type-error', 'process::resume requires a pid', pidV);
-        const entry = this.procs.get(pidV.id);
+        const entry = this.entryOf(pidV);
         if (entry === undefined || entry.status !== 'trapped') {
             return T('bad-state', 'process::resume requires a trapped process', pidV);
         }
@@ -735,7 +867,7 @@ export class Runtime implements Handlers {
     processResumeThrow(pidV: Value, eV: Value): ActionResult {
         if (pidV.t !== 'pid') return T('type-error', 'process::resume-throw requires a pid', pidV);
         if (eV.t !== 'error') return T('type-error', 'process::resume-throw requires an error', eV);
-        const entry = this.procs.get(pidV.id);
+        const entry = this.entryOf(pidV);
         if (entry === undefined || entry.status !== 'trapped') {
             return T('bad-state', 'process::resume-throw requires a trapped process', pidV);
         }
@@ -746,7 +878,7 @@ export class Runtime implements Handlers {
 
     processKill(pidV: Value, reason: Value): ActionResult {
         if (pidV.t !== 'pid') return T('type-error', 'process::kill requires a pid', pidV);
-        const entry = this.procs.get(pidV.id);
+        const entry = this.entryOf(pidV);
         if (entry === undefined || entry.status === 'ended' || entry.status === 'parked') {
             return T('bad-state', 'process::kill requires a live process', pidV);
         }
@@ -756,7 +888,7 @@ export class Runtime implements Handlers {
 
     processState(pidV: Value): ActionResult {
         if (pidV.t !== 'pid') return T('type-error', 'process::state requires a pid', pidV);
-        const entry = this.procs.get(pidV.id);
+        const entry = this.entryOf(pidV);
         if (entry === undefined) return T('type-error', 'unknown pid', pidV);
         switch (entry.status) {
             case 'ready': return V(list(sym('ready')));
@@ -778,7 +910,7 @@ export class Runtime implements Handlers {
 
     processAddress(pidV: Value): ActionResult {
         if (pidV.t !== 'pid') return T('type-error', 'process::address requires a pid', pidV);
-        const entry = this.procs.get(pidV.id);
+        const entry = this.entryOf(pidV);
         if (entry === undefined || entry.status === 'ended' || entry.status === 'parked') {
             return T('bad-state', 'process has ended or is parked', pidV);
         }
@@ -787,7 +919,7 @@ export class Runtime implements Handlers {
 
     processEnv(pidV: Value): ActionResult {
         if (pidV.t !== 'pid') return T('type-error', 'process::env requires a pid', pidV);
-        const entry = this.procs.get(pidV.id);
+        const entry = this.entryOf(pidV);
         if (entry === undefined || entry.status === 'ended' || entry.status === 'parked') {
             return T('bad-state', 'process has ended or is parked', pidV);
         }
@@ -797,7 +929,7 @@ export class Runtime implements Handlers {
     processSetEnv(pidV: Value, envV: Value): ActionResult {
         if (pidV.t !== 'pid') return T('type-error', 'process::set-env requires a pid', pidV);
         if (envV.t !== 'env') return T('type-error', 'process::set-env requires an env ref', envV);
-        const entry = this.procs.get(pidV.id);
+        const entry = this.entryOf(pidV);
         if (entry === undefined || entry.status === 'ended' || entry.status === 'parked') {
             return T('bad-state', 'process has ended or is parked', pidV);
         }
@@ -810,7 +942,7 @@ export class Runtime implements Handlers {
 
     processPark(pidV: Value): ActionResult {
         if (pidV.t !== 'pid') return T('type-error', 'process::park requires a pid', pidV);
-        const entry = this.procs.get(pidV.id);
+        const entry = this.entryOf(pidV);
         if (entry === undefined || (entry.status !== 'blocked-recv' && entry.status !== 'blocked-join')) {
             return T('bad-state', 'process::park requires a process blocked in recv or join', pidV);
         }
@@ -837,29 +969,38 @@ export class Runtime implements Handlers {
         if (missing !== null) return T('not-granted', `the environment needs ${missing}, which is not granted`, sym(missing));
         const pidNum = this.nextPid++;
         const state: State = { ...rec.state, R: envV.env };
+        // The park table holds the address, so its mailbox is still here.
+        const mbox = this.mailboxes.get(rec.addr)!;
         const entry: ProcEntry = {
-            pid: pidNum, addr: rec.addr, envRef: envV, grants: new Set(rec.grants),
-            state, status: 'ready', watchers: [], ticks: 0,
+            pid: pidNum, pidV: newPid(pidNum), addr: rec.addr, mbox, envRef: envV, grants: new Set(rec.grants),
+            state, status: 'ready', watchers: [], ticks: 0, readyAt: -1,
         };
         this.procs.set(pidNum, entry);
-        this.live.add(entry);
+        this.addReady(entry);
         this.addReceiver(entry);
-        return V(pid(pidNum));
+        return V(entry.pidV);
     }
 
     processWatch(pidV: Value, watcherV: Value): ActionResult {
         if (pidV.t !== 'pid') return T('type-error', 'process::watch requires a pid', pidV);
-        const entry = this.procs.get(pidV.id);
+        const entry = this.entryOf(pidV);
         if (entry === undefined || entry.status === 'ended') return T('bad-state', 'process::watch requires a live process', pidV);
-        if (watcherV.t === 'pid') entry.watchers.push({ t: 'pid', pid: watcherV.id });
-        else if (watcherV.t === 'addr') entry.watchers.push({ t: 'addr', addr: watcherV });
-        else return T('type-error', 'process::watch requires a pid or address', watcherV);
+        // A PID watcher is told at its process's address, which never changes,
+        // so the address is looked up now.
+        if (watcherV.t === 'pid') {
+            const watcher = this.entryOf(watcherV);
+            if (watcher !== undefined) entry.watchers.push(watcher.addr);
+        } else if (watcherV.t === 'addr') {
+            entry.watchers.push(watcherV);
+        } else {
+            return T('type-error', 'process::watch requires a pid or address', watcherV);
+        }
         return V(TRUE);
     }
 
     processCheckpoint(pidV: Value): ActionResult {
         if (pidV.t !== 'pid') return T('type-error', 'process::checkpoint requires a pid', pidV);
-        const entry = this.procs.get(pidV.id);
+        const entry = this.entryOf(pidV);
         if (entry === undefined) return T('type-error', 'unknown pid', pidV);
         if (entry.status === 'parked') return T('bad-state', 'process was parked', pidV);
         return V(list(...entry.state.A.args));
@@ -867,7 +1008,7 @@ export class Runtime implements Handlers {
 
     processTicks(pidV: Value): ActionResult {
         if (pidV.t !== 'pid') return T('type-error', 'process::ticks requires a pid', pidV);
-        const entry = this.procs.get(pidV.id);
+        const entry = this.entryOf(pidV);
         if (entry === undefined) return T('type-error', 'unknown pid', pidV);
         return V(int(entry.ticks));
     }
@@ -882,7 +1023,7 @@ export class Runtime implements Handlers {
             return T('type-error', 'mailbox::create requires a positive integer capacity', capacityV);
         }
         const addr = newAddr();
-        this.mailboxes.set(addr.id, newMailbox(durableV.v, Number(capacityV.v)));
+        this.mailboxes.set(addr, newMailbox(durableV.v, Number(capacityV.v)));
         return V(addr);
     }
 
@@ -893,7 +1034,7 @@ export class Runtime implements Handlers {
 
     mailboxSize(addrV: Value): ActionResult {
         if (addrV.t !== 'addr') return T('type-error', 'mailbox::size requires an address', addrV);
-        const mbox = this.mailboxes.get(addrV.id);
+        const mbox = this.mailboxes.get(addrV);
         if (mbox === undefined) return T('type-error', 'unknown mailbox address', addrV);
         if (mbox.reply !== undefined) return T('bad-state', 'a reply address cannot be received on', addrV);
         return V(int(mbox.queue.length));
@@ -901,7 +1042,7 @@ export class Runtime implements Handlers {
 
     mailboxTake(addrV: Value): ActionResult {
         if (addrV.t !== 'addr') return T('type-error', 'mailbox::take requires an address', addrV);
-        const mbox = this.mailboxes.get(addrV.id);
+        const mbox = this.mailboxes.get(addrV);
         if (mbox === undefined) return T('type-error', 'unknown mailbox address', addrV);
         if (mbox.reply !== undefined) return T('bad-state', 'a reply address cannot be received on', addrV);
         if (mbox.queue.length === 0) return V(FALSE);
@@ -1027,7 +1168,7 @@ export class Runtime implements Handlers {
         const now = this.now();
         const due = [...this.sleepers].filter((e) => e.sleepDeadline! <= now);
         for (const e of due) this.setStatus(e, 'ready');
-        return list(...[...due, ...woken.filter((e) => e.status === 'ready')].sort((a, b) => a.pid - b.pid).map((e) => pid(e.pid)));
+        return list(...[...due, ...woken.filter((e) => e.status === 'ready')].sort((a, b) => a.pid - b.pid).map((e) => e.pidV));
     }
 
     hostSetTraps(effectsV: Value): ActionResult {
@@ -1140,7 +1281,7 @@ export class Runtime implements Handlers {
                 hibernate.push({ envV: envV!, idle: Number(idleV!.v) });
             } else if (kind.name === 'inbox') {
                 for (const a of parts.slice(1)) {
-                    if (a.t !== 'addr' || !this.mailboxes.has(a.id)) return bad('an inbox is (inbox address ...)', node);
+                    if (a.t !== 'addr' || !this.mailboxes.has(a)) return bad('an inbox is (inbox address ...)', node);
                     inboxes.push(a);
                 }
             } else {
@@ -1200,12 +1341,12 @@ export class Runtime implements Handlers {
         for (const pool of this.pools.values()) {
             for (const entry of spare) {
                 if (this.poolOf.get(entry) !== pool || entry.status !== 'blocked-recv' || pool.members.size <= pool.node.min) continue;
-                const parked = this.processPark(pid(entry.pid));
+                const parked = this.processPark(entry.pidV);
                 if (parked.kind !== 'value') continue;
                 pool.cold.unshift(parked.v);
-                events.push(list(pid(entry.pid), list(LEFT, str(pool.node.name))));
+                events.push(list(entry.pidV, list(LEFT, str(pool.node.name))));
             }
-            const backlog = this.mailboxes.get(pool.node.queue.id)!.queue.length;
+            const backlog = this.mailboxes.get(pool.node.queue)!.queue.length;
             if (backlog > 0 && pool.members.size < pool.node.max) {
                 const joined = this.joinPool(pool);
                 if (joined !== null) events.push(joined);
@@ -1232,7 +1373,7 @@ export class Runtime implements Handlers {
     private readMonitor(parts: readonly Value[]): MonitorNode | string {
         const shape = 'a monitor node is (monitor self to (rows ...) (routes ...) (bins ...) (history n) (ticks ...) (queues ...))';
         const [, self, to, ...sections] = parts;
-        const known = (a: Value | undefined): a is Addr => a !== undefined && a.t === 'addr' && this.mailboxes.has(a.id);
+        const known = (a: Value | undefined): a is Addr => a !== undefined && a.t === 'addr' && this.mailboxes.has(a);
         if (!known(self) || !known(to)) return shape;
         const strings = (xs: readonly Value[]) => xs.every((x) => x.t === 'str') ? xs.map((x) => (x as { v: string }).v) : null;
         let rows: string[] | null = null;
@@ -1301,7 +1442,7 @@ export class Runtime implements Handlers {
     private installMonitors(nodes: readonly MonitorNode[]): void {
         for (const [id, m] of this.monitors) {
             if (nodes.some((n) => n.self.id === id)) continue;
-            delete this.mailboxes.get(id)!.faux;
+            delete this.mailboxes.get(m.node.self)!.faux;
             this.monitors.delete(id);
         }
         this.tickRows = new Map();
@@ -1311,7 +1452,7 @@ export class Runtime implements Handlers {
                 installed = { monitor: new Monitor(node.config), node, ticks: new Map() };
                 this.monitors.set(node.self.id, installed);
                 const { monitor } = installed;
-                const mbox = this.mailboxes.get(node.self.id)!;
+                const mbox = this.mailboxes.get(node.self)!;
                 const send = (summary: Value | null) => { if (summary !== null) this.deliverNow(null, node.to, summary); };
                 send(monitor.summary());
                 for (const msg of mbox.queue.splice(0)) send(monitor.handle(msg));
@@ -1360,7 +1501,7 @@ export class Runtime implements Handlers {
         return {
             uptime: this.now(),
             queue: (row) => {
-                const size = (a: Addr) => this.mailboxes.get(a.id)!.queue.length;
+                const size = (a: Addr) => this.mailboxes.get(a)!.queue.length;
                 if (row === 'total') return node.queues.reduce((n, [, a]) => n + size(a), 0);
                 const q = node.queues.find(([r]) => r === row);
                 return q === undefined ? 0 : size(q[1]);
@@ -1369,7 +1510,7 @@ export class Runtime implements Handlers {
                 const envs = envsOf(row);
                 let ready = 0;
                 let waiting = 0;
-                for (const entry of this.live) {
+                for (const entry of this.procs.values()) {
                     if (!envs.has(entry.envRef)) continue;
                     if (entry.status === 'ready') ready += 1; else waiting += 1;
                 }
@@ -1385,13 +1526,13 @@ export class Runtime implements Handlers {
     private sampleQueues(): void {
         for (const { monitor, node } of this.monitors.values()) {
             if (node.queues.length === 0) continue;
-            monitor.sample(node.queues.map(([row, a]) => [row, this.mailboxes.get(a.id)!.queue.length] as const));
+            monitor.sample(node.queues.map(([row, a]) => [row, this.mailboxes.get(a)!.queue.length] as const));
         }
     }
 
     private mailEvents(inboxes: readonly Addr[]): Value[] {
         const events: Value[] = [];
-        for (const a of inboxes) if (this.mailboxes.get(a.id)!.queue.length > 0) events.push(list(a, MAIL));
+        for (const a of inboxes) if (this.mailboxes.get(a)!.queue.length > 0) events.push(list(a, MAIL));
         return events;
     }
 
@@ -1518,8 +1659,7 @@ export class Runtime implements Handlers {
     actorRecv(ctx: RunCtx): ActionResult {
         if (ctx.pid === null) return T('bad-state', 'actor:: has no meaning for the CPI');
         if (this.traps.has('recv')) return TRAP('recv', NIL);
-        const entry = this.procs.get(ctx.pid)!;
-        const mbox = this.mailboxes.get(entry.addr.id)!;
+        const mbox = this.procs.get(ctx.pid)!.mbox;
         if (mbox.queue.length === 0) return BLOCK('recv');
         return V(mbox.queue.shift()!);
     }
@@ -1528,13 +1668,15 @@ export class Runtime implements Handlers {
         if (ctx.pid === null) return T('bad-state', 'actor:: has no meaning for the CPI');
         if (addrV.t !== 'addr') return T('type-error', 'actor::send requires an address', addrV);
         if (this.traps.has('send')) return TRAP('send', list(addrV, msgV));
-        const mbox = this.mailboxes.get(addrV.id);
+        const mbox = this.mailboxes.get(addrV);
         if (mbox === undefined) return T('type-error', 'unknown mailbox address', addrV);
-        const pending = ctx.outbox === null ? 0 : ctx.outbox.filter((o) => o.addr.id === addrV.id).length;
-        if (mbox.reply === undefined && !isClosed(mbox) && mbox.queue.length + pending >= mbox.capacity) {
+        if (mbox.reply === undefined && !isClosed(mbox) && mbox.queue.length + mbox.reserved >= mbox.capacity) {
             return T('full', 'mailbox is at capacity', addrV);
         }
-        ctx.outbox?.push({ addr: addrV, msg: msgV });
+        if (ctx.outbox !== null) {
+            ctx.outbox.push({ addr: addrV, msg: msgV });
+            mbox.reserved += 1;
+        }
         return V(TRUE);
     }
 
@@ -1548,7 +1690,7 @@ export class Runtime implements Handlers {
         if (ctx.pid === null) return T('bad-state', 'actor:: has no meaning for the CPI');
         if (pidV.t !== 'pid') return T('type-error', 'actor::join requires a pid', pidV);
         if (this.traps.has('join')) return TRAP('join', list(pidV));
-        const target = this.procs.get(pidV.id);
+        const target = this.entryOf(pidV);
         if (target === undefined || target.status === 'parked') return V(sym('ended'));
         if (target.status === 'ended') return V(list(sym(target.endedDetail!.kind), target.endedDetail!.v));
         return BLOCK('join');
@@ -1627,8 +1769,8 @@ export class Runtime implements Handlers {
 
     tuiSubscribe(addrV: Value): ActionResult {
         if (this.tui === null) return T('bad-state', 'the TUI is not open');
-        if (addrV.t !== 'addr' || !this.mailboxes.has(addrV.id)) return T('type-error', 'tui::subscribe requires a mailbox address', addrV);
-        if (this.mailboxes.get(addrV.id)!.reply !== undefined) return T('bad-state', 'a reply address cannot be received on', addrV);
+        if (addrV.t !== 'addr' || !this.mailboxes.has(addrV)) return T('type-error', 'tui::subscribe requires a mailbox address', addrV);
+        if (this.mailboxes.get(addrV)!.reply !== undefined) return T('bad-state', 'a reply address cannot be received on', addrV);
         if (!this.tui.canSubscribe()) return T('bad-state', 'input is not a terminal');
         this.inputAddr = addrV;
         this.tui.setSubscribed(true);
@@ -1667,7 +1809,7 @@ export class Runtime implements Handlers {
     async httpListen(portV: Value, addrV: Value, timeoutV: Value): Promise<ActionResult> {
         if (portV.t !== 'int' || portV.v < 1n || portV.v > 65535n) return T('type-error', 'http::listen requires a port from 1 to 65535', portV);
         if (addrV.t !== 'addr') return T('type-error', 'http::listen requires a mailbox address', addrV);
-        const mbox = this.mailboxes.get(addrV.id);
+        const mbox = this.mailboxes.get(addrV);
         if (mbox === undefined) return T('type-error', 'unknown mailbox address', addrV);
         if (mbox.reply !== undefined) return T('bad-state', 'a reply address cannot be received on', addrV);
         if (timeoutV.t !== 'int' || timeoutV.v < 0n) return T('type-error', 'http::listen requires a non-negative timeout in milliseconds', timeoutV);
@@ -1708,10 +1850,10 @@ export class Runtime implements Handlers {
             port, req, arrived, delivered: false,
         };
         const replyBox: MailboxEntry = { ...newMailbox(false, 1), reply };
-        this.mailboxes.set(replyAddr.id, replyBox);
+        this.mailboxes.set(replyAddr, replyBox);
         this.openReplies.add(replyBox);
         const msg = requestMessage(replyAddr, req);
-        const target = listener === undefined ? undefined : this.mailboxes.get(listener.addr.id);
+        const target = listener === undefined ? undefined : this.mailboxes.get(listener.addr);
         if (listener === undefined || target === undefined || isClosed(target) || target.queue.length >= target.capacity) {
             this.deadLettersList.push({ from: null, to: listener?.addr ?? replyAddr, msg });
             this.answerReply(replyBox, { status: 503, headers: [], body: '' });
@@ -1780,7 +1922,7 @@ export class Runtime implements Handlers {
 
     httpSubscribeLog(addrV: Value): ActionResult {
         if (addrV.t !== 'addr') return T('type-error', 'http::subscribe-log requires a mailbox address', addrV);
-        const mbox = this.mailboxes.get(addrV.id);
+        const mbox = this.mailboxes.get(addrV);
         if (mbox === undefined) return T('type-error', 'unknown mailbox address', addrV);
         if (mbox.reply !== undefined) return T('bad-state', 'a reply address cannot be received on', addrV);
         this.servedLogAddr = addrV;
@@ -1825,6 +1967,15 @@ export class Runtime implements Handlers {
     }
 }
 
+// Takes `value` out of its set in `index`, and the set out once it is empty,
+// so the index keeps no set for every key it ever had.
+function unindex<K, V>(index: Map<K, Set<V>>, key: K, value: V): void {
+    const set = index.get(key);
+    if (set === undefined) return;
+    set.delete(value);
+    if (set.size === 0) index.delete(key);
+}
+
 function indexed<K, V>(index: Map<K, Set<V>>, key: K): Set<V> {
     let set = index.get(key);
     if (set === undefined) {
@@ -1832,4 +1983,54 @@ function indexed<K, V>(index: Map<K, Set<V>>, key: K): Set<V> {
         index.set(key, set);
     }
     return set;
+}
+
+// A round's turns, smallest PID first: the processes it starts with, sorted
+// once (they are mostly in order already), and those woken during it, in a
+// binary heap.
+class Turns {
+    private readonly start: ProcEntry[];
+    private next = 0;
+    private readonly woken: ProcEntry[] = [];
+
+    constructor(start: ProcEntry[]) {
+        this.start = start.sort((a, b) => a.pid - b.pid);
+    }
+
+    push(entry: ProcEntry): void {
+        const h = this.woken;
+        let i = h.length;
+        h.push(entry);
+        while (i > 0) {
+            const parent = (i - 1) >> 1;
+            if (h[parent]!.pid <= entry.pid) break;
+            h[i] = h[parent]!;
+            i = parent;
+        }
+        h[i] = entry;
+    }
+
+    pop(): ProcEntry | undefined {
+        const h = this.woken;
+        const first = this.start[this.next];
+        if (first !== undefined && (h.length === 0 || first.pid <= h[0]!.pid)) {
+            this.next += 1;
+            return first;
+        }
+        const top = h[0];
+        const last = h.pop();
+        if (last === undefined || h.length === 0) return top;
+        let i = 0;
+        for (;;) {
+            const left = 2 * i + 1;
+            if (left >= h.length) break;
+            const right = left + 1;
+            const child = right < h.length && h[right]!.pid < h[left]!.pid ? right : left;
+            if (h[child]!.pid >= last.pid) break;
+            h[i] = h[child]!;
+            i = child;
+        }
+        h[i] = last;
+        return top;
+    }
 }

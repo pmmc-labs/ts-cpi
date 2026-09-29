@@ -1,0 +1,285 @@
+; The ring benchmark, from Joe Armstrong's Programming Erlang:
+;
+;     Write a ring benchmark. Create N processes in a ring. Send a message
+;     round the ring M times so that a total of N * M messages get sent.
+;     Time how long this takes for different values of N and M.
+;
+; This file is a library: the ring, three ways to run it, and the timing.
+; Load it first, then bench.slight to time rings of different sizes, or
+; check.slight to check that the three ways agree:
+;
+;     node bin/cpi.ts examples/ring/ring.slight examples/ring/bench.slight
+;     node bin/cpi.ts examples/ring/ring.slight examples/ring/check.slight
+;
+; In Erlang the runtime runs the processes. Here nothing runs unless the CPI
+; runs it, so how fast a ring goes depends on how much of the running the
+; CPI hands to the host: one turn at a time (process::run), one round at a
+; time (process::run-ready), or everything until the ring has ended
+; (plan::run). README.md has the results.
+
+; ---------------------------------------------------------------------------
+; The ring (granted actor)
+; ---------------------------------------------------------------------------
+
+; Each process is given the address of the next one round the ring and the
+; number of laps. The message is a number, one more at every hop, so it
+; counts the messages sent. The head sends the first one and ends each lap;
+; every other process passes it on. Each exits after the last lap, so a
+; finished ring leaves nothing running.
+(defun ring-code ()
+    (role
+        (require actor::recv actor::send)
+
+        (defun head (next laps)
+            (actor::send next 1)
+            (head-wait next (- laps 1)))
+
+        ; After the last lap the head exits with the count: N * M.
+        (defun head-wait (next laps)
+            (let count (actor::recv))
+            (if (= laps 0)
+                count
+                (do
+                    (actor::send next (+ count 1))
+                    (head-wait next (- laps 1)))))
+
+        (defun relay (next laps)
+            (actor::send next (+ (actor::recv) 1))
+            (if (= laps 1)
+                :done
+                (relay next (- laps 1))))))
+
+; ---------------------------------------------------------------------------
+; Making a ring (in the CPI)
+; ---------------------------------------------------------------------------
+
+; Each process is given the next one's address when it is spawned, and a
+; ring is circular: whichever is spawned first needs the address of one
+; that doesn't exist yet. But a mailbox can exist before its process, so
+; the CPI makes every mailbox first, then spawns a process on each. A
+; mailbox holds one message at most: only one is ever in flight, and a
+; second would be `full`.
+;
+; Returns the PIDs in ring order, the head first. With `order` rising they
+; are spawned in ring order, so PIDs rise round the ring; with falling they
+; are spawned in reverse, so PIDs fall round it.
+(defun make-ring (env n laps order)
+    (let spawners (ring-spawners env laps (make-mailboxes n ())))
+    (if (eq? order :falling)
+        (reverse (call-each (reverse spawners)))
+        (call-each spawners)))
+
+(defun make-mailboxes (n acc)
+    (if (= n 0)
+        acc
+        (make-mailboxes (- n 1) (cons (mailbox::create #false 1) acc))))
+
+; One procedure per process, in ring order, that spawns it: the head on the
+; first mailbox and a relay on each of the others, each told the next
+; mailbox round the ring.
+(defun ring-spawners (env laps boxes)
+    (let relay (environment::lookup env 'relay))
+    (defun spawners (f bs)
+        (if (nil? bs)
+            ()
+            (do
+                (let box (car bs))
+                (let next (if (nil? (cdr bs)) (car boxes) (second bs)))
+                (cons (lambda () (process::spawn f (list next laps) env '(actor) box))
+                    (spawners relay (cdr bs))))))
+    (spawners (environment::lookup env 'head) boxes))
+
+(defun call-each (fs)
+    (map (lambda (f) (f)) fs))
+
+; ---------------------------------------------------------------------------
+; Running a ring (in the CPI)
+; ---------------------------------------------------------------------------
+
+; Three ways to run a ring's processes until the head has ended. Each
+; returns how many times the CPI went round its loop, and throws `stuck` if
+; nothing can run before then: the message was lost.
+
+(const quota 1000)   ; ticks a process may run in a turn: far more than one hop needs
+
+(defun ended? (pid)
+    (eq? (car (process::state pid)) :ended))
+
+(defun stuck (loops)
+    (throw (make-error :stuck "nothing can run, and the head has not ended" loops)))
+
+; The CPI runs every turn. A round is process::run for each process that is
+; ready when its turn comes, in the order the CPI keeps them: ring order.
+; `turns` returns whether any ran.
+(defun by-turns (pids)
+    (defun turns (ps ran)
+        (cond
+            ((nil? ps) ran)
+            ((eq? (car (process::state (car ps))) :ready)
+                (process::run (car ps) quota)
+                (turns (cdr ps) #true))
+            (#true (turns (cdr ps) ran))))
+    (defun rounds (n)
+        (let ran (turns pids #false))
+        (cond
+            ((ended? (car pids)) n)
+            (ran (rounds (+ n 1)))
+            (#true (stuck n))))
+    (rounds 1))
+
+; The host runs each round, and the CPI loops over rounds. A round of
+; process::run-ready is the same round, in PID order. It returns the events
+; and how many processes are still ready.
+(defun by-rounds (pids)
+    (defun rounds (n)
+        (let ready (second (process::run-ready quota #false)))
+        (cond
+            ((ended? (car pids)) n)
+            ((> ready 0) (rounds (+ n 1)))
+            (#true (stuck n))))
+    (rounds 1))
+
+; The host runs rounds until a process ends. With PIDs rising round the
+; ring the CPI wakes twice: when the relays exit, on the last lap, and when
+; the head does. No events means nothing can happen.
+(const plan `((round ,quota #false)))
+
+(defun by-plan (pids)
+    (defun calls (n)
+        (let events (plan::run plan #false))
+        (cond
+            ((ended? (car pids)) n)
+            ((not (nil? events)) (calls (+ n 1)))
+            (#true (stuck n))))
+    (calls 1))
+
+; Each way, with the builtin that hands the host the running.
+(const schedulers
+    (list
+        (list "process::run" by-turns)
+        (list "process::run-ready" by-rounds)
+        (list "plan::run" by-plan)))
+
+; ---------------------------------------------------------------------------
+; Timing (in the CPI)
+; ---------------------------------------------------------------------------
+
+; Makes a ring of n processes and sends the message round it `laps` times
+; with `run`. Returns (spawn-ms run-ms loops): the time to make the ring,
+; the time to send the messages, both in milliseconds of real time, and how
+; many times the CPI went round its loop. Throws unless the head counted
+; n * laps messages.
+(defun time-ring (env n laps order run)
+    (let t0 (host::now))
+    (let pids (make-ring env n laps order))
+    (let t1 (host::now))
+    (let loops (run pids))
+    (let t2 (host::now))
+    (let end (process::state (car pids)))
+    (when (not (and (eq? (second end) :exited) (eq? (third end) (* n laps))))
+        (throw (make-error :miscounted "the ring did not send N * M messages" end)))
+    (list (- t1 t0) (- t2 t1) loops))
+
+; Calls each of `timings`, procedures that time a ring, `repeats` times,
+; taking turns so each sees the image in much the same state. Returns what
+; each measured, with its fastest times.
+(defun best-of (repeats timings)
+    (let times (call-each timings))
+    (if (= repeats 1)
+        times
+        (map2 faster times (best-of (- repeats 1) timings))))
+
+(defun faster (a b)
+    (list (min (car a) (car b)) (min (second a) (second b)) (third a)))
+
+; One row for each size, (N M), of a ring with PIDs rising round it: the
+; time to spawn it, and the time to send its messages with each scheduler.
+(defun ring-table (env sizes repeats)
+    (let widths (list 7 8 11 10 14 20 11))
+    (IO::print (row (append (list "N" "M" "messages" "spawn ms") (map car schedulers)) widths))
+    (for-each
+        (lambda (size)
+            (let n (car size))
+            (let laps (second size))
+            (let timing (lambda (s) (lambda () (time-ring env n laps :rising (second s)))))
+            (let times (best-of repeats (map timing schedulers)))
+            (let spawn (minimum (map car times)))
+            (let cells (list (commas n) (commas laps) (commas (* n laps)) (commas spawn)))
+            (IO::print (row (append cells (map (lambda (t) (commas (second t))) times)) widths)))
+        sizes))
+
+; Rings run by the host's round, in PID order, with PIDs rising round the
+; ring and falling, and by the CPI's own round, which follows the ring.
+; Each is two lines of heading, the order, and the way to run it.
+(const order-runs
+    (list
+        (list "run-ready" "PIDs rising" :rising by-rounds)
+        (list "run-ready" "PIDs falling" :falling by-rounds)
+        (list "process::run" "PIDs falling" :falling by-turns)))
+
+; One row for each size, (N M), with two columns for each of order-runs:
+; how many rounds it took, and how long the messages took.
+(defun order-table (env sizes repeats)
+    (let groups (list 8 8 10 16 16 16))
+    (IO::print (row (append (list "" "" "") (map car order-runs)) groups))
+    (IO::print (row (append (list "" "" "") (map second order-runs)) groups))
+    (let widths (list 8 8 10 9 7 9 7 9 7))
+    (IO::print (row (list "N" "M" "messages" "rounds" "ms" "rounds" "ms" "rounds" "ms") widths))
+    (for-each
+        (lambda (size)
+            (let n (car size))
+            (let laps (second size))
+            (let timing (lambda (r) (lambda () (time-ring env n laps (third r) (fourth r)))))
+            (let times (best-of repeats (map timing order-runs)))
+            (let cells (list (commas n) (commas laps) (commas (* n laps))))
+            (let rounds-ms (lambda (t) (list (commas (third t)) (commas (second t)))))
+            (IO::print (row (append cells (fold append () (map rounds-ms times))) widths)))
+        sizes))
+
+; ---------------------------------------------------------------------------
+; Lists and text
+; ---------------------------------------------------------------------------
+
+(defun second (xs) (car (cdr xs)))
+(defun third (xs) (car (cdr (cdr xs))))
+(defun fourth (xs) (car (cdr (cdr (cdr xs)))))
+(defun min (a b) (if (< a b) a b))
+(defun minimum (xs) (fold min (car xs) (cdr xs)))
+
+(defun map (f xs)
+    (if (nil? xs) () (cons (f (car xs)) (map f (cdr xs)))))
+
+(defun map2 (f xs ys)
+    (if (nil? xs) () (cons (f (car xs) (car ys)) (map2 f (cdr xs) (cdr ys)))))
+
+(defun for-each (f xs)
+    (when (not (nil? xs))
+        (f (car xs))
+        (for-each f (cdr xs))))
+
+(defun fold (f acc xs)
+    (if (nil? xs) acc (fold f (f acc (car xs)) (cdr xs))))
+
+(defun reverse (xs)
+    (fold (lambda (acc x) (cons x acc)) () xs))
+
+; `cells`, strings, each right-aligned in a column of the width in `widths`.
+(defun row (cells widths)
+    (if (nil? cells)
+        ""
+        (string-append (pad (car cells) (car widths)) (row (cdr cells) (cdr widths)))))
+
+(defun pad (s width)
+    (if (< (string-length s) width) (pad (string-append " " s) width) s))
+
+; 1234567 as "1,234,567".
+(defun commas (n)
+    (if (< n 1000)
+        (value->string n)
+        (string-append (commas (/ n 1000)) "," (three-digits (% n 1000)))))
+
+(defun three-digits (n)
+    (cond
+        ((< n 10) (string-append "00" (value->string n)))
+        ((< n 100) (string-append "0" (value->string n)))
+        (#true (value->string n))))

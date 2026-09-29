@@ -191,3 +191,123 @@ The monitor node draws the view itself, from a template the CPI gives it
 once; the CPI builds no frames. Live on a terminal, the gateway served
 17,625 hello requests a second at 8 clients under the monitor, the same as
 without it within noise (17,476/s): the CPI's share of the CPU stays 0.1%.
+
+## The ring benchmark (Sep 29, 2026)
+
+`examples/ring/` times the ring benchmark from *Programming Erlang*, N
+processes passing a message round M times, run by `process::run`,
+`process::run-ready` and `plan::run`, on a cloud VM at about half the M2
+Max's speed and on a laptop; its README has the tables. In short, on the
+laptop: a message costs 2.5 µs when the host runs the rounds, and about
+twice that when the CPI runs every turn. Spawning a process costs 8.4 µs,
+most of it the CPI's own code. Because a round runs processes in PID
+order, a ring whose PIDs fall round it waits a round at all but one hop a
+lap: 10,000 messages round 10,000 processes took 404 ms instead of 22. And
+`plan::run` paid about 12 µs a round when rounds were short, which the
+VM's noise had hidden.
+
+## Actor requests and code lists (Sep 29, 2026)
+
+Two changes that leave behavior and tick counts alone, measured on the
+ring benchmark's cloud VM:
+
+- **Actor requests without the table lookup.** A process's `actor::`
+  requests go straight to their handlers, the request context is made once
+  per batch instead of once per request, and `actor::send` checks capacity
+  from a count kept on the mailbox instead of scanning the batch's outbox,
+  which made k sends in one batch cost O(k²).
+- **Code lists kept as arrays.** The machine turned each code list into an
+  array every time it evaluated it. The array is now made once and kept on
+  the list's first pair, as probed above ("The interpreter, probed").
+
+| CPU time, median of five interleaved runs | Before | Actor requests | And code lists |
+| --- | --- | --- | --- |
+| The ring: 600,000 messages under `process::run-ready` | 3,764 ms | 3,329 ms (−12%) | 3,098 ms (−18%) |
+| `tools/bench/interpreter.slight`, all of it | 6,711 ms | 6,546 ms (−2%) | 5,422 ms (−19%) |
+
+- **Each change pays where its work is.** A ring message is three host
+  requests around about 32 ticks of short code, so the actor requests gave
+  the ring most of its gain; the interpreter benchmarks make few host
+  requests and gained from the code lists.
+- **The code lists gained more than the probe's 10 to 14%**, and their runs
+  (5,361 to 5,761 ms) did not overlap those of either other build (6,124 to
+  7,285 ms). The ring's runs of one build varied by up to 23%, so its
+  figures are rougher.
+
+## A round visits only what can act (Sep 29, 2026)
+
+A round walked every live process to find the ready ones and check idle
+times ("After the hibernate node" found it growing with the blocked ones).
+The ring benchmark shows what that costs. With PIDs falling round the ring,
+a message wakes a process the round has passed, so each hop takes a round
+of its own, and each round walked the whole ring: on the laptop, 100,000
+messages round 100,000 processes took 55,849 ms, against 271 with PIDs
+rising.
+
+A round now starts from the processes that are ready and those whose wait
+in `recv` is long enough for the shortest threshold in use, sorted by PID,
+and a process woken during the round joins it if the round has not reached
+its PID. The turns, events and results are the old walk's (`DECISIONS.md`,
+the hibernate node's "Found while building", item 2).
+
+| The ring on its cloud VM, PIDs falling, wall time | Before | After |
+| --- | --- | --- |
+| 10,000 × 1, `process::run-ready` | 871 to 1,104 ms | 122 to 182 ms |
+| 10,000 × 1, `plan::run` | 992 to 1,072 ms | 127 to 150 ms |
+| 100,000 × 1, `process::run-ready` | 114,994 ms | 1,716 to 1,908 ms |
+| 100,000 × 1, `plan::run` | 118,123 ms | 2,169 to 2,248 ms |
+| 100,000 × 1, `process::run`, which runs no rounds | 1,941 ms | 1,699 to 1,811 ms |
+
+Three runs each at 10,000 processes; at 100,000, one before and two after.
+In the benchmark's own second table (best of three, both builds in one
+session), the falling `run-ready` column went from 73, 94, 169 and 816 ms
+to 74, 89, 98 and 106 for N = 10, 100, 1,000 and 10,000.
+
+- **A falling ring now pays for its rounds, not its size.** At 100,000
+  processes `process::run-ready` takes as long as the CPI's own loop in
+  ring order, where it took about 60 times as long. Each hop is still a
+  round: about 18 µs with `process::run-ready`, which goes round the CPI's
+  loop, and 22 µs with `plan::run`, against about 6 µs a message with PIDs
+  rising. On the laptop the ring of 100,000 took 782 ms after the change,
+  against 55,849 before, 678 under `process::run` and 275 with PIDs rising.
+- **Messages cost what they did.** Every message changes a process's
+  status twice, so what a status change costs shows in every ring. CPU
+  time, medians of eight interleaved runs of each build: 4,114 ms against
+  3,999 before for rings of 10 passing 600,000 messages, 200,000 under each
+  scheduler, and 4,189 against 4,370 for 1,000 processes that are all
+  ready in each of 721 rounds. The runs of the two builds overlap in both.
+  On the laptop, no figure in the benchmark's first table moved by more
+  than 4% between the runs before and after the change.
+- **A first version cost about 13% on both.** It kept the ready processes
+  and the waits in Sets, which hash on every status change and make
+  garbage, and put every turn in a heap. Now the ready processes are an
+  array in which each knows its place, the waits are kept only from the
+  first round with a threshold, and a round sorts the processes it starts
+  with once (they are mostly in PID order already), keeping a heap only for
+  those woken during it.
+
+## Reclaiming what nothing can name (Sep 29, 2026)
+
+Every process and mailbox stayed in the host's tables for the life of the
+image: about 1.2 KB for a ring process and its mailbox. A laptop run of the
+ring benchmark with a row of 100,000 × 10 in both tables made about 3
+million of them and ran out of heap. The host now drops an ended or parked
+process once no value refers to its PID, and a mailbox once none refers to
+its address (`DECISIONS.md`, "Reclaiming what nothing can name").
+
+| On the ring benchmark's VM | Before | After |
+| --- | --- | --- |
+| Heap kept per ended ring process with its mailbox, from snapshots of 50,000 | 1,153 bytes; 1,309 after 10 laps | 42 and 15 bytes, in tables sized for the biggest ring |
+| Rings of 100,000 processes in a 600 MB heap | out of heap after 300,000 to 400,000 processes | 3 million processes, peak 530 MB |
+| The benchmark, peak memory | 741 to 804 MB | 353 MB |
+| The benchmark with the laptop's extra rows, 100,000 × 1 and × 10 in both tables, in a 4 GB heap | out of heap on the laptop after about 3 million processes | all 3.8 million processes, peak 1,303 MB |
+
+- **Messages cost what they did.** CPU time, medians of interleaved runs:
+  3,684 ms against 3,671 before for rings of 10 passing 600,000 messages
+  (eight runs each), and 4,209 against 4,143 for 1,000 processes all ready
+  in each of 721 rounds (six runs each). The runs of the two builds overlap
+  in both.
+- **A first version cost 11% on the rings of 10.** It dropped a mailbox's
+  set of waiters when the set emptied, so every message made a new set.
+  The waiters now live on the mailbox's entry, and each process keeps its
+  own mailbox's entry, so a message needs fewer table lookups than before.

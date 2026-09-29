@@ -1,0 +1,41 @@
+; Checks that the three ways of running a ring agree. Load ring.slight first:
+;
+;     node bin/cpi.ts examples/ring/ring.slight examples/ring/check.slight
+;
+; Each size, (N M), runs with PIDs rising round the ring and then falling,
+; once with each scheduler. Whoever runs the turns, every process must end
+; the same way, having used the same ticks, and the head must count N * M
+; messages. How many times the CPI went round its loop differs, and is
+; printed in the order of `schedulers`: rounds for process::run and
+; process::run-ready, calls for plan::run. process::run follows the ring,
+; so it takes M + 1 rounds either way; process::run-ready goes in PID order,
+; so with PIDs falling it takes (N - 1) * M + 1, for N > 1.
+;
+; tests/ring.test.ts runs this.
+
+(const cases '((1 3) (2 3) (5 4) (40 3)))
+
+(defun main ()
+    (let env (environment::resolve (ring-code) '(actor)))
+    (for-each
+        (lambda (order)
+            (for-each (lambda (size) (check-ring env (car size) (second size) order)) cases))
+        '(rising falling)))
+
+(defun check-ring (env n laps order)
+    (let runs (map (lambda (s) (observe env n laps order (second s))) schedulers))
+    (let counted (third (second (car runs))))
+    (let same (all? (lambda (r) (eq? (third r) (third (car runs)))) runs))
+    (IO::print "N" n "M" laps order "|" counted "messages | loops" (map car runs) "|"
+        (if (and same (eq? counted (* n laps))) "agree" "DISAGREE")))
+
+; What running a ring did: how many times the CPI went round its loop, how
+; the head ended, and how every process ended and the ticks it used, as text.
+(defun observe (env n laps order run)
+    (let pids (make-ring env n laps order))
+    (let loops (run pids))
+    (let ends (map (lambda (p) (list (process::state p) (process::ticks p))) pids))
+    (list loops (process::state (car pids)) (value->string ends)))
+
+(defun all? (pred xs)
+    (or (nil? xs) (and (pred (car xs)) (all? pred (cdr xs)))))
