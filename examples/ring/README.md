@@ -151,9 +151,11 @@ more held. Two things differed: a bigger ring cost it much less extra per
 message (finding 4), and `plan::run` was slower than `process::run-ready`
 when rounds were short (finding 3).
 
-Both runs came before two interpreter changes the same day, which cut the
-ring's CPU time by about 18% on the VM without changing its ticks
-(`PERFORMANCE.md`, "Actor requests and code lists").
+Both runs came before three changes the same day. Two to the interpreter
+cut the ring's CPU time by about 18% on the VM without changing its ticks
+(`PERFORMANCE.md`, "Actor requests and code lists"), and one to the round
+makes the falling rings in the second table faster the more processes
+they have (finding 6).
 
 ## What it shows
 
@@ -199,13 +201,22 @@ ring's CPU time by about 18% on the VM without changing its ticks
    process woken by a message sent in a round runs in that round if its PID
    is higher than the sender's, and in the next round otherwise. With PIDs
    falling round the ring every hop but one a lap waits, so a ring takes
-   (N − 1) × M + 1 rounds instead of M + 1, and each round walks every live
-   process: the bigger the ring, the more a message costs. At N = 10,000
-   and M = 1, 10,000 messages took 404 ms instead of 22 on the laptop, and
-   956 instead of 56 on the VM. The CPI's own round goes in ring order
-   whichever way the PIDs go, and took 62 and 131 ms: slower turns, but 2
-   rounds. `DECISIONS.md` gives this answer too: a CPI
-   that needs a different loop writes it with `process::run`.
+   (N − 1) × M + 1 rounds instead of M + 1. In the runs above each round
+   also walked every live process, so the bigger the ring, the more a
+   message cost. At N = 10,000 and M = 1, 10,000 messages took 404 ms
+   instead of 22 on the laptop, and 956 instead of 56 on the VM; a later
+   laptop run at N = 100,000 took 55,849 ms instead of 271. The CPI's own
+   round goes in ring order whichever way the PIDs go, and took 62 and
+   131 ms: slower turns, but 2 rounds. `DECISIONS.md` gives this answer
+   too: a CPI that needs a different loop writes it with `process::run`.
+
+   A round now visits only the processes that can act (`PERFORMANCE.md`,
+   "A round visits only what can act"), so a falling ring pays for its
+   rounds but not for its size. On the VM, the second table's falling
+   `run-ready` column now reads 74, 89, 98 and 106 ms from N = 10 to
+   10,000, against 73, 94, 169 and 816 for the old round in the same
+   session; round 100,000 processes it takes about 1.8 s instead of 115, as
+   long as `process::run` takes. The extra rounds remain.
 
    Erlang's schedulers run processes in the order they became runnable, so
    there a ring runs the same either way. Doing that here would change what

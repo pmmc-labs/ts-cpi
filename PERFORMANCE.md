@@ -233,3 +233,52 @@ ring benchmark's cloud VM:
   (5,361 to 5,761 ms) did not overlap those of either other build (6,124 to
   7,285 ms). The ring's runs of one build varied by up to 23%, so its
   figures are rougher.
+
+## A round visits only what can act (Sep 29, 2026)
+
+A round walked every live process to find the ready ones and check idle
+times ("After the hibernate node" found it growing with the blocked ones).
+The ring benchmark shows what that costs. With PIDs falling round the ring,
+a message wakes a process the round has passed, so each hop takes a round
+of its own, and each round walked the whole ring: on the laptop, 100,000
+messages round 100,000 processes took 55,849 ms, against 271 with PIDs
+rising.
+
+A round now starts from the processes that are ready and those whose wait
+in `recv` is long enough for the shortest threshold in use, sorted by PID,
+and a process woken during the round joins it if the round has not reached
+its PID. The turns, events and results are the old walk's (`DECISIONS.md`,
+the hibernate node's "Found while building", item 2).
+
+| The ring on its cloud VM, PIDs falling, wall time | Before | After |
+| --- | --- | --- |
+| 10,000 × 1, `process::run-ready` | 871 to 1,104 ms | 122 to 182 ms |
+| 10,000 × 1, `plan::run` | 992 to 1,072 ms | 127 to 150 ms |
+| 100,000 × 1, `process::run-ready` | 114,994 ms | 1,716 to 1,908 ms |
+| 100,000 × 1, `plan::run` | 118,123 ms | 2,169 to 2,248 ms |
+| 100,000 × 1, `process::run`, which runs no rounds | 1,941 ms | 1,699 to 1,811 ms |
+
+Three runs each at 10,000 processes; at 100,000, one before and two after.
+In the benchmark's own second table (best of three, both builds in one
+session), the falling `run-ready` column went from 73, 94, 169 and 816 ms
+to 74, 89, 98 and 106 for N = 10, 100, 1,000 and 10,000.
+
+- **A falling ring now pays for its rounds, not its size.** At 100,000
+  processes `process::run-ready` takes as long as the CPI's own loop in
+  ring order, where it took about 60 times as long. Each hop is still a
+  round: about 18 µs with `process::run-ready`, which goes round the CPI's
+  loop, and 22 µs with `plan::run`, against about 6 µs a message with PIDs
+  rising.
+- **Messages cost what they did.** Every message changes a process's
+  status twice, so what a status change costs shows in every ring. CPU
+  time, medians of eight interleaved runs of each build: 4,114 ms against
+  3,999 before for rings of 10 passing 600,000 messages, 200,000 under each
+  scheduler, and 4,189 against 4,370 for 1,000 processes that are all
+  ready in each of 721 rounds. The runs of the two builds overlap in both.
+- **A first version cost about 13% on both.** It kept the ready processes
+  and the waits in Sets, which hash on every status change and make
+  garbage, and put every turn in a heap. Now the ready processes are an
+  array in which each knows its place, the waits are kept only from the
+  first round with a threshold, and a round sorts the processes it starts
+  with once (they are mostly in PID order already), keeping a heap only for
+  those woken during it.

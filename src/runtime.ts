@@ -115,6 +115,8 @@ type ProcEntry = {
     recvSince?: number;
     idleReported?: boolean;
     watchers: Array<{ t: 'pid'; pid: number } | { t: 'addr'; addr: Addr }>;
+    // Its place in Runtime.readyProcs while it is ready, else -1.
+    readyAt: number;
 };
 
 // `receivers` are the processes spawned or unparked onto the mailbox that are
@@ -287,6 +289,22 @@ export class Runtime implements Handlers {
     // a process and waiting touch only the processes concerned: the table
     // itself keeps every process ever spawned (ended ones stay readable).
     private readonly live = new Set<ProcEntry>();
+    // The live processes that are ready, in no order: a round starts from
+    // these. Each knows its place (readyAt), so one that stops being ready is
+    // replaced by the last: cheaper than a Set, which hashes on every change.
+    private readonly readyProcs: ProcEntry[] = [];
+    // Processes waiting in recv whose wait has not been reported idle, in the
+    // order their waits began: the round's idle threshold, a pool's or a
+    // hibernate node's can come for them. And those reported idle whose
+    // mailbox is durable, which a hibernate node can still park. Kept from
+    // the first round that has a threshold (see trackWaits); until then no
+    // round has needed them.
+    private waitsTracked = false;
+    private readonly idleCandidates = new Set<ProcEntry>();
+    private readonly reportedIdle = new Set<ProcEntry>();
+    // The round being run, if one is: its turns still to come, and the PID
+    // whose turn it is.
+    private round: { readonly turns: Turns; at: number } | null = null;
     private readonly recvWaiters = new Map<string, Set<ProcEntry>>();
     private readonly joinWaiters = new Map<number, Set<ProcEntry>>();
     private readonly sleepers = new Set<ProcEntry>();
@@ -473,7 +491,11 @@ export class Runtime implements Handlers {
     // The one place a process's status changes, so the indexes stay right.
     private setStatus(entry: ProcEntry, status: ProcStatus): void {
         const before = entry.status;
-        if (before === 'blocked-recv') this.recvWaiters.get(entry.addr.id)?.delete(entry);
+        if (before === 'ready' && status !== 'ready') this.dropReady(entry);
+        if (before === 'blocked-recv') {
+            this.recvWaiters.get(entry.addr.id)?.delete(entry);
+            if (this.waitsTracked) (entry.idleReported ? this.reportedIdle : this.idleCandidates).delete(entry);
+        }
         if (before === 'blocked-join' && entry.joinTarget !== undefined) this.joinWaiters.get(entry.joinTarget)?.delete(entry);
         if (before === 'blocked-host') this.sleepers.delete(entry);
         entry.status = status;
@@ -487,10 +509,17 @@ export class Runtime implements Handlers {
         } else {
             this.live.add(entry);
         }
+        if (status === 'ready' && before !== 'ready') {
+            this.addReady(entry);
+            // Woken during a round: it takes its turn in this round if the
+            // round has not reached its PID yet, and in the next one if it has.
+            if (this.round !== null && entry.pid > this.round.at) this.round.turns.push(entry);
+        }
         if (status === 'blocked-recv') {
             indexed(this.recvWaiters, entry.addr.id).add(entry);
             entry.recvSince = this.now();
             entry.idleReported = false;
+            if (this.waitsTracked) this.idleCandidates.add(entry);
         }
         if (status === 'blocked-join') {
             const mode = entry.state.mode;
@@ -499,6 +528,20 @@ export class Runtime implements Handlers {
             if (entry.joinTarget !== undefined) indexed(this.joinWaiters, entry.joinTarget).add(entry);
         }
         if (status === 'blocked-host' && entry.sleepDeadline !== undefined) this.sleepers.add(entry);
+    }
+
+    private addReady(entry: ProcEntry): void {
+        entry.readyAt = this.readyProcs.length;
+        this.readyProcs.push(entry);
+    }
+
+    private dropReady(entry: ProcEntry): void {
+        const last = this.readyProcs.pop()!;
+        if (last !== entry) {
+            this.readyProcs[entry.readyAt] = last;
+            last.readyAt = entry.readyAt;
+        }
+        entry.readyAt = -1;
     }
 
     private bindingHashOf(env: Env): string {
@@ -628,9 +671,10 @@ export class Runtime implements Handlers {
         }
         const pidNum = this.nextPid++;
         const state = start(fV, argsArr, envV.env);
-        const entry: ProcEntry = { pid: pidNum, addr, envRef: envV, grants, state, status: 'ready', watchers: [], ticks: 0 };
+        const entry: ProcEntry = { pid: pidNum, addr, envRef: envV, grants, state, status: 'ready', watchers: [], ticks: 0, readyAt: -1 };
         this.procs.set(pidNum, entry);
         this.live.add(entry);
+        this.addReady(entry);
         this.addReceiver(entry);
         return V(pid(pidNum));
     }
@@ -649,8 +693,7 @@ export class Runtime implements Handlers {
 
     // (process::run-ready n idle): the same as the CPI calling process::run
     // on each process that is ready when its turn comes, in PID order, and
-    // keeping the stop reasons it must act on. `live` holds processes in the
-    // order they were made, which is PID order, and a round adds none.
+    // keeping the stop reasons it must act on.
     processRunReady(nV: Value, idleV: Value): ActionResult {
         if (nV.t !== 'int' || nV.v < 1n) return T('type-error', 'process::run-ready requires an integer n >= 1', nV);
         let idle: number | null;
@@ -661,41 +704,45 @@ export class Runtime implements Handlers {
         return V(list(list(...round.events), int(round.ready)));
     }
 
-    // One round. A member of a hibernate node is never reported idle: once
-    // it has waited `idle` ms it is parked at the end of the round, if it is
-    // still waiting then, since a message sent later in the round may have
-    // woken it.
+    // One round: in PID order, each process takes its turn, running if it is
+    // ready and checked for idleness if it waits in recv. Only processes that
+    // something can happen to take a turn, so a round costs what it runs, not
+    // what is alive: those ready when it starts, those woken before their turn
+    // comes (setStatus adds them), and those that have waited long enough for
+    // the shortest idle threshold in use.
+    //
+    // A member of a hibernate node is never reported idle: once it has waited
+    // `idle` ms it is parked at the end of the round, if it is still waiting
+    // then, since a message sent later in the round may have woken it.
     private runRound(n: number, idle: number | null, hibernate: readonly Hibernate[] = []): { events: Value[]; ready: number } {
         const now = this.now();
         const events: Value[] = [];
         const sleepy: { entry: ProcEntry; node: Hibernate }[] = [];
         const spare: ProcEntry[] = [];
-        for (const entry of this.live) {
-            if (entry.status === 'ready') {
-                const before = entry.ticks;
-                const stop = this.runBatch(entry, n);
-                const counted = this.tickRows.size === 0 ? undefined : this.tickRows.get(entry.envRef);
-                if (counted !== undefined) counted.ticks.set(counted.row, (counted.ticks.get(counted.row) ?? 0) + entry.ticks - before);
-                const why = (stop as Pair).car as Sym;
-                if (why.name === 'exited' || why.name === 'failed' || why.name === 'trap') {
-                    events.push(list(pid(entry.pid), stop));
-                }
-            } else if (entry.status === 'blocked-recv') {
-                const pool = this.poolOf.size === 0 ? undefined : this.poolOf.get(entry);
-                const node = hibernate.length === 0 ? undefined : this.hibernateNodeOf(entry, hibernate);
-                if (pool !== undefined) {
-                    // Considered once per wait, as the round's own idle report is.
-                    if (!entry.idleReported && now - entry.recvSince! >= pool.node.idle) {
-                        entry.idleReported = true;
-                        spare.push(entry);
-                    }
-                } else if (node !== undefined) {
-                    if (now - entry.recvSince! >= node.idle) sleepy.push({ entry, node });
-                } else if (idle !== null && !entry.idleReported && now - entry.recvSince! >= idle) {
-                    entry.idleReported = true;
-                    events.push(list(pid(entry.pid), IDLE));
-                }
+        const start = this.readyProcs.slice();
+        let shortest = idle ?? Infinity;
+        for (const node of hibernate) shortest = Math.min(shortest, node.idle);
+        for (const pool of this.pools.values()) shortest = Math.min(shortest, pool.node.idle);
+        if (shortest !== Infinity && !this.waitsTracked) this.trackWaits();
+        // Waits are in the order they began, so the long ones are at the front.
+        for (const entry of this.idleCandidates) {
+            if (now - entry.recvSince! < shortest) break;
+            start.push(entry);
+        }
+        if (hibernate.length > 0) {
+            for (const entry of this.reportedIdle) if (now - entry.recvSince! >= shortest) start.push(entry);
+        }
+        const turns = new Turns(start);
+        const round = { turns, at: 0 };
+        this.round = round;
+        try {
+            for (let entry = turns.pop(); entry !== undefined; entry = turns.pop()) {
+                if (entry.pid <= round.at) continue; // a second place in the queue
+                round.at = entry.pid;
+                this.takeTurn(entry, n, idle, hibernate, now, events, sleepy, spare);
             }
+        } finally {
+            this.round = null;
         }
         for (const { entry, node } of sleepy) {
             if (entry.status !== 'blocked-recv') continue;
@@ -710,9 +757,59 @@ export class Runtime implements Handlers {
             if (tended.length > 0) this.workersChanged();
             events.push(...tended);
         }
-        let ready = 0;
-        for (const entry of this.live) if (entry.status === 'ready') ready += 1;
-        return { events, ready };
+        return { events, ready: this.readyProcs.length };
+    }
+
+    // A process's turn in a round: it runs if it is ready, and if it waits in
+    // recv, the round's idle threshold, its pool's or its hibernate node's
+    // may have come.
+    private takeTurn(
+        entry: ProcEntry, n: number, idle: number | null, hibernate: readonly Hibernate[], now: number,
+        events: Value[], sleepy: { entry: ProcEntry; node: Hibernate }[], spare: ProcEntry[],
+    ): void {
+        if (entry.status === 'ready') {
+            const before = entry.ticks;
+            const stop = this.runBatch(entry, n);
+            const counted = this.tickRows.size === 0 ? undefined : this.tickRows.get(entry.envRef);
+            if (counted !== undefined) counted.ticks.set(counted.row, (counted.ticks.get(counted.row) ?? 0) + entry.ticks - before);
+            const why = (stop as Pair).car as Sym;
+            if (why.name === 'exited' || why.name === 'failed' || why.name === 'trap') {
+                events.push(list(pid(entry.pid), stop));
+            }
+        } else if (entry.status === 'blocked-recv') {
+            const pool = this.poolOf.size === 0 ? undefined : this.poolOf.get(entry);
+            const node = hibernate.length === 0 ? undefined : this.hibernateNodeOf(entry, hibernate);
+            if (pool !== undefined) {
+                // Considered once per wait, as the round's own idle report is.
+                if (!entry.idleReported && now - entry.recvSince! >= pool.node.idle) {
+                    this.reportIdle(entry);
+                    spare.push(entry);
+                }
+            } else if (node !== undefined) {
+                if (now - entry.recvSince! >= node.idle) sleepy.push({ entry, node });
+            } else if (idle !== null && !entry.idleReported && now - entry.recvSince! >= idle) {
+                this.reportIdle(entry);
+                events.push(list(pid(entry.pid), IDLE));
+            }
+        }
+    }
+
+    // Starts keeping idleCandidates, from the processes waiting in recv now,
+    // longest waits first. None has been reported idle: only a round with a
+    // threshold reports one, and this is the first.
+    private trackWaits(): void {
+        this.waitsTracked = true;
+        const waits = [...this.live].filter((e) => e.status === 'blocked-recv');
+        for (const entry of waits.sort((a, b) => a.recvSince! - b.recvSince!)) this.idleCandidates.add(entry);
+    }
+
+    // A wait reported idle, to the round or to its pool, is not reported
+    // again. Only a hibernate node can still act on it, in a later round
+    // with one for its env ref, and only on a durable mailbox.
+    private reportIdle(entry: ProcEntry): void {
+        entry.idleReported = true;
+        this.idleCandidates.delete(entry);
+        if (this.mailboxes.get(entry.addr.id)?.durable === true) this.reportedIdle.add(entry);
     }
 
     // The hibernate node a process belongs to: the one for its env ref, if
@@ -858,10 +955,11 @@ export class Runtime implements Handlers {
         const state: State = { ...rec.state, R: envV.env };
         const entry: ProcEntry = {
             pid: pidNum, addr: rec.addr, envRef: envV, grants: new Set(rec.grants),
-            state, status: 'ready', watchers: [], ticks: 0,
+            state, status: 'ready', watchers: [], ticks: 0, readyAt: -1,
         };
         this.procs.set(pidNum, entry);
         this.live.add(entry);
+        this.addReady(entry);
         this.addReceiver(entry);
         return V(pid(pidNum));
     }
@@ -1853,4 +1951,54 @@ function indexed<K, V>(index: Map<K, Set<V>>, key: K): Set<V> {
         index.set(key, set);
     }
     return set;
+}
+
+// A round's turns, smallest PID first: the processes it starts with, sorted
+// once (they are mostly in order already), and those woken during it, in a
+// binary heap.
+class Turns {
+    private readonly start: ProcEntry[];
+    private next = 0;
+    private readonly woken: ProcEntry[] = [];
+
+    constructor(start: ProcEntry[]) {
+        this.start = start.sort((a, b) => a.pid - b.pid);
+    }
+
+    push(entry: ProcEntry): void {
+        const h = this.woken;
+        let i = h.length;
+        h.push(entry);
+        while (i > 0) {
+            const parent = (i - 1) >> 1;
+            if (h[parent]!.pid <= entry.pid) break;
+            h[i] = h[parent]!;
+            i = parent;
+        }
+        h[i] = entry;
+    }
+
+    pop(): ProcEntry | undefined {
+        const h = this.woken;
+        const first = this.start[this.next];
+        if (first !== undefined && (h.length === 0 || first.pid <= h[0]!.pid)) {
+            this.next += 1;
+            return first;
+        }
+        const top = h[0];
+        const last = h.pop();
+        if (last === undefined || h.length === 0) return top;
+        let i = 0;
+        for (;;) {
+            const left = 2 * i + 1;
+            if (left >= h.length) break;
+            const right = left + 1;
+            const child = right < h.length && h[right]!.pid < h[left]!.pid ? right : left;
+            if (h[child]!.pid >= last.pid) break;
+            h[i] = h[child]!;
+            i = child;
+        }
+        h[i] = last;
+        return top;
+    }
 }
