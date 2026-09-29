@@ -196,11 +196,12 @@ without it within noise (17,476/s): the CPI's share of the CPU stays 0.1%.
 
 `examples/ring/` times the ring benchmark from *Programming Erlang*, N
 processes passing a message round M times, run by `process::run`,
-`process::run-ready` and `plan::run`. It was measured on a different
-machine, a cloud VM at about half the M2 Max's speed; its README has the
-tables. In short: a message costs about 4.5 µs when the host runs the
-rounds, and twice that when the CPI runs every turn. Spawning a process
-costs 17 µs, most of it the CPI's own code. And because a round runs
-processes in PID order, a ring whose PIDs fall round it waits a round at
-all but one hop a lap: 10,000 messages round 10,000 processes took
-956 ms instead of 56.
+`process::run-ready` and `plan::run`, on a cloud VM at about half the M2
+Max's speed and on a laptop; its README has the tables. In short, on the
+laptop: a message costs 2.5 µs when the host runs the rounds, and about
+twice that when the CPI runs every turn. Spawning a process costs 8.4 µs,
+most of it the CPI's own code. Because a round runs processes in PID
+order, a ring whose PIDs fall round it waits a round at all but one hop a
+lap: 10,000 messages round 10,000 processes took 404 ms instead of 22. And
+`plan::run` paid about 12 µs a round when rounds were short, which the
+VM's noise had hidden.
