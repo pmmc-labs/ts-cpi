@@ -205,3 +205,31 @@ order, a ring whose PIDs fall round it waits a round at all but one hop a
 lap: 10,000 messages round 10,000 processes took 404 ms instead of 22. And
 `plan::run` paid about 12 µs a round when rounds were short, which the
 VM's noise had hidden.
+
+## Actor requests and code lists (Sep 29, 2026)
+
+Two changes that leave behavior and tick counts alone, measured on the
+ring benchmark's cloud VM:
+
+- **Actor requests without the table lookup.** A process's `actor::`
+  requests go straight to their handlers, the request context is made once
+  per batch instead of once per request, and `actor::send` checks capacity
+  from a count kept on the mailbox instead of scanning the batch's outbox,
+  which made k sends in one batch cost O(k²).
+- **Code lists kept as arrays.** The machine turned each code list into an
+  array every time it evaluated it. The array is now made once and kept on
+  the list's first pair, as probed above ("The interpreter, probed").
+
+| CPU time, median of five interleaved runs | Before | Actor requests | And code lists |
+| --- | --- | --- | --- |
+| The ring: 600,000 messages under `process::run-ready` | 3,764 ms | 3,329 ms (−12%) | 3,098 ms (−18%) |
+| `tools/bench/interpreter.slight`, all of it | 6,711 ms | 6,546 ms (−2%) | 5,422 ms (−19%) |
+
+- **Each change pays where its work is.** A ring message is three host
+  requests around about 32 ticks of short code, so the actor requests gave
+  the ring most of its gain; the interpreter benchmarks make few host
+  requests and gained from the code lists.
+- **The code lists gained more than the probe's 10 to 14%**, and their runs
+  (5,361 to 5,761 ms) did not overlap those of either other build (6,124 to
+  7,285 ms). The ring's runs of one build varied by up to 23%, so its
+  figures are rougher.

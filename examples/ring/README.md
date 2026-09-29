@@ -151,6 +151,10 @@ more held. Two things differed: a bigger ring cost it much less extra per
 message (finding 4), and `plan::run` was slower than `process::run-ready`
 when rounds were short (finding 3).
 
+Both runs came before two interpreter changes the same day, which cut the
+ring's CPU time by about 18% on the VM without changing its ticks
+(`PERFORMANCE.md`, "Actor requests and code lists").
+
 ## What it shows
 
 1. **A message costs 2.5 µs on the laptop and 4.6 on the VM when the host
