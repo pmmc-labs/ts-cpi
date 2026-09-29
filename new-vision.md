@@ -2,7 +2,7 @@
 
 Sep 29, 2026 · First draft · Revises the earlier `VISION.md` (`design-002-ish/`) and narrows `../../design-xxx/DESIGN-001.md`
 
-Sep 29, 2026 · Section 5, on judgment and models, added
+Sep 29, 2026 · Section 5, on judgment and models, added, then updated from OpenJev and Verdict
 
 The earlier vision described a personal computational estate: thousands of durable actors spread across a laptop, an always-on box and rented cloud cores, placed by cost, latency and trust. DESIGN-001 set out to build toward it and to bring in the best of the earlier prototypes. The result is a coherent design, and also a research program: the estate, tick-exact JIT tapes, a mergeable image and plans offloaded by equivalence are each a thesis on their own.
 
@@ -32,7 +32,7 @@ Three things came out of that work:
 
 ## 3. What it is for
 
-**Agents.** An agent is an actor whose behavior includes judgment: a model consulted through a host request, the way the host provides time. Most of its judgments are closed decisions, which a small decision model makes; a generative model writes and plans when a decision says it's worth it (section 5). slight gives an agent a combination that agent frameworks rarely offer:
+**Agents.** An agent is an actor whose behavior includes judgment: a model consulted through a host request, the way the host provides time. Most of its judgments are closed decisions, which a fast decision model makes; a generative model writes and plans when a decision says it's worth it (section 5). slight gives an agent a combination that agent frameworks rarely offer:
 
 - only the authority it is granted, with no ambient access to anything;
 - a budget on what it may spend, counted by the capability that spends it;
@@ -86,7 +86,7 @@ Time is real, and it is an input. Today the runtime reads the clock through one 
 
 An agent's judgment comes from models, consulted through host requests like time or storage. Two kinds of model do different jobs, and the system treats them differently.
 
-**Decision models** answer closed questions. Given text or program state and a question declared in advance, a decision model returns a typed answer with probabilities, never prose: the probability that the answer to a yes/no question is yes, which of a declared set of options applies, or where an input falls on an ordered rubric. TypeSafe's Jev, launched in September 2026, is built only for this: it calls the three kinds Noul, Choice and Score, and trains its probabilities to be calibrated. A small local model can follow the same pattern by scoring the declared options with log-probabilities, though without that calibration training.
+**Decision models** answer closed questions. Given text or program state and a question declared in advance, a decision model returns a typed answer with probabilities, never prose: the probability that the answer to a yes/no question is yes, which of a declared set of options applies, or where an input falls on an ordered rubric. TypeSafe's Jev, launched on September 15, 2026, is built only for this: it calls the three kinds Noul, Choice and Score, and is trained so that its probabilities are calibrated. Open implementations followed within two weeks: OpenJev serves open models behind Jev's wire protocol, and Verdict is a 151M-parameter encoder trained for calibrated decisions.
 
 **Generative models** answer open questions. They write, summarize, extract and plan, and their answers are text or code.
 
@@ -94,7 +94,7 @@ Most of an agent's judgments are decisions: which of these, how urgent, whether 
 
 - **Closed answers.** Every possible answer is declared in the request, so the model can only choose among the options the actor listed. An injected prompt can make it choose badly, but it can't make it act outside the list or write code. Model output gets the same discipline as a grant.
 - **Small journal entries.** A key, its probabilities and a confidence take a few tens of bytes. Replay is exact, and a decision's provenance reads naturally, such as "filed as `later` at 0.62".
-- **Calibration becomes policy.** Above one threshold the actor acts on its own. In the middle it holds the action as data for a person, and below it asks a generative model. Most decisions pass in a fraction of a second, and the doubtful ones go to someone who can judge.
+- **Probabilities become policy.** Above one threshold the actor acts on its own. In the middle, or when the model abstains, it holds the action as data for a person, and below it asks a generative model. Most decisions pass in a fraction of a second, and the doubtful ones go to someone who can judge.
 - **Reflexes.** Triage, routing and deciding what deserves to wake are reflexes, not deliberation: the "AI hat" the earlier vision gave its always-on box. A score can even feed the CPI's choice of which parked actor to wake first, and scheduling stays deterministic because the answers are journaled inputs.
 - **Distributions for simulations.** A simulated agent samples from the returned distribution with a seeded random source, so the simulation can rerun with another seed without calling the model again.
 - **Comparison by replay.** Swap the backend and replay the journaled questions to see where two models decide differently. Similar accuracy can hide different decisions, and the journal shows which ones.
@@ -114,19 +114,34 @@ In an actor, a decision reads like a `case` whose test is a judgment. The namesp
     (triage owner))
 ```
 
+Questions that depend on each other need nothing special: the actor asks them in order and puts the earlier answers into the state for the later ones.
+
 Generative models do what decisions can't, such as the research agent's summaries, and a decision says when they are worth calling. Their answers make larger journal entries, a streamed answer is many inputs, and code they write runs in its own image.
 
 ### The namespaces
 
-There are two host namespaces, one for decisions and one for generation, and their names and signatures are left to a proposal. The decision namespace has one action for each kind of question and returns typed values. Behind each namespace the backend can be swapped:
+There are two host namespaces, one for decisions and one for generation, and their names and signatures are left to a proposal. The decision namespace has one action for each kind of question and returns typed values, with abstention as an answer of its own. Jev's wire protocol is a good model for it: a state and named questions go in, and typed answers come out (`POST /v1/systemone`). OpenJev already speaks that protocol, so one handler can reach every backend except the in-process and scripted ones by changing a URL. Behind each namespace the backend can be swapped:
 
-- **Hosted,** such as Jev over its API. It is fast and calibrated, but its weights are closed and it runs only as a hosted service, so what it is asked leaves the machine and nothing works offline.
-- **Local,** a small model on the owner's machine following the same pattern. This is the default for private data.
+- **Hosted:** Jev, or OpenJev as hosted by Codiv. What is asked leaves the machine, and nothing works offline.
+- **Local and large:** an OpenJev server running DiffusionGemma 26B-A4B (26 billion parameters, 4 billion active), through MLX on Apple silicon or vLLM on an NVIDIA GPU. On a Mac it needs about 16 GB of memory to load, more in service, and answers three questions in 0.2 to 0.4 seconds on an M3 Ultra or M4 Max. It also answers questions about images, and the same server generates text, so one local server can back both namespaces.
+- **Local and small:** an encoder such as Verdict (151M parameters) or Laya (421M). Verdict takes about 35 ms a question on a single WebAssembly thread, and it runs in JavaScript through ONNX, so it could live inside the host process.
 - **Scripted,** for tests, like the headless terminal and the scripted HTTP requests.
 
-The journal records which backend and model answered (a local model by the hash of its weights) and what was asked, so it also shows exactly what left the machine. Grants decide which actors may send anything off the machine at all, and budgets count calls on the capability. If a hosted service goes away, past decisions stay replayable, and new ones fall back to another backend.
+The journal records which backend and model answered (a local model by the hash of its weights), the settings that shaped the answer, and what was asked, so it also shows exactly what left the machine. Grants decide which actors may send anything off the machine at all, and budgets count calls on the capability. If a hosted service goes away, past decisions stay replayable, and new ones fall back to another backend.
 
-Two cautions. Calibration holds across many answers, not for any one of them: "0.8" means right about 80% of the time over many decisions. And a hosted model's context limits and repeatability are for its vendor to state; for replay, repeatability doesn't matter, because the answers are in the journal.
+### Choosing a model
+
+The models differ far more in quality than in speed. On TypeSafe's 337 public evaluation cases, the Verdict repository reports 48% accuracy for Verdict, 88% for DiffusionGemma and 91% for Jev. Its own tables show the small encoder doing well on narrow, well-defined choices, such as picking a tool or an intent, especially after fine-tuning, and badly on open judgments, such as spotting phishing or a jailbreak. So a backend is chosen per question, not per image, and the journal is where the choice is checked: replaying the same questions against two backends shows where they differ on the owner's own data.
+
+A decision the image makes again and again can also be learned. Every case a person settled after an escalation is a labeled example in the journal, and the Verdict repository reports that on narrow workflows a plain classifier trained on examples came within two points of Jev's published accuracy. Training a local model from the journal is a library, not part of the runtime.
+
+Three cautions:
+
+- **A confidence means different things in different models.** Jev's is trained against its accuracy. Verdict's probabilities are scaled by a temperature fitted for each number of options. OpenJev reports one minus the normalized entropy of the answer's distribution, which measures certainty, not accuracy. So thresholds belong to a model, and are set from its record in the journal.
+- **Calibration holds across many answers, not for any one of them.** "0.8" means right about 80% of the time over many decisions.
+- **Answers repeat only on one setup.** OpenJev seeds each read from a hash of the request, so that the same request gets the same answer, but precision and kernels move the probabilities: by up to 0.055 between two runtimes of the same model. Replay therefore always uses the journal and never asks again.
+
+Sources: [OpenJev](https://github.com/razorback16/openjev) and [Verdict](https://github.com/Heman10x-NGU/Verdict-open-jev), read on September 29, 2026.
 
 ## 6. Four guarantees
 
@@ -175,7 +190,7 @@ Compared with DESIGN-001 and the prototype as they stand:
 | The CPI, the scheduler and plans | Kept, done for now | No more scheduling work unless a use needs it. |
 | Metering | **Loosened** | One tick per step, with counts that may change between versions. No cost tables, and no tick-exactness for a future JIT, which only needs to be deterministic. |
 | Agent budgets | **On capabilities** | An actor that holds a model namespace, counts what is spent, and can be cut off. |
-| Models | **Two kinds, behind host namespaces** | Decisions (closed, typed, calibrated) and generation, each with swappable backends: hosted, local and scripted. Section 5. |
+| Models | **Two kinds, behind host namespaces** | Decisions (closed and typed, with probabilities) and generation, each with swappable backends: hosted, local and scripted. Section 5. |
 | Per-actor durability protocols: acknowledgment with checkpoint, exactly-once bookkeeping | **Loosened** | Not needed for local durability. Mailboxes that outlive their process stay; parking and hibernation stay as memory features. |
 | Merging and sharing | Later, on top | Irmin or another model, operating on values and documents, not on running state. |
 | Moving computation, placement, the estate | Later, on top | An image moves as a snapshot and journal; an actor moves as code by hash and loop arguments. |
@@ -205,7 +220,7 @@ The focus needs five things that aren't there yet:
 - **State as plain data.** Parked continuations live in a runtime table under an integer key, addresses are counters, and values have no canonical encoding. A snapshot needs all of it as plain data with stable identities.
 - **The journal.** The handler classification, recording, replay with effects suppressed, and time that advances only at journaled points.
 - **Containment.** Today a process granted nothing can crash the whole image within a 1,000-tick quota. With a 1 GB heap, 26 doublings of a list with `append` exhaust it and the image aborts. The 29th doubling of a string with `string-append` passes V8's length limit, and the `RangeError` escapes uncaught.
-- **The model namespaces** of section 5, with budgets, and a separate image for code nobody trusts.
+- **The model namespaces** of section 5, with budgets; an outbound HTTP client, which the host doesn't have yet; and a separate image for code nobody trusts.
 - **Provenance tools:** replay with tracing, and a way to ask for an output's causes.
 
 ### The arithmetic, at human scale
@@ -220,7 +235,7 @@ The focus needs five things that aren't there yet:
 1. **Journal and replay.** Classify the handlers, record inputs, replay with effects suppressed, and make time advance only at journaled points (a spec proposal first). The acceptance test: record a Life runner session with real time and keystrokes, replay it, and compare every frame exactly; then do the same for a gateway session under load.
 2. **Snapshots and recovery.** Parked state and addresses as plain data, a canonical encoding, snapshots at quiet points, and recovery that re-establishes listeners and subscriptions. The acceptance test: kill an image with `kill -9` mid-run, restore it, and finish with the same output as a run that was never interrupted.
 3. **Containment.** Caps on † operations and host exceptions as errors (both spec proposals), and the journaled heap check. The acceptance test: the doubling programs fail only their own process, and a slow leak is killed at the same point on replay.
-4. **Agents.** The decision and generation namespaces of section 5, each with a scripted backend for tests, a local one and a hosted one; budgets on the capability; thresholds that act, ask a person or escalate; pending actions awaiting approval; and code from a generative model run in its own image.
+4. **Agents.** An outbound HTTP client in the host, then the decision and generation namespaces of section 5, each with a scripted backend for tests, a local one and a hosted one; budgets on the capability; thresholds that act, ask a person or escalate; pending actions awaiting approval; and code from a generative model run in its own image.
 5. **Provenance.** Given an output, replay with tracing and show its causes.
 6. **The flagship:** the research agent of section 3.
 
@@ -240,7 +255,7 @@ Open questions:
 2. Where snapshots and journals live: in files, in SQLite, or as content-addressed objects. The choice meets the sharing layer later.
 3. The shape of a provenance query. Causes at the level of messages are the default; tracking individual values is exceptional.
 4. How a person approves an agent's pending actions: through a trap to the CPI, or through a mailbox that a user interface reads.
-5. The model namespaces: their names and signatures, how a generative model's streamed answer is journaled (each piece is an input), how budgets are expressed, and whether a local decision model is calibrated well enough to be the default for private data.
+5. The model namespaces: their names and signatures, how a generative model's streamed answer is journaled (each piece is an input), how budgets are expressed, and which local decision model is the default for private data: a small encoder is fast but weak on open judgments, and DiffusionGemma is strong but needs about 16 GB.
 6. Whether recovery is an explicit act or happens at start-up. The earlier vision says restoring is explicit, never a reflex of the host.
 7. What the owner decides, and how, before a model's code runs in its own image.
 
