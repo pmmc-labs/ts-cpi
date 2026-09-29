@@ -8,7 +8,7 @@
 import type {
     Checkpoint, Closure, Env, ErrorValue, Frame, GroupMember, Head, Kont, Mode, Scope, Site, State, Sym, Value,
 } from './types.ts';
-import { FALSE, NIL, TRUE, isFalse, listToArray } from './values.ts';
+import { FALSE, NIL, TRUE, codeArray, isFalse, listToArray } from './values.ts';
 import { makeError } from './errors.ts';
 import { CORE_ARITY, isCoreName, isHostName } from './names.ts';
 import { CORE } from './core.ts';
@@ -82,7 +82,7 @@ function evalDo(forms: readonly Value[], scope: Scope, K: Kont, R: Env, A: Check
     const first = forms[0]!;
 
     if (isFormHead(first, 'let')) {
-        const arr = listToArray(first)!; // [sym('let'), name, expr]
+        const arr = codeArray(first)!; // [sym('let'), name, expr]
         const name = arr[1] as Sym;
         const expr = arr[2]!;
         const rest = forms.slice(1);
@@ -100,9 +100,9 @@ function evalDo(forms: readonly Value[], scope: Scope, K: Kont, R: Env, A: Check
         let i = 0;
         const group: GroupMember[] = [];
         while (i < forms.length && isFormHead(forms[i]!, 'defun')) {
-            const arr = listToArray(forms[i]!)!; // [sym('defun'), name, paramsForm, ...body]
+            const arr = codeArray(forms[i]!)!; // [sym('defun'), name, paramsForm, ...body]
             const name = arr[1] as Sym;
-            const params = listToArray(arr[2]!) as Sym[];
+            const params = codeArray(arr[2]!) as readonly Sym[];
             const body = arr.slice(3);
             group.push({ name, params, body });
             i += 1;
@@ -132,7 +132,7 @@ function evalDo(forms: readonly Value[], scope: Scope, K: Kont, R: Env, A: Check
 
 function evalCond(clauses: readonly Value[], scope: Scope, K: Kont, R: Env, A: Checkpoint, site: Site): State {
     if (clauses.length === 0) return { mode: { m: 'ret', v: NIL }, K, R, A };
-    const arr = listToArray(clauses[0]!)!; // [test, ...body]
+    const arr = codeArray(clauses[0]!)!; // [test, ...body]
     const test = arr[0]!;
     const body = arr.slice(1);
     const rest = clauses.slice(1);
@@ -270,7 +270,7 @@ function stepEval(x: Value, scope: Scope, site: Site, K: Kont, R: Env, A: Checkp
         return { mode: { m: 'ret', v: x }, K, R, A };
     }
 
-    const elements = listToArray(x)!;
+    const elements = codeArray(x)!;
     const head = elements[0]!;
 
     if (head.t === 'sym') {
@@ -279,7 +279,7 @@ function stepEval(x: Value, scope: Scope, site: Site, K: Kont, R: Env, A: Checkp
                 return { mode: { m: 'ret', v: elements[1]! }, K, R, A };
             case 'lambda': {
                 const paramsForm = elements[1]!;
-                const params = listToArray(paramsForm) as Sym[];
+                const params = codeArray(paramsForm) as readonly Sym[];
                 const body = elements.slice(2);
                 const closure: Closure = { t: 'closure', name: null, params, body, scope, group: null };
                 return { mode: { m: 'ret', v: closure }, K, R, A };

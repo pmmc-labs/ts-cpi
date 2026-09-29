@@ -5,7 +5,7 @@ import type { Closure, Env, Frame, State, Sym, Value } from '../src/types.ts';
 import { read } from '../src/reader.ts';
 import { expand } from '../src/expander.ts';
 import { emptyEnv, fromBindings } from '../src/env.ts';
-import { int, listToArray, sym, NIL } from '../src/values.ts';
+import { codeArray, cons, int, listToArray, sym, NIL } from '../src/values.ts';
 import { makeError } from '../src/errors.ts';
 import { print } from '../src/printer.ts';
 import { kontDepth, resume, resumeThrow, resumeValue, run, start, startExpr, step } from '../src/machine.ts';
@@ -347,4 +347,20 @@ test('resume splices frames in order: frames[0] ends up on top', () => {
     ];
     const s2 = run(resume(s, frames), 10);
     assert.equal(print(done(s2)), '3');
+});
+
+// ---------------------------------------------------------------------------
+// Code lists kept as arrays (codeArray)
+// ---------------------------------------------------------------------------
+
+test('codeArray: a code list becomes an array once, kept on its first pair', () => {
+    const [form] = read('(f 1 2)', 'test');
+    const elements = codeArray(form!)!;
+    assert.deepEqual(elements.map((v) => print(v)), ['f', '1', '2']);
+    assert.equal(codeArray(form!), elements, 'the same array the second time');
+    assert.notEqual(listToArray(form!), elements, 'listToArray still makes a fresh one');
+    assert.deepEqual(codeArray(NIL), []);
+    const improper = cons(sym('a'), sym('b'));
+    assert.equal(codeArray(improper), null);
+    assert.equal(improper.elements, undefined, 'nothing kept for an improper list');
 });

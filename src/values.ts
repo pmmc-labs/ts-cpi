@@ -84,4 +84,21 @@ export function listToArray(v: Value): Value[] | null {
     return cur.t === 'nil' ? out : null;
 }
 
+const NO_ELEMENTS: readonly Value[] = [];
+
+// A list the machine evaluates as code, as an array of its elements. Code is
+// evaluated again and again and pairs never change, so the array is made once
+// and kept on the list's first pair. It is shared: callers must not change
+// it. Returns null if v is not a proper list, as listToArray does.
+export function codeArray(v: Value): readonly Value[] | null {
+    if (v.t === 'nil') return NO_ELEMENTS;
+    if (v.t !== 'pair') return null;
+    if (v.elements === undefined) {
+        const out = listToArray(v);
+        if (out === null) return null;
+        v.elements = out;
+    }
+    return v.elements;
+}
+
 export const isFalse = (v: Value): boolean => v === FALSE;
