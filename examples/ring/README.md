@@ -161,6 +161,11 @@ And a second run with only 100,000 × 1 in the first table:
 100,000       1    100,000       910           581                 215        229
 ```
 
+A later run of the same code, with 100,000 × 1 in both tables, came within
+8% of the first table's figures, most of them a little slower, except
+`run-ready`'s 100,000 × 1 (246 ms against 215), and within 12% of the
+second table's.
+
 The laptop ran 1.5 to 2.4 times as fast as the VM, and the factors of two
 and more held. Two things differed: a bigger ring cost it much less extra
 per message (finding 4), and `plan::run` was slower than
@@ -181,7 +186,11 @@ least there: 338 ms against the VM's 394 for the ring of 10.
    asks for a process's state, runs it, and goes round its own loop in the
    interpreter, which costs about as much as the message itself. This is
    `PERFORMANCE.md`'s lesson in miniature: work the CPI does per turn costs
-   as much as the turn.
+   as much as the turn. With one lap there is more of it: the CPI's second
+   round walks the whole ring, every process ended but the head, to find
+   the one left to run. Round 100,000 processes a message cost the laptop
+   5.8 µs against 4.2 round 10, and on the VM, timing each round, the walk
+   took 314 ms of 1,616.
 3. **`plan::run` gives the CPI its time back; it doesn't make the
    processes faster.** The CPI wakes M + 1 times with `run-ready` (10,001
    for the ring of 10), and twice with `plan::run`. On the VM the two ran
@@ -189,23 +198,24 @@ least there: 338 ms against the VM's 394 for the ring of 10.
    when rounds were short: 338 ms against 231 for the ring of 10, whose
    10,001 rounds carry ten messages each, about 11 µs a round; 209 against
    199 with ten times fewer rounds; and 221 against 217 at 1,000
-   processes. Three laptop runs, before the changes and after, found the
-   same 11 to 12 µs a round. Between rounds `plan::run` waits 0 ms to take
+   processes. Four laptop runs, before the changes and after, found the
+   same 10 to 12 µs a round. Between rounds `plan::run` waits 0 ms to take
    in input, which is the likeliest cost.
-4. **Big rings cost more per message when they live long.** On the VM a
-   message cost 1.7 times as much at 10,000 processes as at 10 (633 ms
-   against 380), for the same ticks, and on the laptop 1.15 times (266
-   against 231). Sent round 100,000 processes 100 times, a message cost the
-   laptop 3.3 µs, 1.4 times as much as round 10; sent round them once, it
-   cost 2.2 µs (215 ms for 100,000), no more than round 10. What costs is a
-   big ring living long. A process's state is replaced at every turn and
-   lives until the process's next turn, a lap later. Round 10 processes it
-   dies young; round 10,000 it lives through young-generation collections,
-   which copy it and then promote it to the old generation. With
-   `node --trace-gc`, each ring alone in a fresh process on the VM,
-   young-generation collections took 0.13 µs a message round 10 processes,
-   and about 2.7 µs round 100,000 in the nine laps after the first: about
-   half of the bigger ring's extra cost, 9.2 µs a message against 3.8.
+4. **Big rings cost more per message, mostly when they live long.** Under
+   `process::run-ready`, a message cost the VM 1.7 times as much at 10,000
+   processes as at 10 (633 ms against 380), for the same ticks, and the
+   laptop 1.15 times (266 against 231). Sent round 100,000 processes 100
+   times, a message cost the laptop 3.3 µs, 1.4 times as much as round 10;
+   sent round them once, it cost 2.2 µs (215 ms for 100,000), no more than
+   round 10. A process's state is replaced at every turn and lives until
+   the process's next turn, a lap later. Round 10 processes it dies young;
+   round 10,000 it lives through young-generation collections, which copy
+   it and then promote it to the old generation. With `node --trace-gc`,
+   each ring alone in a fresh process on the VM, the collections during the
+   run took 0.17 µs a message round 10 processes, 0.84 µs round 100,000
+   with one lap and 2.8 µs with ten, where a message cost 4.7, 6.5 and
+   10.8 µs: about half of the extra with ten laps. With one lap the VM paid
+   about another microsecond a message besides, which the laptop did not.
 5. **Spawning a process costs as much as three or four messages:** 83 ms
    for 10,000 on the laptop and 142 on the VM, 8.3 and 14 µs each, and
    about 9 µs each for 100,000 on the laptop. `process::spawn` itself takes
@@ -221,7 +231,8 @@ least there: 338 ms against the VM's 394 for the ring of 10.
    the CPI's loop. At N = 10,000 and M = 1, 10,000 messages took 77 ms
    instead of 27 on the laptop, and 150 instead of 46 on the VM: about 5
    and 10 µs more a hop. The CPI's own round goes in ring order whichever
-   way the PIDs go, and took 70 and 111 ms: slower turns, but 2 rounds.
+   way the PIDs go, and took 70 and 111 ms: slower turns and a second walk
+   of the ring (finding 2), but 2 rounds.
    `DECISIONS.md` gives this answer too: a CPI that needs a different loop
    writes it with `process::run`.
 
