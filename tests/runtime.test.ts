@@ -114,6 +114,62 @@ test('send and recv between two processes: delivery at the batch boundary', asyn
 });
 
 // ---------------------------------------------------------------------------
+// A batch's sends reserve capacity until the batch ends
+// ---------------------------------------------------------------------------
+
+test("a batch's sends reserve capacity in their mailboxes, per address, until the batch ends", async () => {
+    // box holds 2: the third send in one batch is full, though nothing has
+    // been delivered yet, and a send to another mailbox is not. Once the
+    // batch has ended and the CPI has taken one message, a send fits again.
+    const v = await ok(`
+        (defun sender (box other)
+            (actor::send box 1)
+            (actor::send box 2)
+            (let third (catch (actor::send box 3) e (error-tag e)))
+            (let elsewhere (actor::send other 4))
+            (actor::recv)
+            (let fourth (actor::send box 5))
+            (list third elsewhere fourth))
+        (defun main ()
+            (let box (mailbox::create #true 2))
+            (let other (mailbox::create #true 1))
+            (let p (process::spawn sender (list box other) (environment::self) '(actor) #false))
+            (let r1 (process::run p 1000))
+            (let sizes (list (mailbox::size box) (mailbox::size other)))
+            (mailbox::take box)
+            (mailbox::send (process::address p) :go)
+            (let r2 (process::run p 1000))
+            (list r1 sizes r2 (mailbox::take box) (mailbox::take box)))
+    `);
+    const [r1, sizes, r2, first, second] = arr(v);
+    assert.equal(print(r1!), '(blocked recv)');
+    assert.equal(print(sizes!), '(2 1)');
+    assert.equal(print(r2!), '(exited (full #true #true))');
+    assert.equal(print(first!), '2');
+    assert.equal(print(second!), '5');
+});
+
+test('actor:: requests: a wrong arity, a missing grant and an unknown action are errors', async () => {
+    const v = await ok(`
+        (defun misuse (to)
+            (list
+                (catch (actor::send to) e (error-tag e))
+                (catch (actor::recv to) e (error-tag e))
+                (catch (actor::self to) e (error-tag e))
+                (catch (actor::join) e (error-tag e))
+                (catch (actor::nope) e (error-tag e))))
+        (defun ungranted () (catch (actor::self) e (error-tag e)))
+        (defun main ()
+            (let p (process::spawn misuse (list (mailbox::create #false 1)) (environment::self) '(actor) #false))
+            (let q (process::spawn ungranted () (environment::self) '() #false))
+            (list (process::run p 1000) (process::run q 1000)))
+    `);
+    const [rp, rq] = arr(v);
+    assert.equal(print(rp!), '(exited (arity-error arity-error arity-error arity-error unknown-action))');
+    assert.equal(print(rq!), '(exited not-granted)');
+});
+
+// ---------------------------------------------------------------------------
 // (blocked recv) becoming ready when a message arrives (a direct CPI send)
 // ---------------------------------------------------------------------------
 

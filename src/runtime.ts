@@ -127,6 +127,9 @@ type MailboxEntry = {
     durable: boolean;
     capacity: number;
     queue: Value[];
+    // Messages sent to it during the batch now running, which it receives
+    // when the batch ends: their capacity is reserved at send time.
+    reserved: number;
     receivers: Set<ProcEntry>;
     hadReceiver: boolean;
     reply?: ReplyState;
@@ -150,7 +153,7 @@ type ReplyState = {
 };
 
 function newMailbox(durable: boolean, capacity: number): MailboxEntry {
-    return { durable, capacity, queue: [], receivers: new Set(), hadReceiver: false };
+    return { durable, capacity, queue: [], reserved: 0, receivers: new Set(), hadReceiver: false };
 }
 
 function isClosed(mbox: MailboxEntry): boolean {
@@ -400,13 +403,15 @@ export class Runtime implements Handlers {
 
     private runBatch(entry: ProcEntry, n: number): Value {
         const outbox: { addr: Addr; msg: Value }[] = [];
+        const ctx: RunCtx = { pid: entry.pid, outbox };
         let used = 0;
         // Its first step retries the recv it was woken for, so the wake-up is used.
         entry.wokenForMessage = false;
         for (;;) {
             const mode = entry.state.mode;
             if (mode.m === 'host') {
-                const result = this.dispatchHost(mode.ns, mode.action, mode.args, entry.grants, { pid: entry.pid, outbox });
+                const direct = mode.ns === 'actor' && entry.grants.has('actor') ? this.answerActor(mode.action, mode.args, ctx) : null;
+                const result = direct ?? this.dispatchHost(mode.ns, mode.action, mode.args, entry.grants, ctx);
                 // A process can't reach the requests that take real time: they are
                 // the CPI's (host::, tui::) or answered at once for a process.
                 if (result instanceof Promise) throw new Error(`internal: ${mode.ns}::${mode.action} answered a process asynchronously`);
@@ -449,6 +454,19 @@ export class Runtime implements Handlers {
             entry.state = step(entry.state);
             used += 1;
             entry.ticks += 1;
+        }
+    }
+
+    // The actor:: requests a process makes for every message, answered without
+    // dispatchHost's table lookups. Anything else, a wrong arity included, is
+    // null here and goes through dispatchHost, so every answer is the same.
+    private answerActor(action: string, args: readonly Value[], ctx: RunCtx): ActionResult | null {
+        switch (action) {
+            case 'recv': return args.length === 0 ? this.actorRecv(ctx) : null;
+            case 'send': return args.length === 2 ? this.actorSend(ctx, args[0]!, args[1]!) : null;
+            case 'self': return args.length === 0 ? this.actorSelf(ctx) : null;
+            case 'join': return args.length === 1 ? this.actorJoin(ctx, args[0]!) : null;
+            default: return null;
         }
     }
 
@@ -558,6 +576,7 @@ export class Runtime implements Handlers {
         for (const { addr, msg } of outbox) {
             const mbox = this.mailboxes.get(addr.id);
             if (mbox === undefined) continue;
+            mbox.reserved -= 1;
             if (mbox.faux !== undefined) {
                 mbox.faux(msg);
                 continue;
@@ -1530,11 +1549,13 @@ export class Runtime implements Handlers {
         if (this.traps.has('send')) return TRAP('send', list(addrV, msgV));
         const mbox = this.mailboxes.get(addrV.id);
         if (mbox === undefined) return T('type-error', 'unknown mailbox address', addrV);
-        const pending = ctx.outbox === null ? 0 : ctx.outbox.filter((o) => o.addr.id === addrV.id).length;
-        if (mbox.reply === undefined && !isClosed(mbox) && mbox.queue.length + pending >= mbox.capacity) {
+        if (mbox.reply === undefined && !isClosed(mbox) && mbox.queue.length + mbox.reserved >= mbox.capacity) {
             return T('full', 'mailbox is at capacity', addrV);
         }
-        ctx.outbox?.push({ addr: addrV, msg: msgV });
+        if (ctx.outbox !== null) {
+            ctx.outbox.push({ addr: addrV, msg: msgV });
+            mbox.reserved += 1;
+        }
         return V(TRUE);
     }
 
