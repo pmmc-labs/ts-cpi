@@ -5,8 +5,8 @@ It implements `../../design-xxx/SPEC-CPI.md`, following the design in
 `../../design-xxx/DESIGN-001.md`. Choices the spec leaves open are recorded in
 [`DECISIONS.md`](DECISIONS.md).
 
-[`VISION.md`](VISION.md), a first draft, narrows the focus: what slight is
-for, the guarantees that matter, and what waits.
+[`new-vision.md`](new-vision.md), a first draft, narrows the focus: what
+slight is for, the guarantees that matter, and what waits.
 
 The goal of this stage is simple and solid: a pure CEK-style evaluator with
 constant-space tail calls, plain-data continuations, and a runtime whose

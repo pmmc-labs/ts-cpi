@@ -2,6 +2,8 @@
 
 Sep 29, 2026 · First draft · Revises the earlier `VISION.md` (`design-002-ish/`) and narrows `../../design-xxx/DESIGN-001.md`
 
+Sep 29, 2026 · Section 5, on judgment and models, added
+
 The earlier vision described a personal computational estate: thousands of durable actors spread across a laptop, an always-on box and rented cloud cores, placed by cost, latency and trust. DESIGN-001 set out to build toward it and to bring in the best of the earlier prototypes. The result is a coherent design, and also a research program: the estate, tick-exact JIT tapes, a mergeable image and plans offloaded by equivalence are each a thesis on their own.
 
 This document narrows the focus. It says what slight is for, which guarantees matter, what gets looser, what is built on top later, and what is shelved. It sets priorities and does not change semantics by itself: a change it calls for in the language or the runtime is proposed in `DECISIONS.md`, with options, before it is built. The starting point is the current system, including the deviations `DECISIONS.md` records (roles, plans and the language additions).
@@ -30,7 +32,7 @@ Three things came out of that work:
 
 ## 3. What it is for
 
-**Agents.** An agent is an actor whose behavior includes judgment: a model consulted through a host request, the way the host provides time. slight gives an agent a combination that agent frameworks rarely offer:
+**Agents.** An agent is an actor whose behavior includes judgment: a model consulted through a host request, the way the host provides time. Most of its judgments are closed decisions, which a small decision model makes; a generative model writes and plans when a decision says it's worth it (section 5). slight gives an agent a combination that agent frameworks rarely offer:
 
 - only the authority it is granted, with no ambient access to anything;
 - a budget on what it may spend, counted by the capability that spends it;
@@ -42,7 +44,7 @@ Three things came out of that work:
 
 **Automations with kept history.** Actors that watch feeds, mail and files, triage what arrives, and produce notes and summaries. This is where the Memex survives, as inspiration rather than as a product: an image is a personal record of what came in and what was made from it. Every result can say where it came from, and history is curated rather than overwritten.
 
-A flagship demo combines all three: a research agent that fetches sources, asks a model and writes notes. Any note can be traced back through the journal to the fetches and model answers that produced it. The run survives `kill -9`, replays without calling the model, and can be forked at any decision.
+A flagship demo combines all three: a research agent that fetches sources, decides which are worth reading, has a generative model summarize them, and writes notes. Any note can be traced back through the journal to the fetches and model answers that produced it. The run survives `kill -9`, replays without calling the model, and can be forked at any decision.
 
 ## 4. Record what cannot be recomputed
 
@@ -80,14 +82,60 @@ A snapshot is the image's state at a quiet point, between two of the CPI's host 
 
 Time is real, and it is an input. Today the runtime reads the clock through one function, but from 27 places, so time can move in the middle of a round. For replay, time must advance only at journaled points, such as when `host::wait` returns, and everything in between sees the same time. External events already enter only at `host::wait`. Plans run in the host but follow the same rule: they see time only through the journal. This is a change to runtime timing, so it is proposed in `DECISIONS.md` before it is built.
 
-## 5. Four guarantees
+## 5. Judgment
+
+An agent's judgment comes from models, consulted through host requests like time or storage. Two kinds of model do different jobs, and the system treats them differently.
+
+**Decision models** answer closed questions. Given text or program state and a question declared in advance, a decision model returns a typed answer with probabilities, never prose: the probability that the answer to a yes/no question is yes, which of a declared set of options applies, or where an input falls on an ordered rubric. TypeSafe's Jev, launched in September 2026, is built only for this: it calls the three kinds Noul, Choice and Score, and trains its probabilities to be calibrated. A small local model can follow the same pattern by scoring the declared options with log-probabilities, though without that calibration training.
+
+**Generative models** answer open questions. They write, summarize, extract and plan, and their answers are text or code.
+
+Most of an agent's judgments are decisions: which of these, how urgent, whether to ask, whether something deserves to wake anyone. Decision models suit the system unusually well:
+
+- **Closed answers.** Every possible answer is declared in the request, so the model can only choose among the options the actor listed. An injected prompt can make it choose badly, but it can't make it act outside the list or write code. Model output gets the same discipline as a grant.
+- **Small journal entries.** A key, its probabilities and a confidence take a few tens of bytes. Replay is exact, and a decision's provenance reads naturally, such as "filed as `later` at 0.62".
+- **Calibration becomes policy.** Above one threshold the actor acts on its own. In the middle it holds the action as data for a person, and below it asks a generative model. Most decisions pass in a fraction of a second, and the doubtful ones go to someone who can judge.
+- **Reflexes.** Triage, routing and deciding what deserves to wake are reflexes, not deliberation: the "AI hat" the earlier vision gave its always-on box. A score can even feed the CPI's choice of which parked actor to wake first, and scheduling stays deterministic because the answers are journaled inputs.
+- **Distributions for simulations.** A simulated agent samples from the returned distribution with a seeded random source, so the simulation can rerun with another seed without calling the model again.
+- **Comparison by replay.** Swap the backend and replay the journaled questions to see where two models decide differently. Similar accuracy can hide different decisions, and the journal shows which ones.
+
+In an actor, a decision reads like a `case` whose test is a judgment. The namespace, the answer's shape and the helpers here are placeholders:
+
+```lisp
+(defun triage (owner)
+    (let msg (actor::recv))
+    (let answer (judge::choose (value->string msg) '(urgent later archive)))
+    (let pick (car answer))
+    (let confidence (car (cdr answer)))
+    (cond
+        ((< confidence 0.7) (actor::send owner (list :unsure msg answer)))
+        ((eq? pick :urgent) (wake-assistant msg))
+        (#true (file-away pick msg)))
+    (triage owner))
+```
+
+Generative models do what decisions can't, such as the research agent's summaries, and a decision says when they are worth calling. Their answers make larger journal entries, a streamed answer is many inputs, and code they write runs in its own image.
+
+### The namespaces
+
+There are two host namespaces, one for decisions and one for generation, and their names and signatures are left to a proposal. The decision namespace has one action for each kind of question and returns typed values. Behind each namespace the backend can be swapped:
+
+- **Hosted,** such as Jev over its API. It is fast and calibrated, but its weights are closed and it runs only as a hosted service, so what it is asked leaves the machine and nothing works offline.
+- **Local,** a small model on the owner's machine following the same pattern. This is the default for private data.
+- **Scripted,** for tests, like the headless terminal and the scripted HTTP requests.
+
+The journal records which backend and model answered (a local model by the hash of its weights) and what was asked, so it also shows exactly what left the machine. Grants decide which actors may send anything off the machine at all, and budgets count calls on the capability. If a hosted service goes away, past decisions stay replayable, and new ones fall back to another backend.
+
+Two cautions. Calibration holds across many answers, not for any one of them: "0.8" means right about 80% of the time over many decisions. And a hosted model's context limits and repeatability are for its vendor to state; for replay, repeatability doesn't matter, because the answers are in the journal.
+
+## 6. Four guarantees
 
 1. **Determinism.** The same code, the same runtime version and the same journal give the same run: the same values, the same host requests in the same order, and the same output.
 2. **Durability.** An image restored from its last snapshot and its journal continues as if it had not stopped. It is the same run, so its PIDs survive. DESIGN-001's rule that a restart ends every PID still holds for an image started fresh. An effect cut off by a crash may happen twice, so the handlers of effects that mustn't repeat use idempotency keys.
 3. **Provenance.** Every input has a journal entry: what arrived, when, and which request it answered. Every turn can be traced to its process, the messages it received and the code it ran (by binding hash), so the causes of any output can be recomputed.
 4. **Containment.** A process can't reach past its grants, and it can't take the image down. This matters more than it used to: when recovery is replay, a crash of the whole image repeats on every recovery.
 
-## 6. Principles
+## 7. Principles
 
 These are carried from the earlier documents unless marked as new.
 
@@ -103,6 +151,8 @@ These are carried from the earlier documents unless marked as new.
 
 **The host owns the dirty world** (earlier vision). Time, randomness, I/O, models and storage are host requests, and the journal is where the dirty world is written down.
 
+**Closed questions first** (new). Where a decision will do, ask a closed question whose answers are declared in advance. Open-ended generation is for what decisions can't do, and what it produces is data to check or code to contain.
+
 **PIDs never leave the image** (earlier vision). Addresses cross between images; PIDs stay home.
 
 **Suspension is the normal case** (earlier vision). An image can stop between any two host requests and continue from its snapshot and journal, whether the lid closed, the process was killed or the machine changed.
@@ -111,20 +161,21 @@ These are carried from the earlier documents unless marked as new.
 
 **The floor is fixed** (DESIGN-001). The core language doesn't change underneath the code built on it. A small, fixed language also suits a time when models write much of the code: it is small enough to teach a model from one tutorial.
 
-## 7. What changes
+## 8. What changes
 
 Compared with DESIGN-001 and the prototype as they stand:
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| Determinism, the journal, snapshots, replay | **The foundation** | New work; sections 4 and 9. |
+| Determinism, the journal, snapshots, replay | **The foundation** | New work; sections 4 and 10. |
 | Containment | **Firm, coarse** | Caps on † operations, host exceptions as errors, a journaled heap check. Untrusted code runs in its own image with a heap cap. |
 | Canonical encoding and hashing of values | **Firm, needed now** | The journal, snapshots and any later sharing all use it. It is the one part of the store layer that isn't separable. |
 | Capabilities | Kept as they are | Grants and addresses, with no ambient authority. Agents are the reason. |
 | Language, roles, environments, hot reload | Kept | A reload is a journaled input. |
 | The CPI, the scheduler and plans | Kept, done for now | No more scheduling work unless a use needs it. |
 | Metering | **Loosened** | One tick per step, with counts that may change between versions. No cost tables, and no tick-exactness for a future JIT, which only needs to be deterministic. |
-| Agent budgets | **On capabilities** | An actor that holds the model namespace, counts what is spent, and can be cut off. |
+| Agent budgets | **On capabilities** | An actor that holds a model namespace, counts what is spent, and can be cut off. |
+| Models | **Two kinds, behind host namespaces** | Decisions (closed, typed, calibrated) and generation, each with swappable backends: hosted, local and scripted. Section 5. |
 | Per-actor durability protocols: acknowledgment with checkpoint, exactly-once bookkeeping | **Loosened** | Not needed for local durability. Mailboxes that outlive their process stay; parking and hibernation stay as memory features. |
 | Merging and sharing | Later, on top | Irmin or another model, operating on values and documents, not on running state. |
 | Moving computation, placement, the estate | Later, on top | An image moves as a snapshot and journal; an actor moves as code by hash and loop arguments. |
@@ -137,7 +188,7 @@ Compared with DESIGN-001 and the prototype as they stand:
 | Reflection beyond the pads | Shelved | Model-written code runs in its own image instead of being spliced into a process. |
 | Deadlock detection | Shelved | A policy, if anyone needs one. |
 
-## 8. Where the prototype stands
+## 9. Where the prototype stands
 
 These parts carry over as they are:
 - the CEK machine, with plain-data frames and constant-space tail calls;
@@ -154,7 +205,7 @@ The focus needs five things that aren't there yet:
 - **State as plain data.** Parked continuations live in a runtime table under an integer key, addresses are counters, and values have no canonical encoding. A snapshot needs all of it as plain data with stable identities.
 - **The journal.** The handler classification, recording, replay with effects suppressed, and time that advances only at journaled points.
 - **Containment.** Today a process granted nothing can crash the whole image within a 1,000-tick quota. With a 1 GB heap, 26 doublings of a list with `append` exhaust it and the image aborts. The 29th doubling of a string with `string-append` passes V8's length limit, and the `RangeError` escapes uncaught.
-- **A model namespace** with budgets, and a separate image for code nobody trusts.
+- **The model namespaces** of section 5, with budgets, and a separate image for code nobody trusts.
 - **Provenance tools:** replay with tracing, and a way to ask for an output's causes.
 
 ### The arithmetic, at human scale
@@ -164,16 +215,16 @@ The focus needs five things that aren't there yet:
 - At this scale, journals are small. These are rough estimates, still to be measured: an image that wakes once a second writes a few megabytes a day; a terminal UI at 60 frames a second writes about 150 MB a day before compression, mostly timestamps; and a thousand model calls a day come to about 5 MB.
 - A snapshot costs time in proportion to the image, perhaps a second for 100,000 idle actors (also still to be measured), so it is taken at quiet points and by policy.
 
-## 9. First steps
+## 10. First steps
 
 1. **Journal and replay.** Classify the handlers, record inputs, replay with effects suppressed, and make time advance only at journaled points (a spec proposal first). The acceptance test: record a Life runner session with real time and keystrokes, replay it, and compare every frame exactly; then do the same for a gateway session under load.
 2. **Snapshots and recovery.** Parked state and addresses as plain data, a canonical encoding, snapshots at quiet points, and recovery that re-establishes listeners and subscriptions. The acceptance test: kill an image with `kill -9` mid-run, restore it, and finish with the same output as a run that was never interrupted.
 3. **Containment.** Caps on † operations and host exceptions as errors (both spec proposals), and the journaled heap check. The acceptance test: the doubling programs fail only their own process, and a slow leak is killed at the same point on replay.
-4. **Agents.** A model namespace, with a scripted model for tests and a live one for the demo; budgets on the capability; pending actions awaiting approval; and code from the model run in its own image.
+4. **Agents.** The decision and generation namespaces of section 5, each with a scripted backend for tests, a local one and a hosted one; budgets on the capability; thresholds that act, ask a person or escalate; pending actions awaiting approval; and code from a generative model run in its own image.
 5. **Provenance.** Given an output, replay with tracing and show its causes.
 6. **The flagship:** the research agent of section 3.
 
-## 10. Costs and open questions
+## 11. Costs and open questions
 
 These costs are known now:
 
@@ -189,22 +240,22 @@ Open questions:
 2. Where snapshots and journals live: in files, in SQLite, or as content-addressed objects. The choice meets the sharing layer later.
 3. The shape of a provenance query. Causes at the level of messages are the default; tracking individual values is exceptional.
 4. How a person approves an agent's pending actions: through a trap to the CPI, or through a mailbox that a user interface reads.
-5. The model namespace: how streamed answers are journaled (each piece is an input), and how budgets are expressed.
+5. The model namespaces: their names and signatures, how a generative model's streamed answer is journaled (each piece is an input), how budgets are expressed, and whether a local decision model is calibrated well enough to be the default for private data.
 6. Whether recovery is an explicit act or happens at start-up. The earlier vision says restoring is explicit, never a reflex of the host.
 7. What the owner decides, and how, before a model's code runs in its own image.
 
-## 11. What slight is not
+## 12. What slight is not
 
 - **Not everything the earlier documents describe, yet.** The store model, merging, distribution, phases and a JIT wait until the core stands.
 - **Not a price list.** Ticks are fair shares.
 - **Not BEAM-scale per node, not a cluster runtime, and not hyperscale** (unchanged from the earlier vision).
 - **Not four PhDs.** It is one thesis, deterministic replay as the substrate for durable, explainable agent systems at human scale, and one product: a flight recorder for personal agents.
 
-## 12. How this relates to the earlier documents
+## 13. How this relates to the earlier documents
 
 - **The earlier vision** (`design-002-ish/VISION.md`). Kept: the actor model, human scale, agents, and the principles above marked as its own. The estate moves to a layer on top, and its engine-speed arithmetic doesn't apply to this engine.
 - **The baseline** (`design-000/vm-design-baseline.md`). Kept: bounded builtins (coarsely) and the limit on merging effects. Leases, keypair identity, pairing and encryption at rest wait for the layers that need them.
-- **DESIGN-001.** Kept: the fixed core, plain-data continuations (which snapshots now rely on), the CPI, environments, capabilities, host requests and determinism (section 12). Metering and per-actor durability are loosened. The store, merging and distribution move to layers on top. Phases, the pipeline, tapes, JIT tapes and most of reflection are shelved.
+- **DESIGN-001.** Kept: the fixed core, plain-data continuations (which snapshots now rely on), the CPI, environments, capabilities, host requests and determinism (its section 12). Metering and per-actor durability are loosened. The store, merging and distribution move to layers on top. Phases, the pipeline, tapes, JIT tapes and most of reflection are shelved.
 - **SPEC-CPI and `DECISIONS.md`.** Unchanged until proposals land. This document calls for four: time advancing only at journaled points; caps on † operations and an error for host exceptions; PIDs surviving a restore; and the handler classification.
 
 When a new question comes up, ask whether it serves the four guarantees for the three uses. If it doesn't, it waits.
