@@ -367,4 +367,46 @@ Measured on a cloud container with Node 22.22, in interleaved runs of main
   survives, and about as much survives as before. Most of the gain is the
   copying the slices and argument arrays did.
 - **What every step still allocates:** a new state and mode, and a site
-  each time a list is evaluated.
+  each time a list is evaluated. The next section measures why they stay.
+
+## The state, mode and sites stay (Oct 2, 2026)
+
+After the changes above, a step allocates about 203 bytes on `fib` and on
+a tail-calling loop, counted with an instrumented copy of the machine and
+V8's sampling heap profiler. Node does not compress pointers, so the state
+(56 bytes) and its mode (40 to 56) are about half of that; frames with
+their continuation nodes, 0.44 a step, about a quarter; sites, 0.28 a
+step, about 5%. Three ways to make fewer of them were tried on copies of
+the machine, run directly on `fib 25`, a million turns of the loop and a
+non-tail recursion 100,000 deep, outside the runtime. None was kept.
+
+- **One state and mode, overwritten by every step, is slower.** It halved
+  what was allocated (`fib 25` 498 MB instead of 955, the loop 1,829
+  instead of 3,669) and the time spent collecting, but `fib 25` took
+  328 ms instead of 267 and the loop 1,162 instead of 888 (medians of six
+  interleaved runs; the deep recursion took the same). The one state
+  soon lives in the old generation, so every step's stores of new values
+  into it go through V8's write barrier: `node --prof` puts 15.7% of the
+  loop's ticks in `RecordWriteSaveFP`, against under 0.1% as kept, while
+  collection fell only from 14.9% to 5.7% of them. A new state each step
+  points only at older objects and dies young, which the young
+  generation handles at almost no cost. Machine registers kept in an
+  object, as in a mutable register machine, would pay the same.
+
+The other two save allocation, not time:
+
+| Median of six interleaved runs | Allocated, `fib 25` / loop | Time, `fib 25` / loop / deep |
+| --- | --- | --- |
+| As kept | 954 / 3,668 MB | 278 / 892 / 280 ms |
+| The mode's fields in the state, one object a step | 814 / 3,109 MB (−15%) | 275 / 928 / 319 ms |
+| Each list's site cached on its pair | 918 / 3,512 MB (−4%) | 273 / 927 / 248 ms |
+| Both | 776 / 2,953 MB (−19%) | 253 / 849 / 245 ms |
+
+- **None of those times is a gain.** The runs of each build overlap those
+  of every other. Collection is about 15% of the loop's ticks as kept, so
+  the 16% less collection time of both together is worth 2 to 3% of the
+  whole.
+- **And both cost.** Moving the mode's fields into the state changes the
+  `State` type in the machine, the runtime, the loader and about 35 test
+  lines, and the cache would be a second mutable field on code pairs,
+  beside `elements`.
