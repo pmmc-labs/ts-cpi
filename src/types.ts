@@ -99,15 +99,23 @@ export type Env = { readonly slots: ReadonlyMap<string, Slot> };
 export type Head =
     | { readonly h: 'core'; readonly op: string }                      // core operation
     | { readonly h: 'host'; readonly ns: string; readonly action: string } // ns::action
-    | { readonly h: 'call' };                                          // done[0] is the procedure
+    | { readonly h: 'call' };                                          // the oldest value in done is the procedure
 
+// The values an Args frame has collected, newest first; n counts them.
+// Persistent like Kont: each Args frame extends its predecessor's list
+// instead of copying an array.
+export type Done = { readonly v: Value; readonly n: number; readonly prev: Done } | null;
+
+// A frame working through a run of forms holds the array they are in and the
+// index of the next one: SPEC-CPI section 7.1's `rest` is forms[i..], kept
+// without a copy. A cond frame's clause is [test, ...body].
 export type Frame =
-    | { readonly k: 'args';  readonly head: Head; readonly done: readonly Value[]; readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
-    | { readonly k: 'let';   readonly name: Sym; readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
-    | { readonly k: 'seq';   readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
-    | { readonly k: 'cond';  readonly body: readonly Value[]; readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
-    | { readonly k: 'and';   readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
-    | { readonly k: 'or';    readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
+    | { readonly k: 'args';  readonly head: Head; readonly done: Done; readonly forms: readonly Value[]; readonly i: number; readonly scope: Scope; readonly site: Site }
+    | { readonly k: 'let';   readonly name: Sym; readonly forms: readonly Value[]; readonly i: number; readonly scope: Scope; readonly site: Site }
+    | { readonly k: 'seq';   readonly forms: readonly Value[]; readonly i: number; readonly scope: Scope; readonly site: Site }
+    | { readonly k: 'cond';  readonly clause: readonly Value[]; readonly forms: readonly Value[]; readonly i: number; readonly scope: Scope; readonly site: Site }
+    | { readonly k: 'and';   readonly forms: readonly Value[]; readonly i: number; readonly scope: Scope; readonly site: Site }
+    | { readonly k: 'or';    readonly forms: readonly Value[]; readonly i: number; readonly scope: Scope; readonly site: Site }
     | { readonly k: 'catch'; readonly name: Sym; readonly handler: Value; readonly scope: Scope; readonly site: Site }
     // FoldK: the procedure and the elements still to fold; the value it
     // receives is the accumulator (see `fold` in DECISIONS.md).

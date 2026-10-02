@@ -311,3 +311,51 @@ its address (`DECISIONS.md`, "Reclaiming what nothing can name").
   set of waiters when the set emptied, so every message made a new set.
   The waiters now live on the mailbox's entry, and each process keeps its
   own mailbox's entry, so a message needs fewer table lookups than before.
+
+## Fewer allocations per step (Oct 2, 2026)
+
+Every step allocated more than it needed to. Three changes to the machine
+cut that, and leave behavior and tick counts alone:
+
+- **Frames keep an index, not a copy.** The frames for `do`, `cond`,
+  `and`, `or`, `let` and arguments held the forms still to run as a new
+  array, sliced from the last one at every step. They now hold the code
+  array the forms are in and the index of the next one.
+- **Arguments collect in a persistent list.** An argument frame copied the
+  values so far into a new array for each argument, so a call with n
+  arguments made n + 1 arrays, and a procedure call one more to drop the
+  procedure. Each frame now adds one node to its predecessor's list, and
+  the array is made once, when the head is applied. Frames still never
+  change, because a parked continuation may be unparked more than once.
+- **A symbol or literal shares its parent's site.** Its site was a new
+  copy of the parent's, with the same procedure and position.
+
+Measured on a cloud container with Node 22.22, in interleaved runs of main
+(`18b7c33`, with `fold`) and the change:
+
+| `tools/bench/interpreter.slight` | Before | After |
+| --- | --- | --- |
+| Allocated in the whole run, summed from `node --trace-gc` | 19,500 MB | 13,365 MB (−31%) |
+| loop, median of three runs | 3,042 ms | 1,953 ms (−36%) |
+| `fib 22` | 130 ms | 73 ms (−44%) |
+| map 1000x200 | 642 ms | 486 ms (−24%) |
+| closures | 507 ms | 331 ms (−35%) |
+| strings | 433 ms | 292 ms (−33%) |
+| vectors | 560 ms | 383 ms (−32%) |
+| messages | 459 ms | 368 ms (−20%) |
+| All of it | 5,773 ms | 3,886 ms (−33%) |
+
+- **Allocation fell by about a third everywhere.** Driving the machine
+  directly, `fib 25` allocated 987 MB instead of 1,446, a million turns of
+  a tail-calling loop 3,783 MB instead of 5,531, and a non-tail recursion
+  100,000 deep 469 MB instead of 691.
+- **A deep continuation keeps less alive:** 362 bytes per level of that
+  recursion instead of 522, measured with a forced collection at its
+  deepest point.
+- **Time fell more than garbage collection explains.** Collection itself
+  took about 64 ms of `fib 25` instead of 75: a scavenge costs what
+  survives, and about as much survives as before. Most of the gain is the
+  copying the slices and argument arrays did.
+- **What every step still allocates:** a new state and mode, a site each
+  time a list is evaluated, and a `Head` for each application, whose
+  namespace and action are split from the name every time.

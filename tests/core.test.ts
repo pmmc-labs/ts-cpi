@@ -425,8 +425,8 @@ test('errors: traceEntries uses site.fn for all frames', () => {
     const site2 = { fn: sym('other-proc'), pos: { file: 'test.slight', line: 20, col: 10 } };
 
     // Create frames with explicit sites
-    const letFrame: any = { k: 'let', name: sym('x'), rest: [], scope: null, site: site2 };
-    const seqFrame: any = { k: 'seq', rest: [], scope: null, site: site1 };
+    const letFrame: any = { k: 'let', name: sym('x'), forms: [], i: 0, scope: null, site: site2 };
+    const seqFrame: any = { k: 'seq', forms: [], i: 0, scope: null, site: site1 };
 
     // Build continuation (K is a linked list, top first)
     const K = { top: seqFrame, next: { top: letFrame, next: null } };

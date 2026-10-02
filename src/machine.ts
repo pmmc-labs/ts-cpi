@@ -6,7 +6,7 @@
 // which is the one mutable field any Value carries (see src/types.ts).
 
 import type {
-    Checkpoint, Closure, Env, ErrorValue, Frame, GroupMember, Head, Kont, Mode, Scope, Site, State, Sym, Value,
+    Checkpoint, Closure, Done, Env, ErrorValue, Frame, GroupMember, Head, Kont, Mode, Scope, Site, State, Sym, Value,
 } from './types.ts';
 import { FALSE, NIL, TRUE, codeArray, isFalse, listToArray } from './values.ts';
 import { makeError } from './errors.ts';
@@ -35,9 +35,10 @@ export function kontDepth(K: Kont): number {
 // The position of a sub-expression: its own pos if it's a pair, otherwise the
 // nearest enclosing position (manager's note: either is acceptable for a bare
 // symbol or literal; we carry the enclosing one forward for better traces).
-// `fn` never changes here: it changes only when a closure is applied.
+// `fn` never changes here: it changes only when a closure is applied. A
+// symbol or literal's site would equal its parent's, so it shares it.
 function childSite(v: Value, parent: Site): Site {
-    return { fn: parent.fn, pos: v.t === 'pair' ? v.pos : parent.pos };
+    return v.t === 'pair' ? { fn: parent.fn, pos: v.pos } : parent;
 }
 
 function isFormHead(v: Value, name: string): boolean {
@@ -76,38 +77,39 @@ function applyRethrow(e: Value, scope: Scope, K: Kont, R: Env, A: Checkpoint, si
 // an actual `(do …)` pair and re-dispatched through stepEval; tick counts are
 // therefore lower than a literal reading of section 7.3, but each step still
 // does bounded work, since evalDo itself does no looping over unbounded input.
-function evalDo(forms: readonly Value[], scope: Scope, K: Kont, R: Env, A: Checkpoint, site: Site): State {
-    if (forms.length === 0) return { mode: { m: 'ret', v: NIL }, K, R, A };
+// Each takes the array its forms are in and the index of the first one still
+// to run, and its frames keep both, so nothing slices the code (see Frame).
+function evalDo(forms: readonly Value[], i: number, scope: Scope, K: Kont, R: Env, A: Checkpoint, site: Site): State {
+    if (i === forms.length) return { mode: { m: 'ret', v: NIL }, K, R, A };
 
-    const first = forms[0]!;
+    const first = forms[i]!;
+    const last = i + 1 === forms.length;
 
     if (isFormHead(first, 'let')) {
         const arr = codeArray(first)!; // [sym('let'), name, expr]
         const name = arr[1] as Sym;
         const expr = arr[2]!;
-        const rest = forms.slice(1);
         const childSt = childSite(expr, site);
-        if (rest.length === 0) {
+        if (last) {
             return { mode: { m: 'eval', x: expr, scope, site: childSt }, K, R, A };
         }
-        const frame: Frame = { k: 'let', name, rest, scope, site: childSt };
+        const frame: Frame = { k: 'let', name, forms, i: i + 1, scope, site: childSt };
         return { mode: { m: 'eval', x: expr, scope, site: childSt }, K: pushFrame(K, frame), R, A };
     }
 
     if (isFormHead(first, 'defun')) {
         // A run of consecutive local defuns at the front shares one group
         // (SPEC-CPI sections 7.2, 7.3).
-        let i = 0;
+        let j = i;
         const group: GroupMember[] = [];
-        while (i < forms.length && isFormHead(forms[i]!, 'defun')) {
-            const arr = codeArray(forms[i]!)!; // [sym('defun'), name, paramsForm, ...body]
+        while (j < forms.length && isFormHead(forms[j]!, 'defun')) {
+            const arr = codeArray(forms[j]!)!; // [sym('defun'), name, paramsForm, ...body]
             const name = arr[1] as Sym;
             const params = codeArray(arr[2]!) as readonly Sym[];
             const body = arr.slice(3);
             group.push({ name, params, body });
-            i += 1;
+            j += 1;
         }
-        const rest = forms.slice(i);
         let L1: Scope = scope;
         let lastClosure: Closure | null = null;
         for (const gm of group) {
@@ -115,42 +117,38 @@ function evalDo(forms: readonly Value[], scope: Scope, K: Kont, R: Env, A: Check
             L1 = { name: gm.name, value: cl, next: L1 };
             lastClosure = cl;
         }
-        if (rest.length === 0) {
+        if (j === forms.length) {
             return { mode: { m: 'ret', v: lastClosure! }, K, R, A };
         }
-        return evalDo(rest, L1, K, R, A, site);
+        return evalDo(forms, j, L1, K, R, A, site);
     }
 
-    const rest = forms.slice(1);
     const childSt = childSite(first, site);
-    if (rest.length === 0) {
+    if (last) {
         return { mode: { m: 'eval', x: first, scope, site: childSt }, K, R, A };
     }
-    const frame: Frame = { k: 'seq', rest, scope, site: childSt };
+    const frame: Frame = { k: 'seq', forms, i: i + 1, scope, site: childSt };
     return { mode: { m: 'eval', x: first, scope, site: childSt }, K: pushFrame(K, frame), R, A };
 }
 
-function evalCond(clauses: readonly Value[], scope: Scope, K: Kont, R: Env, A: Checkpoint, site: Site): State {
-    if (clauses.length === 0) return { mode: { m: 'ret', v: NIL }, K, R, A };
-    const arr = codeArray(clauses[0]!)!; // [test, ...body]
-    const test = arr[0]!;
-    const body = arr.slice(1);
-    const rest = clauses.slice(1);
-    const frame: Frame = { k: 'cond', body, rest, scope, site };
+function evalCond(clauses: readonly Value[], i: number, scope: Scope, K: Kont, R: Env, A: Checkpoint, site: Site): State {
+    if (i === clauses.length) return { mode: { m: 'ret', v: NIL }, K, R, A };
+    const clause = codeArray(clauses[i]!)!; // [test, ...body]
+    const test = clause[0]!;
+    const frame: Frame = { k: 'cond', clause, forms: clauses, i: i + 1, scope, site };
     return { mode: { m: 'eval', x: test, scope, site: childSite(test, site) }, K: pushFrame(K, frame), R, A };
 }
 
 function evalAndOr(
-    kind: 'and' | 'or', forms: readonly Value[], scope: Scope, K: Kont, R: Env, A: Checkpoint, site: Site
+    kind: 'and' | 'or', forms: readonly Value[], i: number, scope: Scope, K: Kont, R: Env, A: Checkpoint, site: Site
 ): State {
-    if (forms.length === 0) return { mode: { m: 'ret', v: kind === 'and' ? TRUE : FALSE }, K, R, A };
-    const first = forms[0]!;
-    const rest = forms.slice(1);
+    if (i === forms.length) return { mode: { m: 'ret', v: kind === 'and' ? TRUE : FALSE }, K, R, A };
+    const first = forms[i]!;
     const childSt = childSite(first, site);
-    if (rest.length === 0) {
+    if (i + 1 === forms.length) {
         return { mode: { m: 'eval', x: first, scope, site: childSt }, K, R, A };
     }
-    const frame: Frame = kind === 'and' ? { k: 'and', rest, scope, site } : { k: 'or', rest, scope, site };
+    const frame: Frame = kind === 'and' ? { k: 'and', forms, i: i + 1, scope, site } : { k: 'or', forms, i: i + 1, scope, site };
     return { mode: { m: 'eval', x: first, scope, site: childSt }, K: pushFrame(K, frame), R, A };
 }
 
@@ -158,20 +156,46 @@ function evalAndOr(
 // Applications: args, core ops, host requests, closures (SPEC-CPI 7.3, 7.4)
 // ---------------------------------------------------------------------------
 
+// Evaluates forms[i..] left to right, then applies `head` to their values.
 function evalArgsThenApply(
-    head: Head, forms: readonly Value[], scope: Scope, K: Kont, R: Env, A: Checkpoint, site: Site
+    head: Head, forms: readonly Value[], i: number, scope: Scope, K: Kont, R: Env, A: Checkpoint, site: Site
 ): State {
-    if (forms.length === 0) {
-        return applyHead(head, [], scope, K, R, A, site);
+    if (i === forms.length) {
+        return applyHead(head, null, scope, K, R, A, site);
     }
-    const first = forms[0]!;
-    const frame: Frame = { k: 'args', head, done: [], rest: forms.slice(1), scope, site };
+    const first = forms[i]!;
+    const frame: Frame = { k: 'args', head, done: null, forms, i: i + 1, scope, site };
     return { mode: { m: 'eval', x: first, scope, site: childSite(first, site) }, K: pushFrame(K, frame), R, A };
 }
 
+const NO_ARGS: readonly Value[] = [];
+
+// The values in `done`, oldest first, leaving out the `skip` oldest.
+function doneArray(done: Done, skip: number): readonly Value[] {
+    const n = (done?.n ?? 0) - skip;
+    if (n === 0) return NO_ARGS;
+    const out = new Array<Value>(n);
+    for (let i = n - 1; i >= 0; i -= 1) {
+        out[i] = done!.v;
+        done = done!.prev;
+    }
+    return out;
+}
+
 function applyHead(
-    head: Head, args: readonly Value[], scope: Scope, K: Kont, R: Env, A: Checkpoint, site: Site
+    head: Head, done: Done, scope: Scope, K: Kont, R: Env, A: Checkpoint, site: Site
 ): State {
+    if (head.h === 'call') {
+        // The oldest value is the procedure, the rest are its arguments.
+        let d = done!;
+        while (d.n > 1) d = d.prev!;
+        const fn = d.v;
+        if (fn.t !== 'closure') {
+            return raise(makeError('type-error', 'application requires a procedure'), site, scope, K, R, A);
+        }
+        return applyClosure(fn, doneArray(done, 1), scope, K, R, A, site);
+    }
+    const args = doneArray(done, 0);
     if (head.h === 'core') {
         const arity = CORE_ARITY.get(head.op)!;
         if (arity !== null && args.length !== arity) {
@@ -191,16 +215,7 @@ function applyHead(
         if (result.ok) return { mode: { m: 'ret', v: result.v }, K, R, A };
         return raise(result.e, site, scope, K, R, A);
     }
-    if (head.h === 'host') {
-        return { mode: { m: 'host', ns: head.ns, action: head.action, args, scope, site }, K, R, A };
-    }
-    // head.h === 'call': args[0] is the procedure, the rest are its arguments.
-    const fn = args[0]!;
-    const callArgs = args.slice(1);
-    if (fn.t !== 'closure') {
-        return raise(makeError('type-error', 'application requires a procedure'), site, scope, K, R, A);
-    }
-    return applyClosure(fn, callArgs, scope, K, R, A, site);
+    return { mode: { m: 'host', ns: head.ns, action: head.action, args, scope, site }, K, R, A };
 }
 
 // (apply f args): SPEC-CPI section 5.5. The machine handles this itself so
@@ -268,7 +283,7 @@ function applyClosure(
     // position (fn set to the closure's name, pos null) rather than carrying
     // the call site's position forward; the manager's note allows either.
     const newSite: Site = { fn: f.name, pos: null };
-    return evalDo(f.body, L1, K, R, newA, newSite);
+    return evalDo(f.body, 0, L1, K, R, newA, newSite);
 }
 
 // ---------------------------------------------------------------------------
@@ -307,13 +322,13 @@ function stepEval(x: Value, scope: Scope, site: Site, K: Kont, R: Env, A: Checkp
                 return { mode: { m: 'ret', v: closure }, K, R, A };
             }
             case 'do':
-                return evalDo(elements.slice(1), scope, K, R, A, site);
+                return evalDo(elements, 1, scope, K, R, A, site);
             case 'cond':
-                return evalCond(elements.slice(1), scope, K, R, A, site);
+                return evalCond(elements, 1, scope, K, R, A, site);
             case 'and':
-                return evalAndOr('and', elements.slice(1), scope, K, R, A, site);
+                return evalAndOr('and', elements, 1, scope, K, R, A, site);
             case 'or':
-                return evalAndOr('or', elements.slice(1), scope, K, R, A, site);
+                return evalAndOr('or', elements, 1, scope, K, R, A, site);
             case 'catch': {
                 const bodyExpr = elements[1]!;
                 const name = elements[2] as Sym;
@@ -331,21 +346,21 @@ function stepEval(x: Value, scope: Scope, site: Site, K: Kont, R: Env, A: Checkp
         }
 
         if (isCoreName(head.name)) {
-            return evalArgsThenApply({ h: 'core', op: head.name }, elements.slice(1), scope, K, R, A, site);
+            return evalArgsThenApply({ h: 'core', op: head.name }, elements, 1, scope, K, R, A, site);
         }
         if (isHostName(head.name)) {
             const idx = head.name.indexOf('::');
             const ns = head.name.slice(0, idx);
             const action = head.name.slice(idx + 2);
-            return evalArgsThenApply({ h: 'host', ns, action }, elements.slice(1), scope, K, R, A, site);
+            return evalArgsThenApply({ h: 'host', ns, action }, elements, 1, scope, K, R, A, site);
         }
         // An ordinary application whose head is a symbol: resolve it like any
         // other value, then apply. `elements` is already [head, ...args].
-        return evalArgsThenApply({ h: 'call' }, elements, scope, K, R, A, site);
+        return evalArgsThenApply({ h: 'call' }, elements, 0, scope, K, R, A, site);
     }
 
     // The head is itself an expression, e.g. `((lambda (x) x) 5)`.
-    return evalArgsThenApply({ h: 'call' }, elements, scope, K, R, A, site);
+    return evalArgsThenApply({ h: 'call' }, elements, 0, scope, K, R, A, site);
 }
 
 // ---------------------------------------------------------------------------
@@ -360,22 +375,22 @@ function stepRet(v: Value, K: Kont, R: Env, A: Checkpoint): State {
     switch (frame.k) {
         case 'let': {
             const newScope: Scope = { name: frame.name, value: v, next: frame.scope };
-            return evalDo(frame.rest, newScope, rest, R, A, frame.site);
+            return evalDo(frame.forms, frame.i, newScope, rest, R, A, frame.site);
         }
         case 'seq':
-            return evalDo(frame.rest, frame.scope, rest, R, A, frame.site);
+            return evalDo(frame.forms, frame.i, frame.scope, rest, R, A, frame.site);
         case 'cond': {
-            if (isFalse(v)) return evalCond(frame.rest, frame.scope, rest, R, A, frame.site);
-            if (frame.body.length === 0) return { mode: { m: 'ret', v }, K: rest, R, A };
-            return evalDo(frame.body, frame.scope, rest, R, A, frame.site);
+            if (isFalse(v)) return evalCond(frame.forms, frame.i, frame.scope, rest, R, A, frame.site);
+            if (frame.clause.length === 1) return { mode: { m: 'ret', v }, K: rest, R, A };
+            return evalDo(frame.clause, 1, frame.scope, rest, R, A, frame.site);
         }
         case 'and': {
             if (isFalse(v)) return { mode: { m: 'ret', v: FALSE }, K: rest, R, A };
-            return evalAndOr('and', frame.rest, frame.scope, rest, R, A, frame.site);
+            return evalAndOr('and', frame.forms, frame.i, frame.scope, rest, R, A, frame.site);
         }
         case 'or': {
             if (!isFalse(v)) return { mode: { m: 'ret', v }, K: rest, R, A };
-            return evalAndOr('or', frame.rest, frame.scope, rest, R, A, frame.site);
+            return evalAndOr('or', frame.forms, frame.i, frame.scope, rest, R, A, frame.site);
         }
         case 'catch':
             return { mode: { m: 'ret', v }, K: rest, R, A };
@@ -391,11 +406,11 @@ function stepRet(v: Value, K: Kont, R: Env, A: Checkpoint): State {
         case 'eval':
             return { mode: { m: 'eval', x: frame.x, scope: frame.scope, site: frame.site }, K: rest, R, A };
         case 'args': {
-            const newDone = [...frame.done, v];
-            if (frame.rest.length > 0) {
-                const nextForm = frame.rest[0]!;
+            const newDone: Done = { v, n: (frame.done?.n ?? 0) + 1, prev: frame.done };
+            if (frame.i < frame.forms.length) {
+                const nextForm = frame.forms[frame.i]!;
                 const nextFrame: Frame = {
-                    k: 'args', head: frame.head, done: newDone, rest: frame.rest.slice(1), scope: frame.scope, site: frame.site,
+                    k: 'args', head: frame.head, done: newDone, forms: frame.forms, i: frame.i + 1, scope: frame.scope, site: frame.site,
                 };
                 return {
                     mode: { m: 'eval', x: nextForm, scope: frame.scope, site: childSite(nextForm, frame.site) },
