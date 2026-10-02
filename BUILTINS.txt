@@ -143,6 +143,11 @@ Pairs and lists
 (apply f args)
     -> the result of applying the procedure f to the elements of the list
     args.
+(fold f acc xs)
+    -> f applied to acc and the first element of the list xs, then to that
+    result and the second, and so on, left to right; acc if xs is ().
+    (fold f a '(x y)) is (f (f a x) y). Costs one tick, plus one per
+    element besides the ticks f takes.
 
 Strings
 -------

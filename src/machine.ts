@@ -183,6 +183,9 @@ function applyHead(
         if (head.op === 'rethrow') {
             return applyRethrow(args[0]!, scope, K, R, A, site);
         }
+        if (head.op === 'fold') {
+            return foldNext(args[0]!, args[1]!, args[2]!, scope, K, R, A, site);
+        }
         const op = CORE.get(head.op)!;
         const result = op.fn(args);
         if (result.ok) return { mode: { m: 'ret', v: result.v }, K, R, A };
@@ -213,6 +216,25 @@ function applyApply(args: readonly Value[], scope: Scope, K: Kont, R: Env, A: Ch
         return raise(makeError('type-error', 'apply requires a procedure'), site, scope, K, R, A);
     }
     return applyClosure(f, arr, scope, K, R, A, site);
+}
+
+// (fold f acc xs): applies f to acc and the first element with a FoldK frame
+// on K; each value f returns comes back to the frame as the next acc. One
+// step per element besides f's own, and each step does bounded work. The
+// frame is rebuilt for every element, never updated: a parked continuation
+// may be unparked more than once.
+function foldNext(
+    f: Value, acc: Value, xs: Value, scope: Scope, K: Kont, R: Env, A: Checkpoint, site: Site
+): State {
+    if (f.t !== 'closure') {
+        return raise(makeError('type-error', 'fold requires a procedure'), site, scope, K, R, A);
+    }
+    if (xs.t === 'nil') return { mode: { m: 'ret', v: acc }, K, R, A };
+    if (xs.t !== 'pair') {
+        return raise(makeError('type-error', 'fold requires a proper list'), site, scope, K, R, A);
+    }
+    const frame: Frame = { k: 'fold', f, rest: xs.cdr, scope, site };
+    return applyClosure(f, [acc, xs.car], scope, pushFrame(K, frame), R, A, site);
 }
 
 // Applying a closure (SPEC-CPI section 7.3 "Applying", section 7.4 tail
@@ -357,6 +379,8 @@ function stepRet(v: Value, K: Kont, R: Env, A: Checkpoint): State {
         }
         case 'catch':
             return { mode: { m: 'ret', v }, K: rest, R, A };
+        case 'fold':
+            return foldNext(frame.f, v, frame.rest, frame.scope, rest, R, A, frame.site);
         case 'val':
             return { mode: { m: 'ret', v: frame.v }, K: rest, R, A };
         case 'throw':

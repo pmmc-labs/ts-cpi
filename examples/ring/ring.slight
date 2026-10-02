@@ -257,9 +257,6 @@
         (f (car xs))
         (for-each f (cdr xs))))
 
-(defun fold (f acc xs)
-    (if (nil? xs) acc (fold f (f acc (car xs)) (cdr xs))))
-
 (defun reverse (xs)
     (fold (lambda (acc x) (cons x acc)) () xs))
 

@@ -45,7 +45,7 @@
 (defun am-cell-code ()
     (role
         (require actor::recv)
-        (require am-bits fold length reverse second step-cell third)
+        (require am-bits length reverse second step-cell third)
 
         ; The one cell program. `path` holds the answers so far, newest first.
         (defun am-cell (path)

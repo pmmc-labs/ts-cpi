@@ -226,9 +226,6 @@
         (f (car xs))
         (for-each f (cdr xs))))
 
-(defun fold (f acc xs)
-    (if (nil? xs) acc (fold f (f acc (car xs)) (cdr xs))))
-
 (defun length (xs)
     (fold (lambda (n x) (+ n 1)) 0 xs))
 

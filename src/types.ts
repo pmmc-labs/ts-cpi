@@ -109,6 +109,9 @@ export type Frame =
     | { readonly k: 'and';   readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
     | { readonly k: 'or';    readonly rest: readonly Value[]; readonly scope: Scope; readonly site: Site }
     | { readonly k: 'catch'; readonly name: Sym; readonly handler: Value; readonly scope: Scope; readonly site: Site }
+    // FoldK: the procedure and the elements still to fold; the value it
+    // receives is the accumulator (see `fold` in DECISIONS.md).
+    | { readonly k: 'fold';  readonly f: Closure; readonly rest: Value; readonly scope: Scope; readonly site: Site }
     // Resumption frames (SPEC-CPI section 8): each discards the value it receives.
     | { readonly k: 'val';   readonly v: Value }
     // ThrowK also records the site and scope of the host request it answers, so

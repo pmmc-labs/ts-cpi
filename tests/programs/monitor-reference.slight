@@ -57,9 +57,6 @@
         (defun map1 (f xs)
             (if (nil? xs) () (cons (f (car xs)) (map1 f (cdr xs)))))
 
-        (defun fold (f acc xs)
-            (if (nil? xs) acc (fold f (f acc (car xs)) (cdr xs))))
-
         (defun nth (xs i)
             (if (= i 0) (car xs) (nth (cdr xs) (- i 1))))
 

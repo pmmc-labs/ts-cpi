@@ -423,6 +423,13 @@ ops.set('apply', {
     },
 });
 
+ops.set('fold', {
+    name: 'fold',
+    arity: 3,
+    // Like apply, handled by the machine, which keeps a FoldK frame on K.
+    fn: () => fail('type-error', 'fold must be handled by the machine'),
+});
+
 // 5.6 Strings
 
 ops.set('string-length', {

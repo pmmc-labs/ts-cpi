@@ -470,7 +470,7 @@ test('all core operations are in CORE map', () => {
         '=', '<', '<=', '>', '>=', 'eq?', 'not',
         'nil?', 'pair?', 'boolean?', 'integer?', 'float?', 'string?',
         'symbol?', 'procedure?', 'error?', 'address?', 'pid?', 'env?',
-        'cons', 'car', 'cdr', 'apply',
+        'cons', 'car', 'cdr', 'apply', 'fold',
         'string-length', 'string-ref', 'string-append', 'symbol->string', 'string->symbol',
         'integer->float', 'float->integer',
         'make-error', 'wrap-error', 'throw',

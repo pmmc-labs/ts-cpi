@@ -1,6 +1,6 @@
 ; Helpers shared by the Game of Life examples and the runner: lists, and
-; environments for processes. The language has cons, car, cdr, list and
-; append; everything else is here.
+; environments for processes. The language has cons, car, cdr, list, append
+; and fold; everything else is here.
 
 ; ---------------------------------------------------------------------------
 ; Environments for processes
@@ -27,13 +27,11 @@
 (defun second (xs) (car (cdr xs)))
 (defun third (xs) (car (cdr (cdr xs))))
 
-(defun length (xs)
-    (length-from xs 0))
+; A walk over a whole list is a fold: it costs one tick per element plus
+; the ticks of the procedure folded.
 
-(defun length-from (xs n)
-    (if (nil? xs)
-        n
-        (length-from (cdr xs) (+ n 1))))
+(defun length (xs)
+    (fold (lambda (n x) (+ n 1)) 0 xs))
 
 (defun list-ref (xs i)
     (if (= i 0)
@@ -44,9 +42,7 @@
     (reverse-onto xs ()))
 
 (defun reverse-onto (xs acc)
-    (if (nil? xs)
-        acc
-        (reverse-onto (cdr xs) (cons (car xs) acc))))
+    (fold (lambda (ys x) (cons x ys)) acc xs))
 
 ; (range 0 3) is (0 1 2).
 (defun range (from to)
@@ -57,32 +53,17 @@
         acc
         (range-down from (- i 1) (cons i acc))))
 
-; One pass, not in tail position: each cons waits on the continuation, which
-; lives on the heap, so long lists are fine. It is faster than building the
-; list backwards and reversing it.
+; Built backwards and reversed: from two elements on, two folds cost fewer
+; ticks than one recursive pass. f is applied to the elements in order.
 (defun map (f xs)
-    (if (nil? xs)
-        ()
-        (cons (f (car xs)) (map f (cdr xs)))))
+    (reverse (fold (lambda (ys x) (cons (f x) ys)) () xs)))
 
 (defun for-each (f xs)
-    (when (not (nil? xs))
-        (f (car xs))
-        (for-each f (cdr xs))))
+    (fold (lambda (r x) (f x)) () xs)
+    ())
 
 (defun filter (keep? xs)
-    (reverse (filter-onto keep? xs ())))
-
-(defun filter-onto (keep? xs acc)
-    (cond
-        ((nil? xs) acc)
-        ((keep? (car xs)) (filter-onto keep? (cdr xs) (cons (car xs) acc)))
-        (#true (filter-onto keep? (cdr xs) acc))))
-
-(defun fold (f acc xs)
-    (if (nil? xs)
-        acc
-        (fold f (f acc (car xs)) (cdr xs))))
+    (reverse (fold (lambda (ys x) (if (keep? x) (cons x ys) ys)) () xs)))
 
 (defun sum (xs)
     (fold + 0 xs))

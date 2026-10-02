@@ -112,6 +112,13 @@ The things to notice:
 
   `vector-set` copies the whole vector, so build a list and convert it with
   `list->vector` rather than setting elements one at a time.
+- **`fold` walks a list.** `(fold f acc xs)` applies `f` to `acc` and each
+  element in turn, left to right, and returns the last result:
+  `(fold + 0 (list 1 2 3))` is `6`. Each element costs one step of the
+  machine (a *tick*, section 4) besides what `f` takes, so a walk written as
+  a fold costs the same in every program. `map`, `filter`, `length` and
+  `reverse` in `examples/life/lib/lists.slight` are folds. A walk that stops
+  early, like `any?`, is still written as recursion.
 - **Only `#false` is false.** `()`, `0` and `""` are all true.
 - **Indent 4 spaces per open parenthesis**, as every example here does. The
   reader ignores layout; the people reading your code don't.

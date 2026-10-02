@@ -743,6 +743,65 @@ Found while building:
 1. **A first version cost 11% on the ring.** It dropped a mailbox's set of waiters when the set emptied, which meant a new set for every message. Keeping the waiters on the mailbox's entry, and each process's mailbox entry on the process, left no difference that runs could measure.
 2. **The dead-letter list keeps what it records,** addresses included: it is for tests, and nothing in the language reads it, but a program that keeps sending to closed mailboxes still grows it.
 
+### `fold` (2026-10-02)
+
+*Status.* Agreed and implemented 2026-10-02 (option A). Tests in `tests/fold.test.ts`.
+
+*Motivation.* A walk over a list cost whatever the program's own loop happened to cost. `fold` was defined four times (`examples/life/lib/lists.slight`, the gateway, the ring and `tests/programs/monitor-reference.slight`), and the ticks per element of the list procedures depended on how each one was written: 31 for a fold of `+`, 20 for the Life library's `length` and 31 for the gateway's, 27 for `map`, 48 for `filter`. ts-slight's evaluator has `fold/l` and `fold/r` as continuations, so a fold there costs one step per element besides the procedure's own.
+
+*Options.*
+
+- **A. `fold`, a left fold, as a core operation the machine handles** (recommended, and chosen), as it handles `apply`. `map`, `filter`, `length` and `reverse` stay library code, written on it.
+- B. A and `fold-right`, as in ts-slight. `map` and `filter` keep order without a `reverse` (about 11 ticks per element plus `f`'s for `map`, against 16), at the cost of a second frame and a continuation as deep as the list, which is also an error trace as long as the list.
+- C. No change, and one shared list library: the same cost in every program, but not a lower one.
+
+**Section 5.5, Pairs.** Add a row:
+
+| Signature | Result | Errors |
+| --- | --- | --- |
+| `(fold f acc xs)` | `acc` if `xs` is `()`. Otherwise `f` applied to `acc` and the first element, then to that result and the second, and so on, left to right: `(fold f a '(x y))` is `(f (f a x) y)`. | `type-error` unless `f` is a procedure and `xs` a proper list. An improper tail is found when the fold reaches it, after `f` has been applied to the elements before it. |
+
+**Section 7.1, Frames.** Add `FoldK(f, xs, L)`: a fold waiting for `f` to return. `xs` holds the elements not yet folded; `L` is the local scope of the `fold` application, for trace entries and pads like any other frame.
+
+**Section 7.3, Applying.** Add:
+
+| State | Top of K | Next |
+| --- | --- | --- |
+| Applying `fold` to `f`, `acc`, `()` | | `Ret(acc)` |
+| Applying `fold` to `f`, `acc`, `(x . xs)` | | Apply `f` to `(acc x)`, with `FoldK(f, xs, L)` pushed |
+| `Ret(v)` | `FoldK(f, (), L)` | `Ret(v)`, the frame popped |
+| `Ret(v)` | `FoldK(f, (x . xs), L)` | Apply `f` to `(v x)`, with `FoldK(f, xs, L)` in place of the frame |
+
+**Section 11.** Add: "A `fold` over n elements takes one step for its application, like any core operation, and n more besides the steps of `f`."
+
+Rationale:
+
+- **A cost the spec states.** One tick per element plus `f`'s, in any implementation. It holds however literally the rest of section 7.3 is counted (see the spec issue on canonical step counts), since it counts only the frame's own steps.
+- **Each step is still bounded.** `append` and `list` do linear work in one tick; `fold` is charged per element, so a quota still bounds the work between two steps.
+- **A frame, not a loop in the host.** `f` is CPI code: it may make host requests, be trapped, throw or be parked in the middle of a fold, and a frame on `K` handles all of these as any continuation does. An error in `f` has a trace entry at the `fold`.
+- **Built anew for each element.** ts-slight updates its fold frame in place. Here a parked continuation may be unparked more than once, so the frame is never updated.
+- **Left only.** Every walk over a whole list in the examples is a left fold or a `map` or `filter`, which are a left fold and a `reverse`. Walks that stop early (`any?`, `all?`, `member?`, `list-ref`) stay recursion.
+- **`(f acc xs)`,** the order every example already used, so no call changed. ts-slight has `(fold/l acc f xs)`.
+
+Implementation (ts-cpi):
+
+- `fold` is in `CORE_ARITY` with arity 3, and in `CORE` as a placeholder, like `apply`. `applyHead` hands it to `foldNext`, which `stepRet` also calls for a `fold` frame. The frame holds `f`, the rest of the list, and the scope and site of the application.
+- `fold` is now reserved, so the four definitions are gone, and `17-amb` and `19-tick-economy` no longer `require` it. `examples/life/lib/lists.slight` writes `length`, `reverse-onto`, `map`, `for-each` and `filter` on it. The gateway's and the ring's `length` and `reverse` already were; their `map` and `for-each` are unchanged.
+- No reference output changed, and the gateway test's ticks per endpoint are the same.
+
+Measured (ticks per element by counting steps; wall time for a list of 1,000, before and after):
+
+| Procedure | Ticks per element | Wall time |
+| --- | --- | --- |
+| `(fold + 0 xs)` | 31 → 6 | |
+| `length` | 20 → 6 | |
+| `reverse` | 22 → 6 | 2.9 → 0.9 ms |
+| `for-each` | 26 → 7 (identity `f`) | |
+| `map` | 27 → 17 (identity `f`) | 4.0 → 3.0 ms (`(+ x 1)`) |
+| `filter` | 48 → 24 | 5.5 → 3.0 ms |
+
+`map` now makes two folds and a call to `reverse`, so its fixed cost rose from about 12 ticks to 31: it costs more for a list of one element and less from two on. `filter` already reversed, and costs less for any list.
+
 ## Spec issues
 
 - A library that the CPI and its processes both use cannot be a role, because the CPI's environment comes from its files and a role's procedures resolve their globals through the environment of whoever runs them. Processes that need such a library get a role composed onto `environment::self`: they can see every CPI definition, and the host actions the library uses are neither declared nor checked by `environment::resolve`. Two ways to close it, both spec changes: read each loaded file as a role (open question 5 above), so the CPI's environment is a composition of library roles it can also give to processes; or add a projection, `(environment::select e names)`, so a process takes exactly the names its role requires. Found by migrating the examples (the CPI-Roles field notes). A plain projection was tried on Sep 27, 2026 and reverted (commit `d9d1cbf` and its revert): because library procedures call each other by name, every role had to list what its library calls reach in turn (18 names for version 08's universe), and a forgotten one surfaced only at run time, once as a supervisor restarting a failing worker forever.
