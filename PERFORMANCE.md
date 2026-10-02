@@ -314,7 +314,7 @@ its address (`DECISIONS.md`, "Reclaiming what nothing can name").
 
 ## Fewer allocations per step (Oct 2, 2026)
 
-Every step allocated more than it needed to. Three changes to the machine
+Every step allocated more than it needed to. Four changes to the machine
 cut that, and leave behavior and tick counts alone:
 
 - **Frames keep an index, not a copy.** The frames for `do`, `cond`,
@@ -329,33 +329,42 @@ cut that, and leave behavior and tick counts alone:
   change, because a parked continuation may be unparked more than once.
 - **A symbol or literal shares its parent's site.** Its site was a new
   copy of the parent's, with the same procedure and position.
+- **Heads are made once.** Every application made a new `Head`, and a host
+  request split its name into namespace and action again. There is now
+  one head for calls and one per core operation, and a host name's head is
+  made the first time the name is evaluated.
 
 Measured on a cloud container with Node 22.22, in interleaved runs of main
 (`18b7c33`, with `fold`) and the change:
 
 | `tools/bench/interpreter.slight` | Before | After |
 | --- | --- | --- |
-| Allocated in the whole run, summed from `node --trace-gc` | 19,500 MB | 13,365 MB (−31%) |
-| loop, median of three runs | 3,042 ms | 1,953 ms (−36%) |
-| `fib 22` | 130 ms | 73 ms (−44%) |
-| map 1000x200 | 642 ms | 486 ms (−24%) |
-| closures | 507 ms | 331 ms (−35%) |
-| strings | 433 ms | 292 ms (−33%) |
-| vectors | 560 ms | 383 ms (−32%) |
-| messages | 459 ms | 368 ms (−20%) |
-| All of it | 5,773 ms | 3,886 ms (−33%) |
+| Allocated in the whole run, summed from `node --trace-gc` | 19,502 MB | 12,946 MB (−34%) |
+| loop, median of three runs | 3,171 ms | 2,039 ms (−36%) |
+| `fib 22` | 160 ms | 67 ms (−58%) |
+| map 1000x200 | 613 ms | 365 ms (−40%) |
+| closures | 539 ms | 322 ms (−40%) |
+| strings | 456 ms | 256 ms (−44%) |
+| vectors | 597 ms | 299 ms (−50%) |
+| messages | 442 ms | 268 ms (−39%) |
+| All of it | 5,978 ms | 3,616 ms (−40%) |
 
+- **The short benchmarks vary most.** `fib 22` took 95 to 179 ms on main.
+  An earlier set of runs, before the heads change, gave −33% for all of it
+  (5,773 ms to 3,886).
 - **Allocation fell by about a third everywhere.** Driving the machine
-  directly, `fib 25` allocated 987 MB instead of 1,446, a million turns of
-  a tail-calling loop 3,783 MB instead of 5,531, and a non-tail recursion
-  100,000 deep 469 MB instead of 691.
+  directly, before the heads change, `fib 25` allocated 987 MB instead of
+  1,446, a million turns of a tail-calling loop 3,783 MB instead of 5,531,
+  and a non-tail recursion 100,000 deep 469 MB instead of 691.
 - **A deep continuation keeps less alive:** 362 bytes per level of that
   recursion instead of 522, measured with a forced collection at its
   deepest point.
+- **The heads are the smallest part:** 3% of the allocation (13,360 MB to
+  12,946), and about 4% of the time in six interleaved runs of each build,
+  within their spread.
 - **Time fell more than garbage collection explains.** Collection itself
   took about 64 ms of `fib 25` instead of 75: a scavenge costs what
   survives, and about as much survives as before. Most of the gain is the
   copying the slices and argument arrays did.
-- **What every step still allocates:** a new state and mode, a site each
-  time a list is evaluated, and a `Head` for each application, whose
-  namespace and action are split from the name every time.
+- **What every step still allocates:** a new state and mode, and a site
+  each time a list is evaluated.

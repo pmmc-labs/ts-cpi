@@ -10,7 +10,7 @@ import type {
 } from './types.ts';
 import { FALSE, NIL, TRUE, codeArray, isFalse, listToArray } from './values.ts';
 import { makeError } from './errors.ts';
-import { CORE_ARITY, isCoreName, isHostName } from './names.ts';
+import { CORE_ARITY, isHostName } from './names.ts';
 import { CORE } from './core.ts';
 import { lookup } from './env.ts';
 
@@ -155,6 +155,25 @@ function evalAndOr(
 // ---------------------------------------------------------------------------
 // Applications: args, core ops, host requests, closures (SPEC-CPI 7.3, 7.4)
 // ---------------------------------------------------------------------------
+
+// Heads are made once, not per application: one for calls, one per core
+// operation, and one per host name the first time it is evaluated, which
+// splits the name into namespace and action once. Like the symbol table,
+// which holds every such name already, hostHeads only grows.
+const CALL_HEAD: Head = { h: 'call' };
+const CORE_HEADS = new Map<string, Head>();
+for (const op of CORE_ARITY.keys()) CORE_HEADS.set(op, { h: 'core', op });
+const hostHeads = new Map<string, Head>();
+
+function hostHead(name: string): Head {
+    let head = hostHeads.get(name);
+    if (head === undefined) {
+        const idx = name.indexOf('::');
+        head = { h: 'host', ns: name.slice(0, idx), action: name.slice(idx + 2) };
+        hostHeads.set(name, head);
+    }
+    return head;
+}
 
 // Evaluates forms[i..] left to right, then applies `head` to their values.
 function evalArgsThenApply(
@@ -345,22 +364,20 @@ function stepEval(x: Value, scope: Scope, site: Site, K: Kont, R: Env, A: Checkp
                 break;
         }
 
-        if (isCoreName(head.name)) {
-            return evalArgsThenApply({ h: 'core', op: head.name }, elements, 1, scope, K, R, A, site);
+        const core = CORE_HEADS.get(head.name);
+        if (core !== undefined) {
+            return evalArgsThenApply(core, elements, 1, scope, K, R, A, site);
         }
         if (isHostName(head.name)) {
-            const idx = head.name.indexOf('::');
-            const ns = head.name.slice(0, idx);
-            const action = head.name.slice(idx + 2);
-            return evalArgsThenApply({ h: 'host', ns, action }, elements, 1, scope, K, R, A, site);
+            return evalArgsThenApply(hostHead(head.name), elements, 1, scope, K, R, A, site);
         }
         // An ordinary application whose head is a symbol: resolve it like any
         // other value, then apply. `elements` is already [head, ...args].
-        return evalArgsThenApply({ h: 'call' }, elements, 0, scope, K, R, A, site);
+        return evalArgsThenApply(CALL_HEAD, elements, 0, scope, K, R, A, site);
     }
 
     // The head is itself an expression, e.g. `((lambda (x) x) 5)`.
-    return evalArgsThenApply({ h: 'call' }, elements, 0, scope, K, R, A, site);
+    return evalArgsThenApply(CALL_HEAD, elements, 0, scope, K, R, A, site);
 }
 
 // ---------------------------------------------------------------------------
