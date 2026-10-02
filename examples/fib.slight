@@ -1,0 +1,10 @@
+
+(defun fib (n)
+    (if (< n 2) n
+        (+ (fib (- n 1)) (fib (- n 2)))))
+
+(defun main ()
+    (let start (host::now))
+    (IO::print "fib(27) = " (fib 27))
+    (IO::print (- (host::now) start) "ms")
+)
